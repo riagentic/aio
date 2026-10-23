@@ -1,3 +1,4 @@
+import { checkPeerTypes } from "./peer-describe.ts";
 import { produce } from "immer";
 import {
   bakedElectronClient,
@@ -134,6 +135,7 @@ import {
   appDirs,
   checkUnpackLocation,
   ensureAppDirs,
+  externalDbPath,
   homeRequested,
   registerAppDirs,
   registeredProfile,
@@ -266,6 +268,7 @@ export type {
   AioConfig,
   AioUser,
   CellsConfig,
+  ResolvePeerFn,
   ResolveUserFn,
   UiConfig,
 } from "./aio-types.ts";
@@ -618,6 +621,9 @@ async function _runPhases<S, A, E>(
         aio: VERSION,
         app: await _appVersion(),
         profile: registeredProfile(appId),
+        // Where the database lives when `dbPath` moved it out of data/ —
+        // the only record `am backup` / `am restore` have of it.
+        dbPath: externalDbPath(_dirs, dbPathOf(cli, config)?.value),
       });
     };
   }
@@ -1476,7 +1482,7 @@ async function _runPhases<S, A, E>(
       const was = from[cell];
       const now = (replayed as Record<string, unknown>)[cell];
       if (!_isRecord(was) || !_isRecord(now) || now === was) continue;
-      const slice = _unpersistedFromBoot(filter, was, now);
+      const slice = _unpersistedFromBoot(cell, filter, was, now);
       if (slice !== now) {
         out ??= { ...(replayed as Record<string, unknown>) };
         out[cell] = slice;
@@ -1595,6 +1601,7 @@ async function _runPhases<S, A, E>(
       // clean restart). Only what the persist filter keeps off disk comes
       // from the live slice: the line never had it to say.
       return _unpersistedFromBoot(
+        cell,
         config._cellPersist?.[cell] ?? "all",
         live,
         _restartedSlice(cell, disk),
@@ -1767,11 +1774,17 @@ async function _runPhases<S, A, E>(
    *  rule in `state/cell-persist-filter.ts`, which the dev checkpoint restore
    *  reads too. */
   function _unpersistedFromBoot(
+    cell: string,
     filter: import("../state/cell-types.ts").CellFieldFilter,
     was: Record<string, unknown>,
     now: Record<string, unknown>,
   ): Record<string, unknown> {
-    return unpersistedFromBase(filter, was, now);
+    return unpersistedFromBase(
+      filter,
+      was,
+      now,
+      (initialState as Record<string, unknown>)[cell],
+    );
   }
 
   /** The tail minus the lines that write only a quarantined sync cell: its
@@ -2696,6 +2709,13 @@ async function _runPhases<S, A, E>(
         },
       },
     });
+  /** `app.cells.disable`'s state reset (`cell-compose-registry.ts` marks it
+   *  `reset`) — a write like any other, unlike the shutdown's `__destroy`. */
+  const _isDisableReset = (action: A): boolean => {
+    const a = action as { type?: unknown; payload?: { reset?: unknown } };
+    return typeof a.type === "string" && a.type.endsWith(":__destroy") &&
+      a.payload?.reset === true;
+  };
   const afterActionHook = (prev: S, next: S, action: A): void => {
     if (action !== null && typeof action === "object") {
       _afterSeen.add(action as object);
@@ -2799,8 +2819,12 @@ async function _runPhases<S, A, E>(
       // an async method's `__set` batch — is durable NOWHERE (sync cells are
       // excluded from KV), so fold current state into the cell's sync
       // snapshot. Without this, a restart silently rewound every server-origin
-      // write since the last compaction.
-      if (method.startsWith("__") && !method.startsWith("__set")) return;
+      // write since the last compaction. `app.cells.disable`'s reset is such
+      // a write: skipped, a restart brought the data back.
+      if (
+        method.startsWith("__") && !method.startsWith("__set") &&
+        !_isDisableReset(action)
+      ) return;
       if ((action as { _syncOp?: boolean })._syncOp) {
         // The op is durable in the op-log already; its LISTENERS' reactions
         // are in no log at all — journal them (as data, never the op).
@@ -2868,10 +2892,13 @@ async function _runPhases<S, A, E>(
     // also commit several times via `s.$commit()`). `type` stays the action
     // that really ran, so replay re-reduces exactly what happened.
     //
-    // The rest of the `__` family stays out on purpose: `__init`/`__destroy`
-    // are lifecycle, and replaying `__init` would reset a cell to its initial
-    // state ON TOP of the restored snapshot — recovery that destroys data.
-    // `__exec`/`__error` carry machine transitions, not the app's writes.
+    // The rest of the `__` family stays out on purpose: `__init` is
+    // lifecycle, and replaying it would re-run a boot step ON TOP of the
+    // restored snapshot. `__exec`/`__error` carry machine transitions, not
+    // the app's writes. `app.cells.disable`'s `__destroy` IS one (the
+    // shutdown's is teardown, and a breaker trip's keeps the state): a reset
+    // left out of the journal came back after a crash under the writes made
+    // since — `["a"]`, disable+enable, `add("b")`, SIGKILL → `["a","b"]`.
     //
     // A `worker: true` cell's commits are the other exception. Its method runs
     // in the worker and never reaches this hook; only the patches it commits
@@ -2884,7 +2911,10 @@ async function _runPhases<S, A, E>(
     const isWriteSet = isWriteSetAction(t);
     const payload = (action as { payload?: unknown }).payload;
     const workerCell = workerPatchCell(t, payload);
-    if (method.startsWith("__") && !isWriteSet && workerCell === undefined) {
+    if (
+      method.startsWith("__") && !isWriteSet && workerCell === undefined &&
+      !_isDisableReset(action)
+    ) {
       return;
     }
     // Who wrote it — from the ONE decider (diagnostics/action-kind.ts), which
@@ -4352,6 +4382,15 @@ async function _runPhases<S, A, E>(
       token,
       users,
       resolveUser: _resolveUser,
+      ...(config.peerTypes !== undefined
+        ? { peerTypes: checkPeerTypes(config.peerTypes) }
+        : {}),
+      ...(config.resolvePeer
+        ? {
+          resolvePeer: (p: { app: string; pid: number }) =>
+            config.resolvePeer!(p, state),
+        }
+        : {}),
       sessionResolver,
       // Every source of "this socket's user is not who it was" the boot has.
       // Built from the STORES, not from `authFlows` — `authFlows` exists only
@@ -4743,6 +4782,7 @@ async function _runPhases<S, A, E>(
       singletonMode,
       childWindows: !!config.childWindows,
       electron: config.electron,
+      splash: config.splash,
       client,
       useElectron,
       isHeadless,

@@ -204,6 +204,13 @@ const REGISTRY: Record<string, [string, Class, string][]> = {
       "there; committed state is frozen in both modes",
     ],
   ],
+  "src/ui/styles.ts": [
+    [
+      "__aioDev !== true) return;",
+      "a",
+      "a one-time dev hint that the kit renders unstyled; prod renders the same",
+    ],
+  ],
   "src/ui/css.ts": [
     [
       "__aioDev === true) { throw new Error(msg)",

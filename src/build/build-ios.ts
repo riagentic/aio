@@ -234,7 +234,11 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
     // The title's letter, the appId's colour — what every other target draws.
     await Deno.writeFile(
       iconDest,
-      await appIconPng(appIconLabel(appTitle, binaryName), 1024, binaryName),
+      await appIconPng(
+        appIconLabel(appTitle, cfg.appId ?? binaryName),
+        1024,
+        cfg.hue ?? cfg.appId ?? binaryName,
+      ),
     );
     console.log(`${OK} icon (generated monogram, 1024×1024)`);
   }

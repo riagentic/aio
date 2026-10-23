@@ -140,6 +140,11 @@ export interface PersistenceConfig {
    *  EVERY persisted document verbatim, so user data is never dropped because
    *  a build stopped declaring its cell. */
   orphanCells?: Record<string, unknown>;
+  /** Called by `dropOrphanCell` once `cell` is out of every future write:
+   *  what the next save must also take out of the store with it (the
+   *  journal's held lines — see `journalHeldCellsKey`). That save plans
+   *  `planPersisted` even when its seq is already the stored watermark. */
+  onOrphanDropped?: (cell: string) => void;
   /** Top-level keys present in the persisted snapshot at boot. Seeds the
    *  multi-mode delete tracking, so a cell whose slice onRestore deliberately
    *  CONSUMED (migrated and deleted) has its row removed on the first flush
@@ -758,8 +763,14 @@ export function createPersistenceManager(
    *  SAME transaction as the snapshot. Empty when the journal is off or when
    *  the stored mark already says this seq. */
   let _committedWm = 0;
+  /** `dropOrphanCell` calls so far, and how many a committed plan covered:
+   *  a drop's save plans even at the stored watermark (`onOrphanDropped`). */
+  let _dropGen = 0, _dropGenCommitted = 0;
   function _planWatermark(seq: number): SkvStmt[] {
-    if (!cfg.planPersisted || seq === _committedWm) return [];
+    if (
+      !cfg.planPersisted ||
+      (seq === _committedWm && _dropGen === _dropGenCommitted)
+    ) return [];
     return cfg.planPersisted(seq);
   }
 
@@ -1123,6 +1134,7 @@ export function createPersistenceManager(
       const stamp = _versionStamp(written, kept);
       const planned = asyncDb !== null && rows !== null;
       const wm = planned && whole ? _planWatermark(seq) : [];
+      const dropGen = _dropGen;
       return {
         stmts: rows === null ? null : [
           ...rows,
@@ -1144,7 +1156,7 @@ export function createPersistenceManager(
           }
           if (planned) stamp.commit(); // stamped inside the transaction above
           else await _stampVersions(written, kept);
-          if (wm.length) _committedWm = seq;
+          if (wm.length) [_committedWm, _dropGenCommitted] = [seq, dropGen];
           // The watermark advances only on a committed write of EVERY cell.
           if (whole) cfg.onPersisted?.(seq);
           log.debug(
@@ -1191,6 +1203,7 @@ export function createPersistenceManager(
     const stamp = _versionStamp(written, kept);
     const planned = asyncDb !== null && row !== null;
     const wm = planned && whole ? _planWatermark(seq) : [];
+    const dropGen = _dropGen;
     return {
       stmts: row === null ? null : [
         ...row,
@@ -1209,7 +1222,7 @@ export function createPersistenceManager(
         }
         if (planned) stamp.commit(); // stamped inside the transaction above
         else await _stampVersions(written, kept);
-        if (wm.length) _committedWm = seq;
+        if (wm.length) [_committedWm, _dropGenCommitted] = [seq, dropGen];
         // The watermark advances only on a committed write of EVERY cell.
         if (whole) cfg.onPersisted?.(seq);
         log.debug("persist: saved single");
@@ -1710,6 +1723,8 @@ export function createPersistenceManager(
       const droppable = Object.keys(orphans).filter((k) => !k.startsWith("__"));
       if (!droppable.includes(cell)) return droppable;
       delete orphans[cell];
+      cfg.onOrphanDropped?.(cell);
+      _dropGen++; // the save that drops it plans what that hook queued
       return true;
     },
     _windowStats: () => ({ ..._passes }),

@@ -113,10 +113,10 @@ with "Failed to resolve module specifier". Move it into a server cell's method
 and call that; if the path really never runs in the browser, say so with
 `// aio-ok: server-only — <reason>` on the line or the line above.
 
-`deno task lint:aio` flags a static server-only symbol in a cell file with the
-exact `file:line` + fix, and the dev blank-screen guard now prints a teachable
-hint for the runtime error. (For a cleaner boundary, keep DB code in a
-`*.server.ts` module per rule 2.)
+`deno task lint` (aiol, in a scaffolded app) flags a static server-only symbol
+in a cell file with the exact `file:line` + fix, and the dev blank-screen guard
+now prints a teachable hint for the runtime error. (For a cleaner boundary, keep
+DB code in a `*.server.ts` module per rule 2.)
 
 For a file you can't rename, the fallback is a dynamic import with the path
 broken by a variable — esbuild statically resolves even plain dynamic imports,

@@ -980,6 +980,10 @@ export const manager = cell("manager", {
       const id = proj.id;
       const path = proj.path;
       const src = (source ?? s.logSource) as LogSource;
+      // A stopped app has no lock: its last run names its log dir — without
+      // it a crashed app's Logs read "no log found" over its crash log.
+      // Plain, before any await (`proj` is a live draft).
+      const ident = plain(proj.running ?? proj.lastRun ?? null);
       s.logSource = src;
       s.logLoading = true;
       s.logError = null;
@@ -991,8 +995,8 @@ export const manager = cell("manager", {
           path,
           src,
           500,
-          proj.running?.appId ?? null,
-          proj.running?.home ?? null,
+          ident?.appId ?? null,
+          ident?.home ?? null,
         );
         if (s.selectedId !== id) return;
         s.logPath = r.path;
@@ -1182,6 +1186,9 @@ export const manager = cell("manager", {
     async start(s, key: string) {
       const proj = findProject(s.projects, key);
       const path = proj?.path ?? key;
+      // Before any await (`proj` is a live draft): a headless client the
+      // project declares — `browser` was forced on a server-only app.
+      const declared = proj?.meta.target;
       const refusal = await refuseSelf(proj, path);
       if (refusal) {
         s.actionMsg = refusal;
@@ -1189,11 +1196,12 @@ export const manager = cell("manager", {
       }
       const name = path.split("/").pop();
       s.actionMsg = `starting ${name}…`;
-      const { startApp, awaitBoot, pidsAt } = await import(
+      const { startApp, awaitBoot, pidsAt, launchClient } = await import(
         "./server/proc.server.ts"
       );
+      const client = launchClient(undefined, declared);
       const before = await pidsAt(path);
-      const r = await startApp(path, "browser");
+      const r = await startApp(path, client);
       if (!r.ok) {
         s.actionMsg = `start failed: ${r.error}`;
         return;
@@ -1266,15 +1274,17 @@ export const manager = cell("manager", {
       const path = proj?.path ?? key;
       const name = path.split("/").pop();
       const running = proj?.running ? plain(proj.running) : null;
+      const declared = proj?.meta.target;
       const heldBy = await refuseHold(running);
       if (heldBy) {
         s.actionMsg = heldBy;
         return;
       }
       s.actionMsg = `restarting…`;
-      const { startApp, stopApp, awaitBoot, awaitDown, pidsAt } = await import(
-        "./server/proc.server.ts"
-      );
+      const { startApp, stopApp, awaitBoot, awaitDown, pidsAt, launchClient } =
+        await import("./server/proc.server.ts");
+      // THIS instance's client again — `browser` was forced on every restart.
+      const client = launchClient(running?.client, declared);
       if (running) {
         const { appId, port, pid } = running;
         await stopApp(port, appId, pid);
@@ -1291,7 +1301,7 @@ export const manager = cell("manager", {
       // Boot the SAME instance again: a profile instance restarted without
       // its profile comes back as the default one.
       const before = await pidsAt(path);
-      const r = await startApp(path, "browser", running?.profile, {
+      const r = await startApp(path, client, running?.profile, {
         home: running?.home,
         appId: running?.appId,
       });

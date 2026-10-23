@@ -21,6 +21,7 @@ import { isStandalone, resolveAppDir, resolveEntry } from "./config-rules.ts";
 export { isStandalone, resolveAppDir, resolveEntry };
 import { resolveMacHost } from "./dmg.ts";
 import { resolveSplash } from "./splash.ts";
+import { declaredHue } from "./app-icon.ts";
 import { type SplashSpec, splashWithVersion } from "../electron/splash.ts";
 import { isValidBundleId } from "./build-ios.ts";
 // The bundle-id shape rule is Apple's, and iOS already owns its one copy.
@@ -249,6 +250,16 @@ export interface BuildConfig {
   // App identity
   binaryName: string;
   appTitle: string | undefined;
+  /** deno.json `hue` — the identity colour chosen instead of hashed from
+   *  `binaryName` (`declaredHue`). Every generated icon, theme and splash
+   *  reads `hue ?? appId ?? binaryName`. */
+  hue?: number;
+  /** deno.json `appId`, slugged — the id the binary RUNS as whatever its file
+   *  is named (the fleet names files by `title`, else the folder), so the key
+   *  every generated icon, theme and splash hashes and the monogram's letter
+   *  falls back to, exactly as the runtime theme and dev window icon do.
+   *  Absent: `binaryName` is that id. */
+  appId?: string;
   /** A macOS host reachable over SSH (`build.macos.host`, else
    *  `$AIO_MACOS_SSH`) that has `hdiutil`, so a Linux/Windows build can still
    *  produce a real `.dmg`. Null means "this host cannot, and none is
@@ -518,9 +529,21 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   }
   // `build.splash` — checked on EVERY build (a key validated only when it
   // fires is a typo that ships), its image included.
+  // deno.json `hue` — refused here, on every build, rather than drawn wrong.
+  let hue: number | undefined;
+  try {
+    hue = declaredHue(mainConfig);
+  } catch (e) {
+    console.error(`${NO} ${(e as Error).message}`);
+    Deno.exit(1);
+  }
+  const declaredAppId = typeof mainConfig.appId === "string" &&
+      mainConfig.appId
+    ? slugify(mainConfig.appId)
+    : undefined;
   const splashDecl = resolveSplash(mainConfig, {
     root,
-    appId: binaryName,
+    appId: hue ?? declaredAppId ?? binaryName,
     read: (p) => {
       try {
         return Deno.readFileSync(p);
@@ -528,6 +551,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
         return null; // aio-ok: the resolver names the missing file
       }
     },
+    warn,
   });
   if ("error" in splashDecl) {
     console.error(`${NO} ${splashDecl.error}`);
@@ -765,6 +789,8 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
         true,
     binaryName,
     appTitle,
+    hue,
+    ...(declaredAppId ? { appId: declaredAppId } : {}),
     macosHost,
     windowsShortcut,
     electronRuntime: runtimeDecl.mode,

@@ -183,7 +183,11 @@ export type ToWorker =
    *  run the cell's own registry here, so `onDestroy`/`onInit` and the state
    *  reset happen on the thread that owns the cell. `disable` is answered with
    *  `disabled`. */
-  | { t: "disable" }
+  | {
+    t: "disable";
+    /** The circuit breaker's trip: no state reset (cell-compose-registry). */
+    keep?: boolean;
+  }
   | { t: "enable" }
   /** Graceful stop — the worker aborts its in-flight methods, streams their
    *  final writes home as patches, then acks with `closed`. */

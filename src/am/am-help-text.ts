@@ -336,6 +336,7 @@ Inspect:
   surface --rects         MEASURE the layout — x/y/w/h per element, so "it looks fine" becomes "the Stage is 6886px tall". Needs a real client; a server render refuses rather than report 0x0
   trigger <idx> <path> <action> [text]  Drive the live UI (click/type/setValue/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI; path "window" drives an onGlobalKey binding
                           type APPENDS to the field, setValue REPLACES it (as in testUI)
+  trigger|surface --wait-client[=ms]  wait (default 10000) for a UI client to connect — right after a reload there may briefly be none
   shot [n] [--out=F.png] [--full]  SCREENSHOT (PNG) of the live Electron window via CDP — the app
                           must run with --cdp (AIO_CDP=1 does the same unless the app
                           sets electron: { ignoreDebugEnv: true }); --json → {file,bytes,url}
@@ -367,6 +368,10 @@ Inspect:
   where <file>            Which execution context this file runs in, and WHY —
                           the import chain from the UI entry, from the same
                           module graph the dev server walks
+  peer <appId|url> [--types[=<file>]]  What another RUNNING aio app lets a
+                          caller do (cells, methods, args), asked live; --types
+                          prints the types it publishes (aio.run({ peerTypes })),
+                          --types=<file> saves them for typed peer() calls
   check                   Does the client graph BUILD? \`deno check\` type-checks
                           but does not bundle, and in aio those differ: a
                           server-only import into a cell type-checks and then

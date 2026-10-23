@@ -49,6 +49,7 @@ import { clearPending, readPending } from "../server/updates-apply.ts";
 import type { PendingUpdate } from "../server/updates-apply.ts";
 import { aioHome, cmdUpdate } from "./am-cmd-meta.ts";
 import { appNameError, reservedAppNameError } from "./am-utils.ts";
+import { stopCommandFor } from "./am-cmd-status.ts";
 
 /** Deleting an app's DATA is the one step with no way back — `~/.<appId>/`
  *  holds state, logs, keys and user files, and no reinstall returns them. So
@@ -464,7 +465,11 @@ export async function cmdRemove(
         (otherRoot
           ? `      it runs under another apps dir, ${otherRoot}: am stop ` +
             `--app=${name} with that AIO_APPS_DIR\n`
-          : `      am stop --app=${name}\n`) +
+          // THIS instance's stop: one booted with --home/--profile is not
+          // the one a bare `am stop --app=<name>` reaches ("not running").
+          : `      ${
+            stopCommandFor(running, { defaultHome: appHome(name) })
+          }\n`) +
         `  or re-run with --force to remove it anyway`,
       mode,
     );
@@ -800,6 +805,18 @@ export async function cmdUpgrade(
   // a distinction no one can guess from the words, only from having been told.
   // `am update` is gone (alpha70); the CLI names this verb when it is typed.
   if (!name) return await cmdUpdate([], flags);
+  // A flag is not an object. `am upgrade --dry-run` fell through to the
+  // app-name check and answered "takes the NAME of an installed app, never a
+  // path" — false twice: the word was a flag, and a checkout path IS taken.
+  if (name.startsWith("-")) {
+    outError(
+      `am upgrade: unknown flag ${name} — it takes none. ` +
+        `am upgrade (am itself) · am upgrade <app> (an installed app) · ` +
+        `am upgrade <checkout-dir> (am from that checkout)`,
+      mode,
+    );
+    Deno.exit(1);
+  }
   if (isCheckoutArg(name)) return await cmdUpdate([name], flags);
   // Same reason as `am remove`: this name reaches installedAppPaths/appDirs
   // and, through run.sh, an install path.
@@ -859,15 +876,14 @@ export async function cmdUpgrade(
     );
     Deno.exit(1);
   }
-  if (running) {
+  if (running && mode !== "json") {
     // Not a refusal: the swap is a symlink move, so it is safe. But the
     // process keeps running the OLD artifact until it restarts, and someone
-    // who does not know that will report the upgrade as broken.
+    // who does not know that will report the upgrade as broken. (In JSON it
+    // rides on the ONE answer below: a second object made stdout unparseable.)
     out(
-      mode === "json"
-        ? { warning: "running", pid: running.pid }
-        : `note: "${name}" is running (pid ${running.pid}) — it keeps the old ` +
-          `version until you restart it`,
+      `note: "${name}" is running (pid ${running.pid}) — it keeps the old ` +
+        `version until you restart it`,
       mode,
     );
   }
@@ -896,14 +912,21 @@ export async function cmdUpgrade(
     prefix: `aio-upgrade-${name}-`,
   });
   const up = upgradeCommand(runSh, rec.source, local);
-  let p: Deno.CommandOutput;
+  let p: Deno.CommandStatus;
   try {
-    p = await new Deno.Command(up.cmd, {
+    // --json: stdout is the ONE answer. run.sh's progress goes to stderr, or
+    // `am upgrade <app> --json | jq` read forty lines of prose first.
+    const child = new Deno.Command(up.cmd, {
       args: up.args,
       cwd: work,
-      stdout: "inherit",
+      stdout: mode === "json" ? "piped" : "inherit",
       stderr: "inherit",
-    }).output();
+    }).spawn();
+    if (mode === "json") {
+      const toStderr = Deno.stderr.writable; // aio-ok: raw — run.sh's own output, as `inherit` was
+      await child.stdout.pipeTo(toStderr, { preventClose: true });
+    }
+    p = await child.status;
   } finally {
     // The clone is a whole build tree, and the artifact outlives it (run.sh
     // installs to the install root): left, every upgrade kept one in $TMPDIR.
@@ -922,7 +945,12 @@ export async function cmdUpgrade(
   const after = (await readRecord(name))?.version;
   out(
     mode === "json"
-      ? { upgraded: name, from: before ?? null, to: after ?? null }
+      ? {
+        upgraded: name,
+        from: before ?? null,
+        to: after ?? null,
+        ...(running ? { warning: "running", pid: running.pid } : {}),
+      }
       : after && before && after !== before
       ? `✓ ${name} ${before} → ${after}`
       : `✓ ${name} reinstalled${after ? ` (${after})` : ""}`,

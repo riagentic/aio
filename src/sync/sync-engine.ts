@@ -891,6 +891,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   // values instead of keeping its own.
   const _nondetWarned = new Set<string>();
   const _resyncWanted = new Set<string>();
+  /** The over-the-limit request envelope was said (requestSync). */
+  let _warnedEnvelope = false;
   // Cells a re-sync was ASKED for, with the id of the last request that
   // carried the ask — kept until a response to that request (or a later one)
   // lands. The ask used to be consumed when the request was sent, so one that
@@ -988,6 +990,24 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     const current = statuses.get(cell);
     if (!current) return;
     statuses.set(cell, { ...current, ...patch });
+  }
+
+  /** A page that boots OFFLINE shows the queue a previous page load left.
+   *  Online, the catch-up's rebase paints it; offline nothing did, so a
+   *  reload without a connection (a PWA from its cache, a dropped Wi-Fi) hid
+   *  every unsent change — and counted none of them pending — until the next
+   *  local call or a reconnect. Only a cell no rebase has painted yet: after
+   *  that the view already holds the queue. */
+  async function showQueued(): Promise<void> {
+    for (const cell of Object.keys(deps.cells)) {
+      if (_lastRebase.has(cell)) continue;
+      await withLock(cell, async () => {
+        if (_lastRebase.has(cell)) return;
+        if ((await deps.buffer.getUnconfirmed(cell)).length > 0) {
+          await rebaseCell(cell);
+        }
+      });
+    }
   }
 
   /** Serialize async work per cell to prevent interleaved state. */
@@ -1764,6 +1784,20 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           confirmed: false,
           _clientTs: Date.now(),
         };
+        // A frame over the server's limit is dropped there unread: queued, this
+        // op was never acked, and every catch-up carried it, was dropped, and
+        // was asked again by the watchdog — the cell took no peer change and
+        // confirmed none of its own, for good, while this call said success.
+        const frame = enc("op", { id, hlc, cell, action, payload });
+        const limit = peerHello()?.maxMessageBytes;
+        if (limit !== undefined && frame.length > limit) {
+          throw new Error(
+            `[sync] ${cell}:${action} was refused — its op is ${frame.length} ` +
+              `bytes, over the server's ${limit}-byte frame limit, so it could ` +
+              `never reach the server. Store less per call, or raise it with ` +
+              `aio.run({ wsLimits: { maxMessageBytes: N } }).`,
+          );
+        }
 
         // ONE `add`. The buffer makes room itself before it refuses (prunes
         // confirmed ops, evicts stale ones — op-buffer.ts) and fires
@@ -1850,7 +1884,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         // would reach the server — and be applied — ahead of changes the user
         // made before it. It is in the buffer, so the flush carries it.
         if (online && !_flushing) {
-          sendOpPaced(enc("op", { id, hlc, cell, action, payload }), id);
+          sendOpPaced(frame, id);
         }
       });
     },
@@ -2408,7 +2442,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     },
 
     async requestSync() {
-      if (!online) return; // don't send while offline
+      if (!online) return showQueued(); // don't send while offline
       const cells: Record<
         string,
         { lastHlc: HLC | null; lastServerTs?: number }
@@ -2425,6 +2459,52 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         if (ownOpsTakenElsewhere(cell, unconfirmed)) _resyncWanted.add(cell);
         allPending.push(...unconfirmed.slice(0, SYNC_DEFAULTS.pendingCap));
         updateStatus(cell, { status: "syncing" });
+      }
+
+      // A queued op that does not fit the server's frame limit even alone (made
+      // offline before this server's hello, or the limit was lowered): it went
+      // out first in every slice, the server dropped the frame unread, and the
+      // flush never moved past it. It can never be delivered — refuse it, loud.
+      const limit = peerHello()?.maxMessageBytes;
+      if (limit !== undefined && allPending.length > 0) {
+        const base = enc("sync-req", {
+          clientId: deps.clientId,
+          reqId: _reqSeq + 1,
+          session: _session,
+          sessionKey: _sessionKey,
+          cells,
+          pendingOps: [],
+          pushPatch: true,
+          ...(_resyncWanted.size > 0 ? { resync: [..._resyncWanted] } : {}),
+        }).length;
+        // The request is over the limit with NO op in it (many sync cells,
+        // a low limit): no op is to blame, so none is refused — dropping
+        // small changes for good would be worse than the stall. Said once.
+        if (base >= limit) {
+          if (!_warnedEnvelope) {
+            _warnedEnvelope = true;
+            log.warn(
+              "sync",
+              `a catch-up request is ${base} bytes before any change in it, ` +
+                `over the server's ${limit}-byte frame limit — nothing can ` +
+                `sync until it is raised: aio.run({ wsLimits: ` +
+                `{ maxMessageBytes: N } })`,
+            );
+          }
+        } else {
+          for (const op of [...allPending]) {
+            const n = JSON.stringify(op).length;
+            if (base + n <= limit) continue;
+            allPending.splice(allPending.indexOf(op), 1);
+            await engine.handleRejection(
+              op.cell,
+              op.id,
+              `too-large: this change is ${n} bytes, over the server's ` +
+                `${limit}-byte frame limit, so it can never be sent — raise it ` +
+                `with aio.run({ wsLimits: { maxMessageBytes: N } })`,
+            );
+          }
+        }
       }
 
       // The slice this request carries (see SYNC_REQ_BUDGET). Always at least
@@ -2448,7 +2528,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
             updateStatus(cell, { status: "offline" });
           }
         }
-        return;
+        return showQueued();
       }
       const more = allPending.length > slice.length;
       _flushing = more;

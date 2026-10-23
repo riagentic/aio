@@ -194,13 +194,15 @@ export function _cancelTargetPrefixes(
   return out;
 }
 
-/** Track an in-flight async method call. Returns an untrack fn. */
+/** Track an in-flight async method call. Returns an untrack fn; its
+ *  `settle()` ends the `$pending` count alone — at the moment the caller is
+ *  answered, while the call stays cancellable until `untrack()`. */
 export function trackCall(
   cellPrefix: string,
   method: string,
   controller: AbortController,
   app: AppScope = "",
-): () => void {
+): (() => void) & { settle: () => void } {
   if (shuttingDown(cellPrefix, app)) shutdownAbort(controller);
   let entry = inflightEntry(cellPrefix, method, app);
   if (!entry) {
@@ -224,7 +226,7 @@ export function trackCall(
     bumpPending(`${cellPrefix}:${method}`, -1);
   };
   const mine = entry;
-  return () => {
+  const untrack = () => {
     release();
     mine.set.delete(controller);
     // Identity check: notifyMethodCancel DELETES the entry, so a later call
@@ -234,6 +236,7 @@ export function trackCall(
     // working).
     if (mine.set.size === 0 && _inflight.has(mine)) _inflight.delete(mine);
   };
+  return Object.assign(untrack, { settle: release });
 }
 
 /** Watchers of calls that did NOT run: a `concurrency: "first"` caller that

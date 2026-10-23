@@ -111,6 +111,8 @@ const VERBS: Record<string, { "replace-temp"?: number; "move-data"?: number }> =
     // under the install's new name
     "src/electron/shared-runtime.ts": { "replace-temp": 2 },
     "src/am/am-cmd-state.ts": { "replace-temp": 1 },
+    // a dbPath database set aside, and the backup's copy installed
+    "src/am/am-cmd-data.ts": { "move-data": 2 },
     // …and the menu entry run.sh wrote, pointed at an install's new name
     "src/server/app-dirs.ts": { "replace-temp": 2 },
     // the legacy database itself is moved; its cross-device copy is a temp

@@ -151,6 +151,7 @@ function boot(
     },
     BrowserWindow,
     Menu: { setApplicationMenu() {} },
+    ipcMain: { on() {}, handle() {} }, // print() (__aio:print)
     nativeImage: { createFromBuffer: () => ({}) },
     shell: { openExternal: (u: string) => external.push(u) },
     session: {
@@ -188,7 +189,12 @@ function boot(
   const con = {
     log() {},
     warn() {},
-    error: (...a: unknown[]) => errors.push(a.map(String).join(" ")),
+    // The stub's profile cannot be written: the client says print() falls
+    // back (its preload) — true, and not what these tests count.
+    error: (...a: unknown[]) => {
+      const m = a.map(String).join(" ");
+      if (!m.includes("its preload could not be written")) errors.push(m);
+    },
   };
   const api = new Function(
     "require",

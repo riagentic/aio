@@ -6,10 +6,9 @@ what is OPEN, what is DECIDED (so it is not argued again), and measured facts.
 
 ## 1. State
 
-- Current release: 1.0.20-beta (2026-10-14). The rounds after it (hunts of
-  2026-10-14/16, the field reports and the shared Electron runtime of
-  2026-10-18) are prepared locally as 1.0.21-beta (version, `CHANGELOG.md`,
-  upgrade guide); not tagged, not pushed.
+- Current release: 1.0.23-beta (2026-10-21, tagged and pushed). After it: hunt
+  rounds 1–4 (2026-10-21), committed locally, not released; what is left is
+  under "Owner decides" and "Known and small".
 - Surface frozen since 2026-09-04: additive only, bugfix-only through beta.
   1.0.0 = a date, once releases have been boring for several weeks — the owner's
   call.
@@ -123,6 +122,34 @@ or is small and known.
 
 ### Owner decides (each has a recommendation)
 
+- [ ] A refused kit Checkbox/Switch/Input keeps the user's pick (memo-skipped;
+      Select/RadioGroup/raw input snap back on the next render). Two snap-back
+      designs broke typing (normalizing handlers, async handlers, late writes,
+      radio groups, IME) — 2026-10-23. Recommended: leave it; document that a
+      refusal should also write state (e.g. re-set the old value) to force a
+      render.
+
+- [ ] Field reports' asks, additive, not built (2026-10-23): a softer neutral
+      tint for warm/magenta hues (an opt-in; `hue` in deno.json fixes the report
+      today); a read-only prod probe behind the pairing key (`am state --prod`).
+      Recommended: both wait for a second report.
+
+- [ ] `POST /__aio/pair` spends the failure budget before checking the PIN, so a
+      correct PIN from an over-budget address gets 429 (deliberate: "no fresh
+      allowance of PIN guesses"). Recommended: keep it.
+
+- [ ] German layout: Ctrl+Shift+7 types `/`, so an app that binds BOTH `ctrl+/`
+      and `ctrl+shift+/` fires both. Narrowing it takes away a binding that
+      works today. Recommended: leave it, document it in the chord docs. Found
+      2026-10-22 (hunt round 4).
+
+- [ ] An `effect` that writes a signal it read in the same run does not run
+      again (a queue-draining effect stops after one item; Preact/Solid re-run
+      it). Re-running would make today's `log.set([...log(), x()])` effects loop
+      to the 1000-iteration guard — a break. Recommended: an opt-in
+      (`effect(fn, { rerunOnSelfWrite: true })`), the default flip to v2. Found
+      in hunt round 2, 2026-10-21 (`src/state/signal.ts` `effect`).
+
 - [ ] Pairing by code trusts the first certificate it sees. The sound answer is
       a PAKE; designed and probed (CPace on X25519, no new dependency), not
       built: three hand-written implementations, one in Kotlin, and a device
@@ -155,6 +182,52 @@ or is small and known.
       `--client=electron` start downloads with the progress window.
 
 ### Known and small
+
+- [ ] Small, seen in hunt round 7 (2026-10-23): a controlled field holds back a
+      refusal while an OLDER call to the same method is still out (the in-flight
+      start numbers retire oldest-first, `pending-calls.ts`; retiring by the
+      call's own number needs every `bumpPending` caller to carry it); sync
+      `sendTo` and `broadcastRaw` keep separate low-backlog memos, so a
+      rarely-sending writer can close a peer 1013 that drained in between (a
+      reconnect, no loss; `src/sync/server-handler.ts` `notDraining`);
+      `skipIfRunning` does not guard a hand-written schedule action whose
+      payload is not an object; a raw `<input>` with a stable debounced handler
+      is reverted by an unrelated parent render (the kit keeps the edit); a
+      throw inside Portal content is invisible to SSR, so hydrate discards the
+      server page with a divergence warning (the client ends correct); a worker
+      cell in a sync burn keeps an embedded/testServer host alive past close
+      (Deno cannot interrupt it).
+
+- [ ] Typing gaps that `check:api` calls breaking (2026-10-23): `BootHandle`'s
+      `serverState` is optional (callers write `h.serverState!(…)`); a
+      `persist.exclude` path that STARTS with `*` needs `as never`;
+      `<ErrorBoundary>` / `<Suspense>` / `<Portal>` fail `deno check` in TSX
+      (TS2604; `h(ErrorBoundary, …)` works); signup's `verificationSent` is
+      typed `true` but answers `false` when the mail failed.
+
+- [ ] Small, seen in hunt round 5 (2026-10-23): `resolveUser` returning a
+      malformed user (a string, no role, empty id) is accepted silently;
+      `onConnect` gets `{ id, role, expiresAt }`, the other hooks
+      `{ id, role }`; aiol counts `return [s.a] = v` as a read.
+
+- [ ] Flake, not reproduced (2026-10-22, 14 shards squeezed onto 4 cores):
+      `tests/am-replay-version-stamp.test.ts` — `cmdReplay` hit `Deno.exit(1)`
+      after a BUDGET_REDUCE (21 ms) on the replayed `w:add`, and the next test
+      in the file inherited the exit code. 0 of 12 under 6 busy loops on the
+      same 4 cores. Next time: stub `Deno.exit` in that test to print which exit
+      fired and the reply that caused it.
+
+- [ ] `am restore` of a `dbPath` app killed between staging and the swap leaves
+      `<dbPath>.am-restore-<stamp>/` that nothing sweeps or names (the `data/`
+      side has `markIncomplete`; this side has none). And a refusal for an
+      unwritable target may already have made its parent folders. Found
+      2026-10-21 (hunt round 2).
+
+- [ ] `am start --app=<id no app has>` in a project of COMPONENTS still starts
+      the default entry under that id (a second lock, a `--fresh` home named
+      after it). A single-entry project refuses it since hunt round 1; for
+      components the id the default entry runs as is the runtime's rule, which
+      am would have to copy. Found 2026-10-21, pre-existing.
 
 - [ ] Boot: an Error built under a call site deep in one long function costs in
       step with that depth — V8 scans each frame's position table up to its call
@@ -318,6 +391,11 @@ or is small and known.
 - [ ] Record the proof rows (today: 1 of 16 proven, 5 never recorded, 4 stale,
       android BEHIND its build path; the Windows rows are BEHIND the stub
       rebuilt for `.aio-sfx-files`): `deno task update:proof`.
+- [ ] Real OS, new after 1.0.23 (Linux, the w11pro VM, the Mac): the run-time
+      splash `show: () => "firstStart"` shows no start splash on a later start
+      and still shows the download splash in a throwaway HOME; `hue` recolours
+      the packaged icons; `<Browser httpReferrer>` plays a YouTube embed; WebGL2
+      on am's nested display.
 - [ ] Real OS, new in 1.0.21 (Linux, the w11pro VM, the Mac):
   - `electronRuntime: "online"`: first start downloads into the store with the
     progress window (Cancel, Retry/Quit offline), a second app starts from it

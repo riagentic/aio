@@ -15,6 +15,7 @@ import {
 import { pngFromRgba } from "../src/build/app-icon.ts";
 import { decodePngSync } from "../src/build/png-scale.ts";
 import { gtkSplashLayout } from "../src/electron/gtk-splash.ts";
+import { electronSplashPage } from "../src/electron/electron-splash.ts";
 import {
   boundsFromState,
   fitRect,
@@ -41,6 +42,7 @@ import {
   splashText,
   splashWithVersion,
   targetSplash,
+  withRunTimeShow,
 } from "../src/electron/splash.ts";
 import {
   linuxSplash,
@@ -67,7 +69,11 @@ import {
 } from "../src/electron/electron-renderer-log.ts";
 import { sharedRuntimeForStart } from "../src/electron/shared-runtime.ts";
 import { ELECTRON_VERSION_FILE } from "../src/electron/electron-runtime-fetch.ts";
-import { VALID_BUILD_KEYS } from "../src/server/config.ts";
+import {
+  VALID_BUILD_KEYS,
+  VALID_FEATURES_CONFIG_KEYS,
+  validateConfig,
+} from "../src/server/config.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 /** A PNG header pngSize reads: signature + IHDR with w × h. */
@@ -85,6 +91,8 @@ const files: Record<string, Uint8Array> = {
   "/p/assets/splash.png": png(480, 300),
   "/p/assets/splash@2x.png": png(960, 600),
   "/p/assets/big.png": png(10, 10, SPLASH_MAX_BYTES),
+  "/p/assets/huge.png": png(2560, 1440),
+  "/p/assets/huge@2x.png": png(2560, 1440),
   "/p/assets/not.png": new TextEncoder().encode("GIF89a……………………………………"),
 };
 const ctx = {
@@ -108,6 +116,65 @@ const err = (splash: unknown): string => {
 };
 
 // ── the config ─────────────────────────────────────────────────────────────
+
+const warned = (splash: unknown) => {
+  const said: string[] = [];
+  const r = resolveSplash({ build: { splash } }, {
+    ...ctx,
+    warn: (m) => said.push(m),
+  });
+  assert(!("error" in r), JSON.stringify(r));
+  return { s: r.splash!, said };
+};
+
+Deno.test("splash config: textPosition none with an explicit text/downloadText is kept, and SAID by name — never dropped quietly", () => {
+  const a = warned({
+    image: "assets/splash.png",
+    textPosition: "none",
+    text: "Hello",
+    downloadText: "Fetching {pct}%",
+  });
+  assertEquals(a.s.text, null);
+  assertEquals(a.said.length, 1);
+  assertStringIncludes(a.said[0]!, 'build.splash.textPosition is "none"');
+  assertStringIncludes(a.said[0]!, "text and downloadText are never shown");
+  assertEquals(
+    warned({ image: "assets/splash.png", textPosition: "none" }).said,
+    [],
+  );
+  assertEquals(
+    warned({ image: "assets/splash.png", textPosition: "none", text: false })
+      .said,
+    [],
+  );
+});
+
+Deno.test("splash: an image larger than the screen is fitted (aspect kept), said at build; @2x halved first; an explicit size is the app's", () => {
+  const big = warned({ image: "assets/huge.png" });
+  const L = helperLook(big.s, "linux");
+  assertEquals([L.sized, L.w, L.h], [true, 1092, 614]);
+  assertEquals([L.iw, L.ih], [2560, 1440]);
+  assertEquals(big.said.length, 1);
+  assertStringIncludes(big.said[0]!, "2560×1440 logical px");
+  // yad draws the image at its pixel size (docs/build/targets.md).
+  assertStringIncludes(big.said[0]!, "(not by the yad fallback)");
+  const page = electronSplashPage(big.s, "N", "windows");
+  assertEquals(page.w, 1092);
+  // @2x: 1280×720 logical — still over the box, said in logical px.
+  const half = warned({ image: "assets/huge@2x.png" });
+  assertStringIncludes(half.said[0]!, "1280×720 logical px");
+  const H = helperLook(half.s, "linux");
+  assertEquals([H.sized, H.w, H.h, H.iw], [true, 1092, 614, 1280]);
+  const sized = warned({
+    image: "assets/huge.png",
+    size: { width: 2000, height: 1000 },
+  });
+  assertEquals(sized.said, []);
+  assertEquals(helperLook(sized.s, "linux").w, 2000);
+  // An ordinary image is untouched.
+  const S = helperLook(spec({ image: "assets/splash.png" }), "linux");
+  assertEquals([S.sized, S.w, S.h], [false, 480, 300]);
+});
 
 Deno.test("splash config: absent or false is none; the image alone takes every default from the app's identity", () => {
   assertEquals(resolveSplash({}, ctx), { splash: null });
@@ -749,6 +816,27 @@ Deno.test("splash session: the cap closes it and says so ONCE", async () => {
       .length,
     1,
   );
+});
+
+Deno.test("splash session: closed while its helper was starting — the window never maps, and the opener's worker is freed", async () => {
+  const f = fakeOpener();
+  let disposed = 0, letGo!: () => void;
+  const up = new Promise<void>((r) => (letGo = r));
+  const ses = splashSession(plain, {
+    title: "N",
+    log: { info: () => {}, error: () => {} },
+    backend: async () => {
+      await up;
+      return { ...f.opener, dispose: () => void disposed++ };
+    },
+  });
+  ses.open();
+  ses.exit(); // Electron ended before the helper was up
+  assertEquals(await held(ses.closed), "exit");
+  letGo();
+  await tickle();
+  assertEquals(f.seen.opened, []);
+  assertEquals(disposed, 1);
 });
 
 Deno.test("splash session: no helper on this desktop — lost, quietly (the backend's own line said why)", async () => {
@@ -1507,4 +1595,129 @@ Deno.test("splash from source: the build's resolver over deno.json, {version} fi
   assertEquals(sourceSplash(undefined, at), { splash: null });
   const bad = sourceSplash({ build: { splash: { image: "nope.png" } } }, at);
   assert("error" in bad && bad.error.includes("which is not there"));
+});
+
+// ── aio.run({ splash: { show } }): the person's say at run time ────────────
+
+Deno.test("splash run-time show: the app's answer replaces the build's show; throws, slow or a wrong value keep the build's, said once", () => {
+  const always = spec({ image: "assets/splash.png" });
+  const first = spec({ image: "assets/splash.png", show: "firstStart" });
+  const said: string[] = [];
+  const say = (m: string) => void said.push(m);
+  // No hook: the build's spec, untouched, nothing said.
+  assertEquals(withRunTimeShow(always, undefined, say), {
+    spec: always,
+    byApp: false,
+  });
+  const off = withRunTimeShow(always, () => "firstStart", say);
+  assertEquals([lookOf(off.spec).show, off.byApp], ["firstStart", true]);
+  assertEquals(lookOf(always).show, "always"); // pure: the input is kept
+  const on = withRunTimeShow(first, () => "always", say);
+  assertEquals([lookOf(on.spec).show, on.byApp], ["always", true]);
+  assertEquals(said, []);
+  // A 1.0.22-baked spec (no look) still takes it.
+  const { look: _l, ...old } = always;
+  assertEquals(
+    lookOf(withRunTimeShow(old as SplashSpec, () => "firstStart", say).spec)
+      .show,
+    "firstStart",
+  );
+  const kept = (show: () => unknown, now?: () => number) => {
+    said.length = 0;
+    const r = withRunTimeShow(first, show, say, now);
+    assertEquals(r, { spec: first, byApp: false });
+    assertEquals(said.length, 1);
+    assertStringIncludes(said[0]!, `the build's show ("firstStart") is used`);
+    return said[0]!;
+  };
+  assertStringIncludes(
+    kept(() => {
+      throw new Error("settings not loaded");
+    }),
+    "threw (settings not loaded)",
+  );
+  let t = 0;
+  assertStringIncludes(
+    kept(() => "always", () => (t += 51)),
+    "took 51 ms (over 50 ms)",
+  );
+  assertStringIncludes(kept(() => "never"), `returned "never"`);
+  assertStringIncludes(kept(() => false), "returned false");
+  assertStringIncludes(
+    kept(() => Promise.resolve("always")),
+    "returned [object Promise]",
+  );
+});
+
+Deno.test("splash run-time show: firstStart from the app shows nothing on a normal start, says so in its own words, and a download still shows the splash", async () => {
+  const s = withRunTimeShow(
+    spec({ image: "assets/splash.png", text: "x", downloadText: "x" }),
+    () => "firstStart",
+    () => {},
+  ).spec;
+  const run = (f: ReturnType<typeof fakeOpener>, electronDraws = false) => {
+    const log: string[] = [];
+    const ses = splashSession(s, {
+      title: "Notes",
+      log: { info: (m) => log.push(m), error: (m) => log.push(`! ${m}`) },
+      backend: () => Promise.resolve(f.opener),
+      tickMs: 2,
+      showByApp: true,
+      electronDraws,
+    });
+    return { ses, log };
+  };
+  const f = fakeOpener();
+  const { ses, log } = run(f);
+  ses.open();
+  await tickle();
+  ses.ready();
+  assertEquals(await held(ses.closed), "ready");
+  assertEquals(f.seen.opened, []);
+  assert(
+    log.includes(
+      `electron: splash — not shown (the app's run-time show: "firstStart")`,
+    ),
+    log.join("\n"),
+  );
+  // Windows: Electron's main process does not draw it either.
+  const w = run(fakeOpener(), true);
+  w.ses.open();
+  assertEquals(w.ses.handOff?.(), false);
+  w.ses.shutdown();
+  // Electron missing: the download runs in the splash, always.
+  const f2 = fakeOpener();
+  const two = run(f2);
+  two.ses.open();
+  two.ses.download();
+  await tickle();
+  assertEquals(f2.seen.opened, ["Notes | x"]);
+  two.ses.shutdown();
+});
+
+Deno.test("aio.run({ splash }): a wrong type or key is refused at boot, a function is taken", () => {
+  const refused = (obj: Record<string, unknown>) => {
+    let code: number | null = null;
+    const orig = console.error;
+    console.error = () => {};
+    try {
+      validateConfig(
+        obj,
+        VALID_FEATURES_CONFIG_KEYS,
+        "CellsConfig",
+        ((c: number) => {
+          code = c;
+          throw new Error("exit");
+        }) as (c: number) => never,
+      );
+    } catch { /* the exit stub */ }
+    console.error = orig;
+    return code === 1;
+  };
+  assert(refused({ splash: { show: "firstStart" } }));
+  assert(refused({ splash: { shwo: () => "always" } }));
+  assert(refused({ splash: () => "always" }));
+  assert(refused({ splash: "firstStart" }));
+  assert(!refused({ splash: { show: () => "firstStart" } }));
+  assert(!refused({ splash: {} }));
 });

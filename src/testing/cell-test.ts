@@ -20,7 +20,11 @@ import { _resetAioRuntime } from "../state/runtime-reset.ts";
 import { _resetHead } from "../air/head.ts";
 import { routeEffect } from "../state/route-effect.ts";
 import { selfCallSurvivedLine } from "../state/dispatch.ts";
-import { assertionFailure, formatCellState } from "./test-format.ts";
+import {
+  assertionFailure,
+  formatCellState,
+  predicateVerdict,
+} from "./test-format.ts";
 import {
   deepFreeze,
   frozenWriteMessage,
@@ -953,7 +957,7 @@ export function testCell(
       expect: {
         state: (check, msg) => {
           const fs = state[f.__aio.id] as Record<string, unknown>;
-          if (!check(fs)) {
+          if (!predicateVerdict(check(fs), "testCell: t.expect.state")) {
             throw assertionFailure(
               `${msg ?? "state assertion failed"}: ${formatCellState(fs)}`,
             );
@@ -986,7 +990,7 @@ export function testCell(
         },
         invariant: (check) => {
           const fs = state[f.__aio.id] as Record<string, unknown>;
-          if (!check(fs)) {
+          if (!predicateVerdict(check(fs), "testCell: t.expect.invariant")) {
             throw assertionFailure(
               `invariant violation: ${formatCellState(fs)}`,
             );
@@ -1229,6 +1233,12 @@ export interface BootHandle {
   /** Reset the booted cells to their declared initials + clear schedules. */
   dispose(): void;
   [Symbol.dispose](): void;
+  /** Unfiltered server-authoritative state — the whole store, or one cell's
+   *  slice — INCLUDING `visible.exclude`d fields, which a client-context read
+   *  (`cell.x`) refuses. The same read as `testMultiClient`'s. Always present
+   *  on the handle `bootCells` returns; optional in the type only because a
+   *  required member would be new surface asked of every implementer. */
+  serverState?<T = Record<string, unknown>>(cell?: string): T;
 }
 
 /**
@@ -1486,6 +1496,10 @@ export async function bootCells(
     settle,
     dispose,
     [Symbol.dispose]: dispose,
+    serverState<T>(cell?: string): T {
+      const s = booted.getState() as Record<string, unknown>;
+      return (cell === undefined ? s : s[cell]) as T;
+    },
     // Not declared on `BootHandle` (the public surface is frozen), and not
     // needed there: `await using` accepts a Disposable at the type level and
     // prefers `Symbol.asyncDispose` at runtime.

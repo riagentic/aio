@@ -100,6 +100,14 @@ export type DisplayPlan = {
   level?: "note" | "warn";
 };
 
+/** Chromium switches for a window on a nested display `am` owns: Xephyr has
+ *  no GPU, Chromium blocklists WebGL there, and a WebGL/three.js view draws
+ *  black (a field report). SwiftShader renders it in software. Only on OUR
+ *  nested display — never the user's real one, nor a `--display=:N` they
+ *  manage. Both are on `ELECTRON_ARGS_ALLOWED`. */
+export const NESTED_GPU_ARGS =
+  "--use-angle=swiftshader --enable-unsafe-swiftshader";
+
 /** THE spelling. `start` is a PASSTHROUGH verb, so this flag has no row in
  *  am-flags.ts's table — naming it here gives it the one home a gate can
  *  read, which is what keeps the agent brief from advertising a flag nothing
@@ -144,6 +152,9 @@ export function planDisplay(opts: {
    *  the window they asked for never appears ("Authorization required"). */
   inheritedDisplay?: string;
   inheritedXauthority?: string;
+  /** The caller's own `AIO_ELECTRON_ARGS`, kept after {@linkcode
+   *  NESTED_GPU_ARGS} on a nested display so its switches still win. */
+  inheritedElectronArgs?: string;
   /** Whether the app could open a browser tab at all. `--client=server-only`
    *  (and `cli`) never hand a URL to anything, so "browser tabs suppressed"
    *  is not a fact about that launch — the env is still set (it costs
@@ -156,6 +167,12 @@ export function planDisplay(opts: {
 }): DisplayPlan {
   const { choice, gui, interactive } = opts;
   const probe = opts.probe ?? REAL;
+  /** `onto(display)` for a nested display `am` owns, which has no GPU. */
+  const nested = (display: string): Record<string, string> => ({
+    ...onto(display),
+    AIO_ELECTRON_ARGS: [NESTED_GPU_ARGS, opts.inheritedElectronArgs?.trim()]
+      .filter(Boolean).join(" "),
+  });
   /** DISPLAY plus the cookie for it when one is on record. */
   const onto = (display: string): Record<string, string> => {
     const cookie = probe.cookie(display);
@@ -244,7 +261,7 @@ export function planDisplay(opts: {
 
   if (pick.up) {
     return {
-      env: { ...env, ...onto(pick.display) },
+      env: { ...env, ...nested(pick.display) },
       level: "note",
       note: `window → ${pick.display} (your nested display, already up) ` +
         `— not your desktop. --display=current to use your desktop instead` +
@@ -258,7 +275,7 @@ export function planDisplay(opts: {
   const started = probe.start(pick.display);
   if (started.ok) {
     return {
-      env: { ...env, ...onto(pick.display) },
+      env: { ...env, ...nested(pick.display) },
       level: started.warning ? "warn" : "note",
       note: `started a nested X server on ${pick.display} — this app's ` +
         `window opens THERE, not on your desktop. It stays up on purpose ` +

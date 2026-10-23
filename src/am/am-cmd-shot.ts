@@ -454,6 +454,23 @@ async function selectorClip(
   };
 }
 
+/** The page-side half of {@link framePainted}: the document is loaded and the
+ *  aio UI is mounted, THEN two rAFs — the first runs before the next paint,
+ *  the second after one was committed. The rAFs alone resolved on a document
+ *  mid live-reload, before anything was rendered, and vouched for a black
+ *  frame. A runtime without `__aioMounted` (an app pinned to an older aio) is
+ *  waited on for the load only. The shell's boot-failure card
+ *  (`data-aio-blank-screen`: an import that failed, no state, a hang) is the
+ *  page's final UI too — App never mounts there, and waiting the whole
+ *  timeout to blame a "hidden window" was the wrong answer, slowly.
+ *  @internal exported for tests. */
+export const PAINTED_PROBE = "new Promise(r=>{const t=()=>" +
+  'document.readyState==="complete"&&' +
+  '(typeof __aioMounted!=="function"||__aioMounted()>0||' +
+  '!!document.querySelector("[data-aio-blank-screen]"))' +
+  "?requestAnimationFrame(()=>requestAnimationFrame(()=>r(true)))" +
+  ":setTimeout(t,16);t()})";
+
 /** Resolve once the page has committed a frame — `true` when it did, `false`
  *  when it did not within `ms`.
  *
@@ -465,8 +482,7 @@ async function framePainted(
   cdp: { call: (m: string, p?: Record<string, unknown>) => Promise<unknown> },
   ms: number,
 ): Promise<boolean> {
-  const raf =
-    "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(true))))";
+  const raf = PAINTED_PROBE;
   // The loser of the race must be disarmed. A pending `setTimeout` keeps the
   // event loop alive, so a screenshot that painted in 3ms would still have sat
   // there for the rest of the timeout before the CLI could exit.

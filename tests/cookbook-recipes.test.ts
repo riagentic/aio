@@ -1,4 +1,4 @@
-// The cookbook's twenty recipes, RUN — not read.
+// The cookbook's twenty-two recipes, RUN — not read.
 //
 // `docs/basics/cookbook.md` is a page of copy-paste snippets, and a snippet
 // that does not work is worse than a missing page: the reader spends an
@@ -28,9 +28,9 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 const ROOT = new URL("..", import.meta.url);
 const DOC = "docs/basics/cookbook.md";
 
-/** How many recipes the page promises. The title says twenty; a page that
+/** How many recipes the page promises. The title says twenty-two; a page that
  *  quietly became nineteen is the page lying about itself. */
-const RECIPE_COUNT = 20;
+const RECIPE_COUNT = 22;
 
 /** Recipes whose LAST MILE cannot be reached in-process (a real OS device, a
  *  real worker thread). They are still driven here as far as a test reaches;
@@ -520,6 +520,57 @@ Deno.test("recipe 20: a worker cell is called like any other", async () => {
   } finally {
     h.dispose();
   }
+});
+`,
+  21: `
+// The recipe's own test file IS the driver: importing it registers its cases.
+import "../tests/feed.test.ts";
+`,
+  22: `
+import { assert, assertEquals } from "@std/assert";
+import { bootCells } from "aio/testing";
+import { tool, type ToolResult } from "../src/cell/tool.ts";
+import { runTool } from "../src/cell/tool.server.ts";
+
+// A real child that writes, then hangs: both cut-offs must keep the "one".
+const hang = ["eval", "console.log('one'); await new Promise((r) => setTimeout(r, 20_000))"];
+
+Deno.test("recipe 22: the timeout kills the child and keeps partial stdout", async () => {
+  const t0 = Date.now();
+  const r = await runTool(Deno.execPath(), hang, 1000, new AbortController().signal);
+  assert(Date.now() - t0 < 10_000, "the timeout must cut the run short");
+  assertEquals(r.out, "one\\n");
+  assertEquals([r.timedOut, r.cancelled], [true, false]);
+});
+
+Deno.test("recipe 22: the caller's signal kills it too, keeping partial stdout", async () => {
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 1000);
+  const r = await runTool(Deno.execPath(), hang, 60_000, ac.signal);
+  assertEquals(r.out, "one\\n");
+  assertEquals([r.timedOut, r.cancelled], [false, true]);
+});
+
+Deno.test("recipe 22: stop() aborts the scan and the partial output lands", async () => {
+  using _boot = await bootCells([tool], {
+    stub: {
+      "./tool.server.ts": {
+        runTool: (_c: string, _a: string[], _t: number, signal: AbortSignal) =>
+          new Promise<ToolResult>((done) => {
+            const stopped = () =>
+              done({ out: "partial", code: 143, timedOut: false, cancelled: true });
+            // stop() may land before the scan reaches here — read it, then listen
+            if (signal.aborted) stopped();
+            else signal.addEventListener("abort", stopped);
+          }),
+      },
+    },
+  });
+  const scanning = tool.scan("/data");
+  await tool.stop();
+  await scanning;
+  assertEquals(tool.status, "stopped");
+  assertEquals(tool.out, "partial");
 });
 `,
 };

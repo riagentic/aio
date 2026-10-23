@@ -34,6 +34,7 @@ import { budgetsFor, cellSizeFix } from "../state/budgets.ts";
 import { rawStateControlAllowed } from "./server-auth.ts";
 import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
 import { decidePatchOrFull } from "./patch-or-full.ts";
+import { notDraining } from "../sync/server-handler.ts";
 
 /** Payload stats per client — tracked for vitals/trojan introspection */
 export type PayloadStats = Map<
@@ -393,7 +394,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           // nothing would ever escalate.
           backlogged++;
           worstBacklog = Math.max(worstBacklog, ws.bufferedAmount);
-          if (patchesToSend.length > 0 || force) meta.needsFull = true;
+          _skipRound(meta, patchesToSend, force);
           continue;
         }
         if (meta.bpMultiplier > 1) {
@@ -412,17 +413,10 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
         let sentKind: "patch" | "full" = "full";
 
         if (!force && !meta.needsFull && patchesToSend.length > 0) {
-          const clientPatches = filterPatchesBySubs(
-            patchesToSend,
-            meta.subscriptions,
-          );
+          // The rounds skipped while it was over the mark go first, in order.
+          const fresh = _clientOps(patchesToSend, meta);
           const allOps = compactPatches(
-            clientPatches.flatMap((p) =>
-              p.ops.map((op) => ({
-                ...op,
-                path: [p.cell, ...op.path],
-              }))
-            ),
+            meta.skipped ? [...meta.skipped.ops, ...fresh] : fresh,
           );
           if (allOps.length > 0) {
             const patchJson = JSON.stringify(allOps);
@@ -503,7 +497,12 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           // not proof the client has this state.
           if (
             !meta.lastFullJsonStale && fullJsonForTracking === meta.lastFullJson
-          ) continue;
+          ) {
+            // It holds exactly this state: a queue kept past here would be
+            // replayed on top of it next round (an add the state undid).
+            meta.skipped = undefined;
+            continue;
+          }
           // Anything that decides to send a whole state says WHY. The
           // threshold path above already did; this fallback did not, so the
           // expensive case was the invisible one — 438 KB frames, 28 of them
@@ -540,6 +539,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           // as a size estimate for the patch-vs-full decision it stays useful.
           meta.lastFullJsonStale = sentKind === "patch";
           if (sentKind === "full") meta.needsFull = false;
+          meta.skipped = undefined; // in this frame, or superseded by it
           meta.bpLastSentAt = Date.now();
           // Vitals bookkeeping (gated on a vitals system) — see `_meterSent`.
           _meterSent(meta, msgToSend);
@@ -557,8 +557,8 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
               `(worst: ${
                 bytes(worstBacklog)
               } of unread state held on the server). State rounds to them ` +
-              `are skipped until they do, and the first round after owes ` +
-              `them full state; a peer that would miss a sync op or other ` +
+              `are skipped until they do — queued up to half their state, ` +
+              `past that owed as full state; a peer that would miss a sync op or other ` +
               `raw frame is closed instead, so it reconnects and catches up.`,
           ),
         );
@@ -570,7 +570,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // A client this round skipped is OWED a whole state — arrange to pay it
       // even if no round ever follows (see `_payDebts`).
       for (const m of connections.values()) {
-        if (m.needsFull) {
+        if (m.needsFull || m.skipped) {
           _armDebtRetry(true);
           break;
         }
@@ -631,6 +631,65 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   };
 
   const coalescer = createCoalescer<PatchEntry>(syncIntervalMs, flushBroadcast);
+
+  /** One round's ops as `meta` sees them: its subscriptions, cell-prefixed. */
+  function _clientOps(patches: PatchEntry[], meta: ClientMeta) {
+    return filterPatchesBySubs(patches, meta.subscriptions).flatMap((p) =>
+      p.ops.map((op) => ({ ...op, path: [p.cell, ...op.path] }))
+    );
+  }
+
+  /** A round skipped for `meta` because its socket is over the backlog mark.
+   *  Owing it the whole state for every skip was a cycle on a slow link: a
+   *  state over the mark (a 6 MB cell at 1 MB/s) put the client over it
+   *  again, so it re-downloaded the whole state every ~6 s while others
+   *  wrote. So the round is QUEUED (`meta.skipped`) and sent as one patch
+   *  once it drains — up to the same `fullStateThreshold` fraction of its
+   *  full state that decides patch-vs-full; past it, or with no size known,
+   *  the queue is dropped and the whole state owed, as before. Pinned by
+   *  tests/ws-slow-client-queues-patches.test.ts. */
+  function _skipRound(
+    meta: ClientMeta,
+    patchesToSend: PatchEntry[],
+    force: boolean,
+  ): void {
+    if (patchesToSend.length === 0 && !force) return;
+    if (!force && !meta.needsFull && meta.lastFullJson !== undefined) {
+      const ops = _clientOps(patchesToSend, meta);
+      if (ops.length === 0) return; // nothing in its view changed
+      const bytes = (meta.skipped?.bytes ?? 0) + JSON.stringify(ops).length;
+      if (bytes <= meta.lastFullJson.length * fullStateThreshold) {
+        const q = meta.skipped ??= { ops: [], bytes: 0 };
+        for (const op of ops) q.ops.push(op);
+        q.bytes = bytes;
+        return;
+      }
+    }
+    meta.needsFull = true;
+    meta.skipped = undefined;
+  }
+
+  /** Send `meta` its queued rounds (`skipped`) as one patch, if it can take
+   *  it now — false means still owed. Outside a round only: the debt payer,
+   *  for an app that went idle after the skip. */
+  function _paySkipped(socket: WebSocket, meta: ClientMeta): boolean {
+    if (!meta.skipped) return true;
+    if (socket.bufferedAmount > WS_BUFFER_HIGH_WATER) return false;
+    const frame = encRaw(
+      "patches",
+      JSON.stringify(compactPatches(meta.skipped.ops)),
+    );
+    meta.skipped = undefined;
+    try {
+      socket.send(frame);
+    } catch {
+      return true; // client disconnecting — the queue dies with the socket
+    }
+    meta.lastFullJsonStale = true;
+    meta.bpLastSentAt = Date.now();
+    _meterSent(meta, frame);
+    return true;
+  }
 
   /** A client the freeze watchdog skipped is heard from again — pay what the
    *  skipped rounds owe it NOW.
@@ -699,6 +758,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     if (json === undefined) return false; // still owed — retried later
     if (!meta.lastFullJsonStale && json === meta.lastFullJson) {
       meta.needsFull = false; // it already holds exactly this text
+      meta.skipped = undefined;
       return true;
     }
     _warnBigFullState(json, meta);
@@ -711,6 +771,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     meta.lastFullJson = json;
     meta.lastFullJsonStale = false;
     meta.needsFull = false;
+    meta.skipped = undefined;
     meta.bpLastSentAt = Date.now();
     // Metered like a round's frame — it IS one, sent outside a round.
     _meterSent(meta, frame);
@@ -767,13 +828,18 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     try {
       let any = false;
       for (const [ws, meta] of connections) {
-        if (meta.needsFull && ws.readyState === WebSocket.OPEN) any = true;
+        if (
+          (meta.needsFull || meta.skipped) && ws.readyState === WebSocket.OPEN
+        ) any = true;
       }
       if (!any) return false;
       // A buffered round pays the debt itself, in order (see resyncRecovered).
       coalescer.flushUrgent();
       for (const [ws, meta] of connections) {
-        if (!meta.needsFull || ws.readyState !== WebSocket.OPEN) continue;
+        if (
+          !(meta.needsFull || meta.skipped) ||
+          ws.readyState !== WebSocket.OPEN
+        ) continue;
         // A frozen client is paid by the watchdog's recovery hook, the moment
         // it is heard from — polling it here would only repeat that.
         if (vitalsSystem?.serverTransport.isFrozen(meta.id)) continue;
@@ -785,13 +851,15 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           continue;
         }
         if (
-          !_payDebt(
-            ws,
-            meta,
-            "was skipped while it could not keep up",
-            fullFor,
-            paid,
-          )
+          meta.needsFull
+            ? !_payDebt(
+              ws,
+              meta,
+              "was skipped while it could not keep up",
+              fullFor,
+              paid,
+            )
+            : !_paySkipped(ws, meta)
         ) {
           owed = true;
         }
@@ -897,12 +965,22 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
    *  permanent divergence. The repair a raw stream does have is the
    *  reconnect (the handshake sends whole state; sync catch-up resumes from
    *  the peer's own cursor), so the peer is CLOSED rather than fed a gap.
-   *  Pinned by tests/ws-raw-broadcast-backlog.test.ts. */
+   *  Pinned by tests/ws-raw-broadcast-backlog.test.ts.
+   *
+   *  "Over the mark" alone is not "not draining": a slow-but-reading peer
+   *  whose handshake state frame is itself over the mark (a 6 MB cell at
+   *  1 MB/s) was closed on every peer write while that frame drained, so it
+   *  never kept a connection and re-downloaded the whole state every ~6 s.
+   *  The rule is `notDraining` (sync/server-handler.ts), shared with the
+   *  sync handler's own per-socket writer — the other writer to the same
+   *  sockets — so the two cannot drift (tests/ws-raw-broadcast-slow-reader
+   *  .test.ts, tests/sync-send-slow-reader.test.ts). */
   function broadcastRaw(msg: string, exclude?: WebSocket): void {
+    const now = Date.now();
     for (const [ws, meta] of connections) {
       if (ws === exclude) continue;
       if (ws.readyState !== WebSocket.OPEN) continue;
-      if (ws.bufferedAmount > WS_BUFFER_HIGH_WATER) {
+      if (notDraining(_rawLow, ws, ws.bufferedAmount, now)) {
         _closeNotDraining(ws, meta);
         continue;
       }
@@ -911,6 +989,10 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       } catch { /* ignore send errors */ }
     }
   }
+
+  /** Per peer over the mark: its lowest backlog seen and when — see
+   *  `broadcastRaw`. Dropped once it is back under the mark. */
+  const _rawLow = new WeakMap<object, { bytes: number; at: number }>();
 
   /** Close a peer a raw frame could not be delivered to — see `broadcastRaw`.
    *  1013 is "try again later": every aio client reconnects on any close

@@ -1,7 +1,14 @@
 // WebSocket connection handler — extracted from server.ts
 // Manages WS upgrades, per-client state, message routing, rate limiting, backpressure
 import { doorRetryAfterMs } from "./door-refusal.ts";
+import {
+  chunkFrame,
+  runCallStreamed,
+  runStreamed,
+  takeStreamFlag,
+} from "./call-stream.ts";
 import type { AioUser } from "./aio.ts";
+import type { WirePatch } from "../protocol/patch-ops.ts";
 import { invokeServerFn } from "./server-fns.ts";
 import {
   _clearClientDegraded,
@@ -404,6 +411,12 @@ export type ClientMeta = {
    *  state that never received the earlier ones and diverges with health
    *  green. Cleared by a full send. */
   needsFull?: boolean;
+  /** Rounds skipped while its socket was over the backlog mark, kept to go
+   *  out as ONE patch once it drains (`bytes`: their JSON length) — capped at
+   *  `fullStateThreshold` × its full state, past which `needsFull` takes
+   *  over. Dropped by every whole-state send: it describes changes since a
+   *  state the client no longer holds. See server-broadcast.ts. */
+  skipped?: { ops: WirePatch[]; bytes: number };
   msgCount: number;
   /** UTF-8 bytes charged to the current window. May exceed `bytesPerSec`:
    *  the excess is DEBT, paid down by `bytesPerSec` per window (see
@@ -1063,6 +1076,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       meta.lastFullJson = msg;
       meta.lastFullJsonStale = false;
       meta.needsFull = false;
+      meta.skipped = undefined;
       meta.bpLastSentAt = Date.now();
     } catch (err) {
       log.warn("ws", `state re-send after a user change failed — ${err}`);
@@ -2368,9 +2382,20 @@ export function createWsManager(deps: WsDeps): WsManager {
     );
     // The cell method (and everything it awaits) sees this socket's transport
     // facts via serverRequest(); dispatch itself wraps runWithUser downstream.
+    // A caller that asked for a stream gets this call's `emitChunk`s as
+    // `chunk` frames, before its ack; every other call runs with no sink, so
+    // it never inherits one (call-stream.ts).
+    const streamed = takeStreamFlag(parsed as Record<string, unknown>);
+    const run = () => deps.dispatch(parsed, meta.user);
     const result = runWithRequest(
       meta.request,
-      () => deps.dispatch(parsed, meta.user),
+      () =>
+        streamed
+          ? runCallStreamed(
+            (value) => _sendChunk(socket, parsed.cid as string, value, parsed),
+            run,
+          )
+          : runStreamed(undefined, run),
     );
     // AIO-2.2 + return-value transport: emit a per-action ack carrying the
     // method's RETURN value if the client supplied a cid. We settle only AFTER
@@ -2395,6 +2420,31 @@ export function createWsManager(deps: WsDeps): WsManager {
           );
         },
       );
+    }
+  }
+
+  /** One piece of a streamed call's result (`emitChunk`), JSON-vetted like
+   *  a return value. False when the socket is gone. */
+  function _sendChunk(
+    socket: WebSocket,
+    cid: string,
+    value: unknown,
+    action: { type?: unknown },
+  ): boolean {
+    if (socket.readyState !== WebSocket.OPEN) return false;
+    const frame = chunkFrame(
+      cid,
+      value,
+      typeof action.type === "string" ? action.type : "?",
+    );
+    // A chunk is droppable (the result is not): a caller that stopped
+    // reading gets no more of them queued, and the emitter is told.
+    if (socket.bufferedAmount > WS_BUFFER_HIGH_WATER) return false;
+    try {
+      socket.send(frame);
+      return true;
+    } catch {
+      return false; // client gone
     }
   }
 
@@ -2622,6 +2672,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       // tests/initial-state-sent-once.test.ts.
       if (!meta.lastFullJsonStale && msg === meta.lastFullJson) {
         meta.needsFull = false; // it holds the current state — no debt
+        meta.skipped = undefined;
         return;
       }
       const frame = encRaw("state", msg);
@@ -2636,6 +2687,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       // the next round sent it AGAIN. The state just went out; whoever owes it
       // owes it no longer, whichever path delivered it.
       meta.needsFull = false;
+      meta.skipped = undefined;
       meta.bpLastSentAt = Date.now();
     } catch (err) {
       log.warn("ws", `filtered state send error — ${err}`);
@@ -2661,6 +2713,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       // the next round sent it AGAIN. The state just went out; whoever owes it
       // owes it no longer, whichever path delivered it.
       meta.needsFull = false;
+      meta.skipped = undefined;
       meta.bpLastSentAt = Date.now();
     } catch (err) {
       log.warn("ws", `resync send error — ${err}`);

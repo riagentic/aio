@@ -21,6 +21,7 @@ import {
 } from "../src/electron/electron-shared.ts";
 import { electronMainScriptUDS } from "../src/electron/electron-uds.ts";
 import { classifyElectronLine } from "../src/electron/electron-renderer-log.ts";
+import { centredOn } from "../src/electron/splash-place.ts";
 import { pngFromRgba } from "../src/build/app-icon.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -113,6 +114,122 @@ Deno.test("electron splash: its main-process lines are logged at info", () => {
       from: "electron",
     },
   );
+});
+
+// The main script's splash code run against a stub `electron` (no window):
+// the order and the placement are what it does, not what the source says.
+function runSplash(
+  placed: { x: number; y: number; width: number; height: number },
+) {
+  const WA = { x: 0, y: 0, width: 1920, height: 1040 };
+  const ev: string[] = [];
+  let win!: { h: Record<string, () => void> };
+  class BW {
+    h: Record<string, () => void> = {};
+    constructor() {
+      win = this;
+    }
+    setAlwaysOnTop() {}
+    once(e: string, f: () => void) {
+      this.h[e] = f;
+    }
+    on() {}
+    isDestroyed() {
+      return false;
+    }
+    showInactive() {
+      ev.push("shown");
+    }
+    destroy() {
+      ev.push("destroyed");
+    }
+    setOpacity() {}
+    setPosition(x: number, y: number) {
+      ev.push(`at ${x},${y}`);
+    }
+    loadFile() {
+      return Promise.resolve();
+    }
+  }
+  const electron = {
+    BrowserWindow: BW,
+    screen: {
+      getDisplayMatching: () => ({ workArea: WA }),
+      getPrimaryDisplay: () => ({ workArea: WA }),
+    },
+  };
+  const proc = { uptime: () => 0, stderr: { write: () => true } };
+  const s = {
+    page: "/x",
+    title: "T",
+    w: 400,
+    h: 300,
+    mode: "window" as const,
+    follow: true,
+    minMs: 1000,
+    maxMs: 30000,
+    fadeMs: 0,
+    windowShadow: false,
+  };
+  // The script's own timers (minMs, maxMs, the fade) never run for real:
+  // these tests read order and placement, and a real one left running is a
+  // leak the sanitizer reports — on a loaded machine, not on an idle one.
+  const timers = { setTimeout: () => 0, clearTimeout: () => {} };
+  const onWindow = new Function(
+    "require",
+    "process",
+    "centredOn",
+    "__aioPlaced",
+    "__aioPlacedOn",
+    "setTimeout",
+    "clearTimeout",
+    "setInterval",
+    "clearInterval",
+    `${tmplSplash(s)}\nreturn __aioSplashOnWindow;`,
+  )(
+    () => electron,
+    proc,
+    centredOn,
+    placed,
+    WA,
+    timers.setTimeout,
+    timers.clearTimeout,
+    timers.setTimeout,
+    timers.clearTimeout,
+  );
+  return { ev, onWindow, ready: () => win.h["ready-to-show"]!() };
+}
+
+Deno.test("electron splash: following the window on Windows centres it in the window's DISPLAY — at.screen is the window's physical rect, never a work area", () => {
+  const r = runSplash({ x: 1000, y: 200, width: 800, height: 600 });
+  r.ready();
+  // 150 %: the DIP rect, and the same window in physical px.
+  const at = {
+    x: 1000,
+    y: 200,
+    width: 800,
+    height: 600,
+    screen: { x: 1500, y: 300, width: 1200, height: 900 },
+  };
+  r.onWindow(at, true);
+  assertEquals(r.ev.at(-1), "at 1200,350");
+  // A window smaller than the splash: centred on it, not pinned to its corner.
+  r.onWindow({
+    x: 500,
+    y: 400,
+    width: 200,
+    height: 100,
+    screen: { x: 500, y: 400, width: 200, height: 100 },
+  }, false);
+  assertEquals(r.ev.at(-1), "at 400,300");
+});
+
+Deno.test("electron splash: the app's window showed before the splash painted — the splash never shows over it, it goes at once", () => {
+  const r = runSplash({ x: 100, y: 100, width: 800, height: 600 });
+  r.onWindow({ x: 100, y: 100, width: 800, height: 600 }, true);
+  r.ready();
+  assert(!r.ev.includes("shown"), r.ev.join());
+  assert(r.ev.includes("destroyed"), r.ev.join());
 });
 
 function opener(opened: string[]) {

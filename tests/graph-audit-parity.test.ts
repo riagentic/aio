@@ -671,3 +671,49 @@ Deno.test({
     }
   },
 });
+
+// `import "./Button.css"` — a reflex from every bundler. The judge answered
+// with esbuild's "…without an output path configured" and the generic
+// resolution fix; the edit is to move the rules into style.css.
+Deno.test({
+  name: "graph: a CSS import in a module names style.css and the edit",
+  sanitizeOps: false, // aio-ok: esbuild's service is a shared child stopped once per test
+  fn: async () => {
+    const dir = await makeApp({
+      "Button.css": `.b { color: red; }\n`,
+      "App.tsx": `import "./Button.css";\n` +
+        `export default function App() { return <div>hi</div>; }\n`,
+    });
+    try {
+      const { refused } = await validatorVerdict(dir);
+      assertEquals(refused.length, 1, JSON.stringify(refused));
+      assertStringIncludes(refused[0]!.message, "Button.css");
+      assertStringIncludes(refused[0]!.message, "style.css");
+      assertStringIncludes(refused[0]!.fix, "move the rules into style.css");
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// Importing the linked stylesheet ITSELF: its rules already reach the page,
+// so "move the rules into style.css" named the very same file.
+Deno.test({
+  name: "graph: importing style.css itself says the page links it already",
+  sanitizeOps: false, // aio-ok: esbuild's service is a shared child stopped once per test
+  fn: async () => {
+    const dir = await makeApp({
+      "style.css": `.b { color: red; }\n`,
+      "App.tsx": `import "./style.css";\n` +
+        `export default function App() { return <div>hi</div>; }\n`,
+    });
+    try {
+      const { refused } = await validatorVerdict(dir);
+      assertEquals(refused.length, 1, JSON.stringify(refused));
+      assertStringIncludes(refused[0]!.fix, "already linked");
+      assertEquals(/move the rules/.test(refused[0]!.fix), false);
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});

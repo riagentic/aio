@@ -109,6 +109,30 @@ Deno.test("it renders a plain <webview>, so Electron's own API stays reachable",
   assertEquals(typeof v.props.use, "function", "it is applied imperatively");
 });
 
+Deno.test("httpReferrer: the first load reads the attribute, later ones get it from loadURL", () => {
+  // `aio://app/` sends no Referer, and an embed that checks it refuses to
+  // play (YouTube error 153).
+  const ref = "https://example.com/";
+  const v = Browser({ src: "https://a.test/", httpReferrer: ref });
+  assertEquals(v.props.httpreferrer, ref);
+  assertEquals(
+    Browser({ src: "https://a.test/" }).props.httpreferrer,
+    undefined,
+  );
+  const opts: unknown[] = [];
+  const f = fake("https://a.test/");
+  // deno-lint-ignore no-explicit-any
+  (f as any).loadURL = (_u: string, o?: unknown) => {
+    opts.push(o);
+    return Promise.resolve();
+  };
+  // deno-lint-ignore no-explicit-any
+  navigate(f as any, "https://b.test/", ref);
+  // deno-lint-ignore no-explicit-any
+  navigate(f as any, "https://c.test/");
+  assertEquals(opts, [{ httpReferrer: ref }, undefined]);
+});
+
 // ── Mounted, through the real renderer ──────────────────────────────────────
 // The rules above hold for one call; these hold for a component that
 // RE-RENDERS, which every app's does. The mount used to be a closure written

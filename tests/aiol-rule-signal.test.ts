@@ -1548,6 +1548,17 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
     }),
     expect: 'own.set("watcher", …)',
   },
+  // `cell()` throws at boot on a state key named like a method.
+  {
+    name: "a state key named like a method",
+    files: app({
+      "src/cell.ts": cellFile(
+        "counter",
+        `{ state: { count: 0 }, methods: { count(s) { s.count++; } } }`,
+      ),
+    }),
+    expect: 'state key "count" collides with method',
+  },
 ];
 
 Deno.test("aiol: every rule fires on a violation of itself", async () => {

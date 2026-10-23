@@ -33,11 +33,19 @@ import { breakRootCascade } from "./root-cascade-defect-helper.ts";
  *  engine reports (always resolved `rgb()`, never a keyword or a var()). */
 function fakeDom(
   styles: Record<string, Record<string, string>>,
-  html: Array<{ id: string; tag: string; text?: string; children?: string[] }>,
+  html: Array<
+    {
+      id: string;
+      tag: string;
+      text?: string;
+      children?: string[];
+      attrs?: Record<string, string>;
+    }
+  >,
 ) {
   const byId = new Map<string, Record<string, unknown>>();
   const make = (
-    spec: { id: string; tag: string; text?: string; children?: string[] },
+    spec: (typeof html)[number],
   ): Record<string, unknown> => {
     const el: Record<string, unknown> = {
       tagName: spec.tag.toUpperCase(),
@@ -47,7 +55,8 @@ function fakeDom(
         ? [{ nodeType: 3, nodeValue: spec.text }]
         : [],
       children: [] as unknown[],
-      getAttribute: (n: string) => n === "class" ? spec.id : null,
+      getAttribute: (n: string) =>
+        n === "class" ? spec.id : spec.attrs?.[n] ?? null,
     };
     byId.set(spec.id, el);
     return el;
@@ -95,6 +104,36 @@ Deno.test("contrast: unreadable body text is reported", () => {
   } finally {
     console.warn = real;
   }
+});
+
+// A field report: text on a white sheet drawn UNDER a transparent editor
+// layer. The walk reads ancestors only, so it measured dark ink against the
+// dark page (1.12:1) on every paragraph. `data-aio-contrast="skip"` is the
+// app's opt-out for such a subtree — and only "skip" means it.
+Deno.test('contrast: data-aio-contrast="skip" silences its subtree only', () => {
+  setDevModeOverride(true);
+  const run = (attrs?: Record<string, string>) => {
+    _resetContrastAudit();
+    const warns: string[] = [];
+    const real = console.warn;
+    console.warn = (m: string) => warns.push(m);
+    try {
+      const dom = fakeDom({
+        page: { "background-color": "rgb(23, 26, 33)" },
+        p: { "color": "rgb(15, 22, 41)", "font-size": "14px" },
+      }, [
+        { id: "page", tag: "div", children: ["layer"] },
+        { id: "layer", tag: "div", children: ["p"], attrs },
+        { id: "p", tag: "p", text: "Body copy" },
+      ]);
+      return auditContrast(dom.get("page") as unknown as Element);
+    } finally {
+      console.warn = real;
+    }
+  };
+  assertEquals(run(), 1, "control: without the opt-out it is a finding");
+  assertEquals(run({ "data-aio-contrast": "skip" }), 0);
+  assertEquals(run({ "data-aio-contrast": "" }), 1, 'only "skip" opts out');
 });
 
 Deno.test("contrast: a readable pair is not reported", () => {

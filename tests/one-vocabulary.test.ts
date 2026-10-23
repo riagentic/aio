@@ -210,6 +210,50 @@ Deno.test("cmdFix: plain fix leaves old tasks alone and points at --migrate-task
   }
 });
 
+Deno.test("cmdFix: the app's own build/publish tasks are not called pre-alpha52", async () => {
+  const orig = Deno.cwd();
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
+  const dir = await tempDir("am-ownbuild-");
+  try {
+    // A field report: a site with no binary and its own build/publish scripts.
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        imports: { aio: `jsr:@riagentic/aio@${VERSION}` },
+        build: { targets: [] },
+        tasks: {
+          build: "deno run -A src/build.ts",
+          publish: "deno run -A scripts/publish.ts",
+        },
+      }),
+    );
+    Deno.chdir(dir);
+    await cmdFix([], {});
+    assert(
+      !logs.some((l) => l.includes("pre-alpha52")),
+      `the app's own tasks read as legacy:\n${logs.join("\n")}`,
+    );
+    // A real old-scaffold command under its old name is still flagged.
+    const cfg = JSON.parse(await Deno.readTextFile(join(dir, "deno.json")));
+    cfg.tasks["dev:browser"] = legacyStandardTasks(false, "browser")[
+      "dev:browser"
+    ];
+    await Deno.writeTextFile(join(dir, "deno.json"), JSON.stringify(cfg));
+    logs.length = 0;
+    await cmdFix([], {});
+    assert(
+      logs.some((l) => l.includes("pre-alpha52") && l.includes("dev:browser")),
+      `a pristine legacy task went unflagged:\n${logs.join("\n")}`,
+    );
+  } finally {
+    console.log = realLog;
+    Deno.chdir(orig);
+    await dropTempDir(dir);
+  }
+});
+
 // ── deno.json `client` / deprecated `target` at boot ────────────────────────
 
 /** Run a probe that prints what _denoJsonTargetClient resolved, from a temp

@@ -34,10 +34,12 @@ import {
   useRef,
   useSignal,
 } from "../air/aio-renderer.ts";
+import { _useWireId } from "../air/renderer-lifecycle.ts";
 import type { VChild, VNode } from "../air/vdom.ts";
 import { el } from "./h-spread.ts";
 import { firstTime } from "../protocol/said-once.ts";
 import { RadioGroup, Switch } from "./controls.ts";
+import { _noteKitRender } from "./styles.ts";
 
 // ── Shared prop helpers ──────────────────────────────────────────────
 
@@ -61,6 +63,7 @@ interface Common {
  *  different signatures in one module is the collision this whole file is
  *  about. */
 function joinClass(base: string, extra?: string): string {
+  _noteKitRender(base.split(" ")[0]!);
   return extra ? `${base} ${extra}` : base;
 }
 
@@ -69,6 +72,13 @@ function rest(props: Record<string, unknown>, own: string[]): Common {
   const out: Common = {};
   for (const k in props) if (!own.includes(k)) out[k] = props[k];
   return out;
+}
+
+/** `invalid` said to assistive tech, not only painted: the red border was the
+ *  whole signal, so a screen reader announced an invalid field as fine. Spread
+ *  BEFORE the caller's props, so an explicit `aria-invalid` wins. */
+function ariaInvalid(invalid: boolean | undefined): Common {
+  return invalid ? { "aria-invalid": "true" } : {};
 }
 
 // ── Button ───────────────────────────────────────────────────────────
@@ -110,6 +120,7 @@ export interface InputProps extends Common {
 export function Input(props: InputProps): VNode {
   const { invalid, onInput, onChange, class: cls } = props;
   return h("input", {
+    ...ariaInvalid(invalid),
     ...rest(props, ["invalid", "onInput", "onChange", "class"]),
     type: props.type ?? "text",
     class: joinClass(`aio-input${invalid ? " aio-input--invalid" : ""}`, cls),
@@ -159,6 +170,7 @@ export function Textarea(props: TextareaProps): VNode {
     );
   }
   return h("textarea", {
+    ...ariaInvalid(invalid),
     ...rest(props, ["invalid", "onInput", "class"]),
     rows: props.rows ?? 3,
     class: joinClass(
@@ -198,6 +210,7 @@ export function Select(props: SelectProps): VNode {
     }, opt.label ?? opt.value);
   });
   return el("select", {
+    ...ariaInvalid(invalid),
     ...rest(props, ["options", "value", "invalid", "onChange", "class"]),
     // `value` on the SELECT, not `selected` on each option.
     //
@@ -289,16 +302,19 @@ export interface FieldProps extends Common {
  *  Naming the control fixes both at once, and only when the caller hasn't
  *  already named it (an explicit `t`/`aria-label` always wins).
  *
- *  Returns true once it has named a control, so a Field with several inputs
- *  labels the first — exactly what a wrapping `<label>` would do. */
-function nameControl(child: unknown, label: string): boolean {
-  if (!child || typeof child !== "object") return false;
+ *  Returns the control it found (named or not), so a Field with several
+ *  inputs labels the first — exactly what a wrapping `<label>` would do. */
+function nameControl(child: unknown, label: string | null): VNode | null {
+  if (!child || typeof child !== "object") return null;
   if (Array.isArray(child)) {
-    for (const c of child) if (nameControl(c, label)) return true;
-    return false;
+    for (const c of child) {
+      const found = nameControl(c, label);
+      if (found) return found;
+    }
+    return null;
   }
   const v = child as VNode;
-  if (!("tag" in v) || !v.props) return false;
+  if (!("tag" in v) || !v.props) return null;
   const p = v.props as Record<string, unknown>;
   // Switch and RadioGroup are controls too. They were missing, so
   // `<Field label="Dark mode"><Switch/></Field>` rendered an unnamed switch
@@ -316,14 +332,47 @@ function nameControl(child: unknown, label: string): boolean {
     const ownLabel = v.tag === Switch && typeof p.label === "string" &&
       p.label.trim() !== "";
     if (
-      !ownLabel && p["aria-label"] === undefined &&
+      label !== null && !ownLabel && p["aria-label"] === undefined &&
       p["aria-labelledby"] === undefined && p.t === undefined &&
       p["data-testid"] === undefined
     ) p["aria-label"] = label;
-    return true;
+    return v;
   }
-  for (const c of v.children ?? []) if (nameControl(c, label)) return true;
-  return false;
+  for (const c of v.children ?? []) {
+    const found = nameControl(c, label);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Wire the Field's label, hint and error to its control.
+ *
+ *  The accessible name alone left the label dead to the POINTER: a sibling
+ *  `<label>` activates nothing without `for`, so clicking "Email" focused
+ *  nothing. And the error and hint were text beside the control and nothing
+ *  more: a screen reader landed on the field and never heard "Required", nor
+ *  that it was invalid. Not `for` on a group (a label targets one control),
+ *  nor on a Checkbox/Switch with its own label — clicking the heading must
+ *  not toggle the box. A caller's own `id`/`aria-*` always wins. */
+function wireControl(
+  ctrl: VNode,
+  base: string,
+  hasLabel: boolean,
+  said: "hint" | "error" | null,
+): string | undefined {
+  const p = ctrl.props as Record<string, unknown>;
+  const group = ctrl.tag === RadioGroup;
+  if (said && p["aria-describedby"] === undefined) {
+    p["aria-describedby"] = `${base}-${said}`;
+  }
+  if (said === "error" && !group && p["aria-invalid"] === undefined) {
+    p["aria-invalid"] = "true";
+  }
+  const ownText = (ctrl.tag === Checkbox || ctrl.tag === Switch) &&
+    p.label != null;
+  if (!hasLabel || group || ownText) return undefined;
+  if (p.id == null || p.id === "") p.id = `${base}-control`;
+  return String(p.id);
 }
 
 /** Wraps a control with a label, optional hint, and error message. Pass the
@@ -332,9 +381,13 @@ function nameControl(child: unknown, label: string): boolean {
  *  its semantic-surface name: `<Field label="Email">` → `ui.EmailInput`). */
 export function Field(props: FieldProps): VNode {
   const { label, hint, error, required, children, class: cls } = props;
-  if (typeof label === "string" && label.trim()) {
-    nameControl(children, label.trim());
-  }
+  const base = `aio-field-${_useWireId().replace(/[^0-9a-zA-Z]/g, "")}`;
+  const ctrl = nameControl(
+    children,
+    typeof label === "string" && label.trim() ? label.trim() : null,
+  );
+  const said = error ? "error" : hint != null ? "hint" : null;
+  const forId = ctrl ? wireControl(ctrl, base, label != null, said) : undefined;
   return h(
     "div",
     {
@@ -351,16 +404,18 @@ export function Field(props: FieldProps): VNode {
     label != null
       ? h(
         "label",
-        { class: "aio-field__label" },
+        { class: "aio-field__label", ...(forId ? { for: forId } : {}) },
         label,
         required ? h("span", { class: "aio-field__req" }, " *") : null,
       )
       : null,
     children,
     hint != null && !error
-      ? h("div", { class: "aio-field__hint" }, hint)
+      ? h("div", { class: "aio-field__hint", id: `${base}-hint` }, hint)
       : null,
-    error ? h("div", { class: "aio-field__error" }, error) : null,
+    error
+      ? h("div", { class: "aio-field__error", id: `${base}-error` }, error)
+      : null,
   );
 }
 
@@ -684,6 +739,13 @@ export function Modal(props: ModalProps): VNode | null {
   // The hooks therefore run BEFORE the `open` check, so hook order is the same
   // on an open render and a closed one.
   const live = useRef<ModalEntry>({ open: false });
+  // A JSX title (`title={<b>Delete {name}?</b>}`) is still the dialog's name:
+  // only a string one became `aria-label`, so every other dialog was
+  // announced as a nameless "dialog". Taken before the `open` check, like the
+  // hooks below, so hook order is the same open or closed.
+  const titleId = `aio-modal-${
+    _useWireId().replace(/[^0-9a-zA-Z]/g, "")
+  }-title`;
   const entry = live.current;
   const wasOpen = entry.open;
   entry.open = props.open;
@@ -798,7 +860,11 @@ export function Modal(props: ModalProps): VNode | null {
         // announced as a generic group.
         role: "dialog",
         "aria-modal": "true",
-        ...(typeof title === "string" ? { "aria-label": title } : {}),
+        ...(typeof title === "string"
+          ? { "aria-label": title }
+          : title != null
+          ? { "aria-labelledby": titleId }
+          : {}),
         // Focusable from script only — the fallback target when the dialog
         // holds nothing focusable, so focus still leaves the page behind.
         tabIndex: -1,
@@ -820,7 +886,9 @@ export function Modal(props: ModalProps): VNode | null {
           });
         },
       },
-      title != null ? h("div", { class: "aio-modal__title" }, title) : null,
+      title != null
+        ? h("div", { class: "aio-modal__title", id: titleId }, title)
+        : null,
       h("div", { class: "aio-modal__body" }, children),
       footer != null ? h("div", { class: "aio-modal__footer" }, footer) : null,
     ),

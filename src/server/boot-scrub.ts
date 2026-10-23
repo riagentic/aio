@@ -10,7 +10,7 @@ import type { DB } from "../db/types.ts";
 import { createDB } from "../db/async-db.ts";
 import { basename, dirname, join, resolve } from "@std/path";
 import type { Log } from "../diagnostics/logger-api.ts";
-import { applyCellFieldFilter } from "../state/state-filter.ts";
+import { applyCellFieldFilter, segNames } from "../state/state-filter.ts";
 import { unpersistedFromBase } from "../state/cell-persist-filter.ts";
 import type { CellFieldFilter } from "../state/cell-types.ts";
 import type { BootConfig } from "./aio-boot.ts";
@@ -461,7 +461,7 @@ export function persistedFields(
   for (const [id, filter] of Object.entries(filters)) {
     const slice = state[id];
     if (filter === "all" || !isRecord(slice)) continue;
-    const kept = applyCellFieldFilter(filter, slice);
+    const kept = applyCellFieldFilter(filter, slice, { wildcard: true });
     if (kept === slice) continue;
     out ??= { ...state };
     if (kept) out[id] = kept;
@@ -536,7 +536,12 @@ export function persistOffButStored(
     if (!f || f === "all") continue;
     const field = inner.join(".");
     const under = (p: string) =>
-      p === field || p.startsWith(field + ".") || field.startsWith(p + ".");
+      p === field || p.startsWith(field + ".") || field.startsWith(p + ".") ||
+      // A wildcard segment (`"*.busy"`) overlaps any key in its place.
+      (p.includes("*") &&
+        p.split(".").every((s, i) =>
+          i >= inner.length || segNames(s, String(inner[i]), true)
+        ));
     const kept = f !== "none" &&
       ("exclude" in f
         ? !f.exclude.some(under)

@@ -652,6 +652,8 @@ export const BRIEF_RUN_KEYS: readonly {
       "key",
       "users",
       "resolveUser",
+      "resolvePeer",
+      "peerTypes",
       "sessions",
       "auth { signup, ttlMs, cookie, totp, oidc, requireVerified, sendMail }",
       "auth { maxSessions, publicDir }",
@@ -666,7 +668,7 @@ export const BRIEF_RUN_KEYS: readonly {
       "electron { webviewTag, guestDownloads, ignoreDebugEnv, strictPin }",
     ],
   },
-  { group: "ui", keys: ["ui (below)"] },
+  { group: "ui", keys: ["ui (below)", "splash { show }"] },
   {
     group: "serving",
     keys: [
@@ -1196,6 +1198,7 @@ inspect  am logs [substr] [--level=warn] [--tag=cell:notes] [--since=15m] [--lin
          am errors [--lines=N] [--since=reload] · am health · am metrics · am heap · am top · am config
          am cost [--keys] [--cell=X] [--window=5m] · am doctor (running app vs aio on disk)
          am check (client bundle builds?) · am where <file> · am migrate [--from=X] (retired spellings)
+         am peer <appId> [--types=F] (what another running app lets you call, and its types)
          am testgen [entry] [--out=F]
 project  am create <name> · am add cell <n> · am add server <n> · am build [targets…] [--list] ·
          am compile [target] · am publish [--channel=C] [--notes=…] · am pin [<v>|latest|main] ·

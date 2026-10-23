@@ -28,6 +28,14 @@ export default function App() {
 }
 ```
 
+Forget it and the components render as bare HTML (a `<Menu>` draws its items
+inline). In dev the page says so once —
+`[aio-dev] an aio/ui component … nothing
+on this page styles the kit`. An app
+that styles the kit classes in its own CSS is not told: any rule naming the
+component's class (`.aio-menu`, `.aio-btn`, …) counts as styling it. `ui.theme`
+does not style the kit; `<UiStyles/>` does.
+
 Everything keys off `--aio-ui-*` tokens with a light + dark default (follows
 `prefers-color-scheme`), and **each one defaults to the matching token of the
 [default theme](theme.md)** — so an app that opted into `ui.theme` gets kit

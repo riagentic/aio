@@ -744,10 +744,6 @@ ${tmplRendererDiagnostics(true)}
   }
   connectUDS();
 
-  ipcMain.on('__aio:print', () => {
-    if (!win.isDestroyed()) win.webContents.print({ silent: false, printBackground: true });
-  });
-
   // open a link in the system browser. Allowlist http/https ONLY —
   // a compromised renderer must not reach file:/ or custom shell handlers.
   ipcMain.on('__aio:openExternal', (_event, url) => {

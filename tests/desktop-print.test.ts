@@ -31,6 +31,15 @@ Deno.test("print(): an aio desktop window prints through its main process, not w
   assertEquals(did, ["ipc"]);
 });
 
+Deno.test("print(): the WebSocket desktop window (only __aioShell) prints through its main process too", () => {
+  const did: string[] = [];
+  withGlobals({
+    __aioShell: { print: () => did.push("shell") },
+    print: () => did.push("window"),
+  }, () => print());
+  assertEquals(did, ["shell"]);
+});
+
 Deno.test("print(): a browser page uses window.print()", () => {
   const did: string[] = [];
   withGlobals({ print: () => did.push("window") }, () => print());

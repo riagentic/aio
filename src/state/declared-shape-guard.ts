@@ -18,6 +18,7 @@ import type { WirePatch } from "../protocol/patch-ops.ts";
 import type { CellFieldFilter } from "./cell-types.ts";
 import type { ComposedCells } from "./cell-compose-types.ts";
 import { detectShapeDrift } from "./cell-migrate.ts";
+import { segNames } from "./state-filter.ts";
 import { persistFilterOf, persistingCellIds } from "./cell-persist-filter.ts";
 
 type Obj = Record<string, unknown>;
@@ -79,9 +80,13 @@ function persisted(
   if ("include" in filter) return filter.include.includes(String(path[0]));
   if ("exclude" in filter) {
     const dotted = path.join(".");
-    return !filter.exclude.some((e) =>
-      dotted === e || dotted.startsWith(e + ".")
-    );
+    return !filter.exclude.some((e) => {
+      if (dotted === e || dotted.startsWith(e + ".")) return true;
+      // `"*.busy"` — a persist path's wildcard segment names any key.
+      const segs = e.split(".");
+      return segs.includes("*") && segs.length <= path.length &&
+        segs.every((s, i) => segNames(s, String(path[i]), true));
+    });
   }
   return true;
 }

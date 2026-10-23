@@ -117,13 +117,30 @@ Deno.test("web target: the service worker is versioned by content, precaches eve
     "index.html",
     "text/a.md",
   ]);
-  assertStringIncludes(sw, `const V = "aio-notes-abc123";`);
+  // …and by the deployment's scope: one origin hosts many apps and paths.
+  assertStringIncludes(
+    sw,
+    `const V = "aio-notes-abc123@" + self.registration.scope;`,
+  );
   assertStringIncludes(
     sw,
     `const FILES = ["./","./app.js","./index.html","./text/a.md"];`,
   );
-  // Old builds' caches are dropped — only this app's (prefix), never another's.
-  assertStringIncludes(sw, `k.startsWith("aio-notes-") && k !== V`);
+  // Old builds' caches are dropped — only this app's at this scope (or a name
+  // from before the scope was in it), never another app's or another path's.
+  const own = new RegExp(
+    JSON.parse(/const OWN = new RegExp\((".*")\);/.exec(sw)![1]!),
+  );
+  for (const k of ["aio-notes-0ld", "aio-notes-abc@https://h/a/"]) {
+    assert(own.test(k), k);
+  }
+  for (const k of ["aio-notes-pro-abc", "aio-notes-pro-abc@https://h/a/"]) {
+    assert(!own.test(k), k);
+  }
+  // This scope's own name, or a pre-scope one that holds only this scope's
+  // files (the Chromium test drives both).
+  assertStringIncludes(sw, `return Promise.resolve(m[2] === scope);`);
+  assertStringIncludes(sw, `rs.every((r) => r.url.startsWith(scope))`);
   // Offline navigation falls back to the shell.
   assertStringIncludes(sw, `c.match("./index.html")`);
   new Function(sw); // a syntax error here is a dead offline cache

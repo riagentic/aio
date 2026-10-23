@@ -20,6 +20,7 @@ import {
   _saysTypedKept,
   _staticEqual,
   _tagComponentError,
+  _throwIfNotANode,
   nullSlot,
 } from "./vdom-create.ts";
 import { _componentName } from "./hook-error.ts";
@@ -33,6 +34,7 @@ import {
   _firstLive,
   _liveFirstDom,
   _removeDomCleanup,
+  _supersededPortals,
   getDom,
   isChildOf,
   removeDom,
@@ -477,6 +479,7 @@ function _diffComponent(
         ? nv.children
         : (nv.props.children ?? nv.children),
     });
+    _throwIfNotANode(rendered);
   } catch (e) {
     ctx.hooks?.abortComponent?.(nv, hookState);
     if (e !== _LAZY_PENDING) {
@@ -558,6 +561,8 @@ function _mountPortalContent(target: Node, vnode: VNode, ctx: RenderCtx): void {
 }
 
 function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
+  // A vnode object handed back into the tree (a cached element) is live again.
+  _supersededPortals.delete(nv);
   const target = nv.props.target as Node;
   const oldTarget = ov.props.target as Node | undefined;
   if (!target) {
@@ -616,6 +621,9 @@ function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
       } finally {
         if (end && end.parentNode === target) target.removeChild(end);
       }
+      // The region is the NEW vnode's now; the old one's children describe
+      // nodes the diff replaced (see `_supersededPortals`).
+      if (ov !== nv) _supersededPortals.add(ov);
     }
   } finally {
     _setDelegationRoot(prevDelegation);

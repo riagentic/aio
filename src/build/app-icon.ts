@@ -169,11 +169,44 @@ export function monogramChar(name: string): string {
 /** FNV-1a over the name — a stable hue per app, on every machine and target.
  *  Exported as {@linkcode appHue} so the default THEME can tint an app in the
  *  same colour as its icon: one name, one identity, everywhere. */
-export function appHue(name: string): number {
+export function appHue(name: HueKey): number {
   return hueOf(name);
 }
 
-function hueOf(name: string): number {
+/** What keys an app's hue: its appId (hashed), or the hue itself — deno.json
+ *  `hue`, already resolved by {@linkcode declaredHue}. */
+export type HueKey = string | number;
+
+/** deno.json `hue`: the app's hue chosen instead of hashed — undefined when
+ *  unset, an integer 0–359 when valid, and a THROW for anything else (a hue
+ *  that silently fell back to the hash would be a setting with no effect).
+ *  Pure — ONE rule for the runtime and every build target. */
+export function declaredHue(
+  denoJson: Record<string, unknown> | null | undefined,
+): number | undefined {
+  const h = denoJson?.hue;
+  if (h === undefined) return undefined;
+  if (typeof h !== "number" || !Number.isInteger(h) || h < 0 || h > 359) {
+    throw new Error(
+      `deno.json "hue" must be an integer 0–359 (the app's colour on the ` +
+        `colour wheel, e.g. 210 for blue) — got ${JSON.stringify(h)}. ` +
+        `Remove it to use the hue hashed from the appId.`,
+    );
+  }
+  return h;
+}
+
+/** {@linkcode declaredHue} as the key every theme/icon function takes:
+ *  the declared hue, else the appId to hash. */
+export function hueKey(
+  denoJson: Record<string, unknown> | null | undefined,
+  appId: string,
+): HueKey {
+  return declaredHue(denoJson) ?? appId;
+}
+
+function hueOf(name: HueKey): number {
+  if (typeof name === "number") return name;
   let h = 0x811c9dc5;
   // `|| "app"` — a build path that never resolved a title/binaryName must get
   // A default icon, not a TypeError that fails the whole bundle. (The e2e
@@ -222,7 +255,7 @@ function fgLightness(hue: number): number {
 
 /** The colours of an app's default icon. Pastel body, deep monogram — legible
  *  on a light desktop and a dark one, which a single flat fill is not. */
-export function iconColors(name: string): {
+export function iconColors(name: HueKey): {
   hue: number;
   bg0: string;
   bg1: string;
@@ -294,7 +327,11 @@ export function appIconLabel(title: unknown, appId: string): string {
  *  `.desktop` entry and a README. `name` draws the LETTER; `id` keys the HUE —
  *  pass the appId, the key the theme tints on, so a title that is not the
  *  appId's spelling (or the "AIO App" fallback) cannot draw another colour. */
-export function appIconSvg(name: string, size = 512, id = name): string {
+export function appIconSvg(
+  name: string,
+  size = 512,
+  id: HueKey = name,
+): string {
   const { bg0, bg1, fg } = iconColors(id);
   const { pts, width } = placed(name, size);
   const d = pts
@@ -357,7 +394,7 @@ const cover = (d: number) => Math.max(0, Math.min(1, 0.5 - d));
 export function appIconPixels(
   name: string,
   size: number,
-  id = name,
+  id: HueKey = name,
 ): Uint8Array {
   const { bg0, bg1, fg } = iconColors(id);
   const hue = hueOf(id);
@@ -450,7 +487,7 @@ function chunk(type: string, data: Uint8Array): Uint8Array {
 export async function appIconPng(
   name: string,
   size = 512,
-  id = name,
+  id: HueKey = name,
 ): Promise<Uint8Array> {
   return await pngFromRgba(appIconPixels(name, size, id), size);
 }
@@ -504,7 +541,7 @@ export async function pngFromRgba(
 export async function appIconPngBase64(
   name: string,
   size = 256,
-  id = name,
+  id: HueKey = name,
 ): Promise<string> {
   const png = await appIconPng(name, size, id);
   let s = "";
@@ -568,7 +605,7 @@ export const ICO_SIZES = [256, 48, 32, 16] as const;
 export async function appIconIco(
   name: string,
   /** The appId the colour is hashed from — as every other icon path passes. */
-  id: string = name,
+  id: HueKey = name,
 ): Promise<Uint8Array> {
   return icoFromPngs(
     await Promise.all(ICO_SIZES.map((s) => appIconPng(name, s, id))),

@@ -544,7 +544,9 @@ function _warnCellSetDrift(booted: unknown): void {
     `that this server process did NOT boot (it has: [${
       [...server].join(", ")
     }]). Their methods dispatch into nothing — the UI renders and does not ` +
-    `work. Restart the server to pick them up.`;
+    `work. A cell the UI imports must be imported by the server entry too ` +
+    `(\`aio.run({ cells })\` boots what the entry imports) — add the ` +
+    `import there; if it already is, restart the server to pick it up.`;
   _diagEmit({
     type: "cell-set-drift",
     severity: "error",

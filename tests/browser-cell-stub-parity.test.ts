@@ -281,3 +281,23 @@ Deno.test("browser cell stub: deps-form selectors are callable (server parity)",
   );
   reset();
 });
+
+// The stub's OWN `$`-members (`cell.$pending()`) — the real factory installs
+// them at creation, and every in-process harness boots the real factory, so a
+// member the stub lacked passed every test and blanked the page in Chromium
+// ("c.$pending is not a function").
+Deno.test("browser cell stub: carries every `$`-member the real cell has", () => {
+  reset();
+  const dollar = (d: object) =>
+    Object.getOwnPropertyNames(d).filter((k) => k.startsWith("$")).sort();
+  // deno-lint-ignore no-explicit-any
+  const sDef = serverCell("parity-dollar-s", makeConfig() as any);
+  // deno-lint-ignore no-explicit-any
+  const bDef = browserCell("parity-dollar-b", makeConfig() as any);
+  assert(dollar(sDef).length > 0, "the real cell has `$`-members");
+  assertEquals(dollar(bDef), dollar(sDef));
+  const b = bDef as unknown as { $pending(m?: string): number };
+  assertEquals(b.$pending(), 0);
+  assertEquals(b.$pending("inc"), 0);
+  reset();
+});

@@ -20,6 +20,7 @@ import {
   waitForHttp,
 } from "./e2e-app-harness.ts";
 import { stopChild } from "./stop-child.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
 
 const ROOT = resolve(import.meta.dirname!, "..");
 const EXAMPLE = join(ROOT, "examples", "cli-tool");
@@ -62,7 +63,7 @@ async function todo(
   opts: { cwd?: string; env?: Record<string, string> } = {},
 ): Promise<{ code: number; out: string; err: string }> {
   await prime();
-  const cwd = opts.cwd ?? await Deno.makeTempDir({ prefix: "cli-tool-cwd-" });
+  const cwd = opts.cwd ?? await tempDir("cli-tool-cwd-");
   const p = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", "--config", CONFIG, APP, ...args],
     cwd,
@@ -139,7 +140,7 @@ Deno.test("cli-tool: --help from a foreign cwd, exit 0, generated from the spec"
   const r = await todo(["--help"]);
   assertEquals(r.code, 0, r.err);
   assertEquals(r.err, "", "help belongs on stdout, with nothing on stderr");
-  assertStringIncludes(r.out, "usage: todo <command> [arg...] [flags]");
+  assertStringIncludes(r.out, "usage: ex-cli-tool <command> [arg...] [flags]");
   for (const c of commands) {
     assertMatch(
       r.out,
@@ -186,13 +187,13 @@ Deno.test("cli-tool: a typo is refused with exit 2; no server is exit 1 on stder
   assertEquals(noServer.code, 1);
   assertStringIncludes(
     noServer.err,
-    `error: no server at ${dead} — start one: todo serve`,
+    `error: no server at ${dead} — start one: ex-cli-tool serve`,
   );
   const asJson = await todo(["list", "--json", `--url=${dead}`]);
   assertEquals(asJson.code, 1);
   assertEquals(
     JSON.parse(asJson.out).error,
-    `no server at ${dead} — start one: todo serve`,
+    `no server at ${dead} — start one: ex-cli-tool serve`,
   );
 });
 
@@ -212,14 +213,14 @@ Deno.test("cli-tool: the example's own usage refusals honour --json", async () =
     const r = await todo([...c, "--json", `--url=${dead}`]);
     assertEquals(r.code, 2, `${c.join(" ")}: ${r.err}`);
     const err = JSON.parse(r.out).error as string;
-    assertMatch(err, /^todo (add|done) </, c.join(" "));
+    assertMatch(err, /^ex-cli-tool (add|done) </, c.join(" "));
   }
 });
 
 Deno.test("cli-tool: serve + add/list/done/--json/--watch against the real server", async () => {
   const port = freePort();
   const url = `ws://127.0.0.1:${port}/ws`;
-  const home = await Deno.makeTempDir({ prefix: "cli-tool-home-" });
+  const home = await tempDir("cli-tool-home-");
   const server = new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", "--config", CONFIG, APP, "serve", `--port=${port}`],
     cwd: EXAMPLE,
@@ -271,7 +272,7 @@ Deno.test("cli-tool: serve + add/list/done/--json/--watch against the real serve
     assertEquals(bad.out, "");
     const usage = await todo(["done", "x", `--url=${url}`], { env });
     assertEquals(usage.code, 2);
-    assertStringIncludes(usage.err, "error: todo done <id>");
+    assertStringIncludes(usage.err, "error: ex-cli-tool done <id>");
 
     // --watch on a pipe: plain frames appended as the server changes
     const watcher = new Deno.Command(Deno.execPath(), {
@@ -285,7 +286,7 @@ Deno.test("cli-tool: serve + add/list/done/--json/--watch against the real serve
         "--watch",
         `--url=${url}`,
       ],
-      cwd: await Deno.makeTempDir({ prefix: "cli-tool-cwd-" }),
+      cwd: await tempDir("cli-tool-cwd-"),
       env: { ...childEnv(), NO_COLOR: "1", ...env },
       stdin: "null",
       stdout: "piped",
@@ -348,7 +349,7 @@ Deno.test({
   fn: async () => {
     // A copy of the example wired to THIS checkout through dep/aio — the same
     // layout `am create` scaffolds, so the build runs the way a user's does.
-    const dir = await Deno.makeTempDir({ prefix: "cli-tool-build-" });
+    const dir = await tempDir("cli-tool-build-");
     for (const rel of ["src/app.ts", "src/cell/todos.ts"]) {
       await Deno.mkdir(join(dir, rel, ".."), { recursive: true });
       await Deno.copyFile(join(EXAMPLE, rel), join(dir, rel));
@@ -387,7 +388,7 @@ Deno.test({
     const bin = placedBinary(dir);
     await Deno.chmod(bin, 0o755);
 
-    const foreign = await Deno.makeTempDir({ prefix: "foreign-cwd-" });
+    const foreign = await tempDir("foreign-cwd-");
     const help = await new Deno.Command(bin, {
       args: ["--help"],
       cwd: foreign,
@@ -399,7 +400,7 @@ Deno.test({
     assertEquals(help.code, 0, dec.decode(help.stderr));
     assertStringIncludes(
       dec.decode(help.stdout),
-      "usage: todo <command> [arg...] [flags]",
+      "usage: ex-cli-tool <command> [arg...] [flags]",
     );
     const typo = await new Deno.Command(bin, {
       args: ["lsit"],
@@ -414,7 +415,7 @@ Deno.test({
 
     // and the binary IS the server too: `serve` boots from the foreign cwd
     const port = freePort();
-    const home = await Deno.makeTempDir({ prefix: "cli-tool-home-" });
+    const home = await tempDir("cli-tool-home-");
     const proc = new Deno.Command(bin, {
       args: ["serve", `--port=${port}`],
       cwd: foreign,

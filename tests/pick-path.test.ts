@@ -10,7 +10,12 @@
 // a FAKE provider on PATH, which is the only way to exercise a native dialog in
 // CI without a human clicking.
 import { tempDirSync } from "../src/testing/temp-dir.ts";
-import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { DELIMITER, join } from "@std/path";
 import { EXE, writeProgram } from "./fake-program-helper.ts";
 import { pickDirectory, pickFile, pickSpec } from "../src/server/pick-path.ts";
@@ -297,6 +302,21 @@ Deno.test("pickSpec: the Windows dialog has a TopMost OWNER — never ShowDialog
       /ShowDialog\(\)/.test(ps),
       false,
       `an unowned ShowDialog() is back (${kind})`,
+    );
+  }
+});
+
+Deno.test("pickSpec: every Windows dialog writes UTF-8 — a non-ASCII path comes back whole", () => {
+  // Windows PowerShell writes redirected stdout in the OEM code page (437,
+  // 852, …), read here as UTF-8: `C:\Users\José\Résumé.txt` came back
+  // `R�sum�.txt` (proven on a Windows VM). The first statement fixes it.
+  for (const kind of ["file", "files", "directory", "save"] as const) {
+    const ps = pickSpec("windows", "powershell", kind, {})!.args.at(-1)!;
+    assert(
+      ps.startsWith(
+        "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false;",
+      ),
+      `${kind}: ${ps.slice(0, 60)}`,
     );
   }
 });

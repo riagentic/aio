@@ -54,8 +54,30 @@ Deno.test("sync sendTo: a peer over the high-water mark is closed 1013, not writ
   const r = rig();
   try {
     const stuck = fakeSocket(WS_BUFFER_HIGH_WATER + 1);
+    // Its FIRST request is answered all the same: one frame per connection,
+    // sent while the handshake state drains (see
+    // tests/sync-first-catchup-over-high-water.test.ts). Every later frame
+    // obeys the mark.
     r.handler.handleSync(req, { id: "c1" }, stuck.socket);
     await macro();
+    assertEquals(stuck.closes.length, 0);
+    assert(stuck.sent.some((m) => m.includes('"t":"sync-res"')));
+    // Over the mark alone is not "not draining" (a slow reader's handshake
+    // state is over it while it drains — tests/sync-send-slow-reader.test.ts):
+    // a backlog that has not fallen for the stall window is.
+    r.handler.handleSync(req, { id: "c1" }, stuck.socket);
+    await macro();
+    assertEquals(stuck.closes.length, 0, "first sight over the mark");
+    stuck.sent.length = 0;
+    const realNow = Date.now;
+    const t = realNow();
+    Date.now = () => t + 60_000;
+    try {
+      r.handler.handleSync(req, { id: "c1" }, stuck.socket);
+      await macro();
+    } finally {
+      Date.now = realNow;
+    }
     assertEquals(
       stuck.sent.length,
       0,

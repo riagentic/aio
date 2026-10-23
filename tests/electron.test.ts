@@ -702,10 +702,11 @@ return { loadBounds, saveBounds, restoreMax: () => __aioRestoreMax };`;
   return { api, files, state };
 }
 
-const fakeWin = (max: boolean) => ({
+const fakeWin = (max: boolean, full = false) => ({
   isMaximized: () => max,
+  isFullScreen: () => full,
   getBounds: () =>
-    max
+    max || full
       ? { x: 0, y: 37, width: 1280, height: 863 }
       : { x: 300, y: 120, width: 800, height: 600 },
   getNormalBounds: () => ({ x: 300, y: 120, width: 800, height: 600 }),
@@ -744,6 +745,25 @@ Deno.test("electron bounds: a maximized window saves its NORMAL rect and comes b
       declaredWidth: 800,
       declaredHeight: 600,
     });
+    api.loadBounds(800, 600);
+    assertEquals(api.restoreMax(), false);
+  }
+});
+
+Deno.test("electron bounds: a FULLSCREEN window saves its NORMAL rect, not the screen", async () => {
+  for (const async of [false, true]) {
+    const { api, files, state } = boundsHarness(async);
+    api.loadBounds(800, 600);
+    api.saveBounds(fakeWin(false, true));
+    await Promise.resolve();
+    assertEquals(JSON.parse(files.get(state)!), {
+      x: 300,
+      y: 120,
+      width: 800,
+      height: 600,
+      declaredWidth: 800,
+      declaredHeight: 600,
+    }, `async=${async}`);
     api.loadBounds(800, 600);
     assertEquals(api.restoreMax(), false);
   }

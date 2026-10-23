@@ -23,7 +23,7 @@
 import { withRefusalCode } from "../state/method-rejection.ts";
 import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import { nameIsTaken } from "../state/cell-helpers.ts";
-import { composeCells } from "../state/cell-compose.ts";
+import { _disableKeepingState, composeCells } from "../state/cell-compose.ts";
 import { context } from "../diagnostics/contexts.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { createDispatch } from "../state/dispatch.ts";
@@ -519,7 +519,8 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       // is running between messages — so exactly its patches are dropped.
       disabledLocally = true;
       try {
-        composed.registry.disable(name, app);
+        if (msg.keep === true) _disableKeepingState(composed, name, app);
+        else composed.registry.disable(name, app);
       } finally {
         disabledLocally = false;
       }

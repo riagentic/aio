@@ -203,6 +203,21 @@ the page warns once (`[aio] Dark OS, light page…`). Fix it with one line:
 
 An app that already paints its own dark page is unaffected and gets no warning.
 
+### The dev contrast check
+
+In dev, aio reads the computed colours of the text on the page and warns once
+per pair (`[aio-dev] <p> text is unreadable on its background: 1.12:1…`). It
+takes the background from the text's **ancestors**, so it misreads text whose
+backdrop is a separate positioned element — a white sheet drawn _under_ a
+transparent editor layer, a card behind an overlay. Mark such a subtree and the
+check skips it (and everything inside it):
+
+```tsx
+<div class="editor" data-aio-contrast="skip">…</div>;
+```
+
+Only the exact value `"skip"` counts. Production never runs the check.
+
 ## Building **on** the default, safely
 
 There is a third thing you might want: you like the default look and want to
@@ -310,3 +325,22 @@ The accent hue is a hash of the app's `appId` — the same hash that draws the
 buttons are one colour the first time it runs. It follows identity rather than
 `ui.title`, so a title that changes with the route does not recolour the app
 mid-session.
+
+### Choosing the hue — deno.json `hue`
+
+A hashed hue is a colour nobody chose, and some land badly (a magenta accent,
+warm-tinted dark surfaces). Pick it instead, in the app's `deno.json`, next to
+`appId`:
+
+```jsonc
+{ "appId": "my-notes", "hue": 210 } // 0–359 on the colour wheel; 210 = blue
+```
+
+It replaces the hash **everywhere** the hash is used — the theme (accent, the
+contrast-solved inks, the hue-tinted neutrals, `--aio-hue`), the generated icon
+on every target, the themed title bar, the window background, the splash and the
+download window — so the app stays one colour. It lives in `deno.json` rather
+than `aio.run({ ui })` because the build draws the packaged icons without
+running your entry; one key read by both keeps them from disagreeing. Anything
+but an integer 0–359 is refused (the build exits, `aio.run()` throws), never
+silently replaced by the hash. Apps that do not set it keep their hashed colour.

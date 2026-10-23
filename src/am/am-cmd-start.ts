@@ -21,6 +21,7 @@ import {
   probeEndpoint,
   removeLockIfOwner,
   replaceLockIf,
+  resolveAppId,
   STARTUP_GRACE_MS,
   STUCK_STARTING_MS,
   writeLaunchInfo,
@@ -55,19 +56,25 @@ import { detectMode, out, outError, sayErr } from "./am-output.ts";
 import {
   amLockKey,
   declaredPort,
+  inInstancesHint,
   liveLock,
   maintenanceMessage,
   maintenanceOp,
+  printable,
+  readEntryConfig,
   readPid,
   removePid,
   resolveAmAppId,
   resolveEntry,
   runningApps,
+  runningInstancesOf,
+  sharedLockStartRefusal,
 } from "./am-utils.ts";
 import {
   componentLaunchArgs,
   componentPort,
   processPlan,
+  projectComponents,
 } from "./am-components.ts";
 import { captureLaunchEnv, dropFreshHome, withEnv } from "./am-instance.ts";
 import { resolveControlPort } from "./am-http.ts";
@@ -85,7 +92,7 @@ import {
   stdoutLogPath,
 } from "./am-launch.ts";
 import {
-  ALREADY_RUNNING_FIX,
+  alreadyRunningFix,
   alreadyRunningLine,
   foreignCheckout,
   notAnsweringLine,
@@ -111,6 +118,15 @@ export async function ensureSingleton(
   if (!isLockOwnerAlive(pf)) {
     removePid(appId, pf);
     return;
+  }
+
+  // Another apps root's app, under a lock folder this root shares (two
+  // `--instance` names that differ only in punctuation): never this scope's
+  // to wait for, attach to or reclaim — refused, naming whose it is.
+  const shared = sharedLockStartRefusal(pf);
+  if (shared) {
+    outError(shared.error, mode, shared.fix);
+    Deno.exit(1);
   }
 
   // `am backup` / `am restore` holding the lock (`maintenanceMark`): not an
@@ -186,7 +202,7 @@ export async function ensureSingleton(
       if (probePort > 0) responds = await doorAnswers(probePort);
       if (responds) {
         // It's actually started — refuse
-        outError(alreadyRunningLine(pf), mode, ALREADY_RUNNING_FIX);
+        outError(alreadyRunningLine(pf), mode, alreadyRunningFix());
         Deno.exit(1);
       }
       outError(notAnsweringLine(pf), mode);
@@ -259,7 +275,7 @@ export async function ensureSingleton(
     const at = responds ? null : await probeEndpoint(pf);
     const there = at !== null && at.state !== "gone";
     if (there) outError(notAnsweringLine(pf), mode);
-    else outError(alreadyRunningLine(pf), mode, ALREADY_RUNNING_FIX);
+    else outError(alreadyRunningLine(pf), mode, alreadyRunningFix());
     Deno.exit(1);
   }
 
@@ -334,6 +350,44 @@ export function entryRefusal(flagEntry?: string): string | null {
   return flagEntry
     ? `entry not found: ${flagEntry}`
     : 'no src/app.ts found — add "entry" to deno.json or use --entry=<path>';
+}
+
+/** `am start`'s refusal for an `--app` that names no app of this project, or
+ *  null. The child runs the project's entry, which takes its OWN id: `--app=
+ *  nope` ran the project's app under a second lock named `nope`, and with
+ *  `--fresh` named the throwaway home after `nope`, so stop never dropped it.
+ *  Null wherever am cannot know the id the entry runs as — an explicit
+ *  `--entry` (a component's, or the user's choice), a project of components,
+ *  a computed `appId`, no entry. */
+export function appFlagRefusal(
+  flags: Pick<GlobalFlags, "app" | "entry">,
+  root = projectRoot(),
+): string | null {
+  if (flags.app === undefined || flags.entry !== undefined) return null;
+  // A project of components: `processPlan` already matched `--app` against
+  // them, and what its default entry runs as is the runtime's own rule.
+  if (projectComponents(root).length > 0) return null;
+  const entry = resolveEntry();
+  if (!entry) return null;
+  let src: string;
+  try {
+    src = Deno.readTextFileSync(entry);
+  } catch {
+    return null; // aio-ok: unreadable — entryRefusal / the child say so
+  }
+  const literal = readEntryConfig().appId;
+  if (!literal && /\bappId\b/.test(src)) return null;
+  let ids: string[];
+  try {
+    ids = [resolveAmAppId()];
+  } catch {
+    return null; // aio-ok: no id to compare — the child decides
+  }
+  if (literal) ids = [...new Set([...ids, resolveAppId(literal)])];
+  if (ids.includes(resolveAmAppId(flags.app))) return null;
+  return `--app=${printable(flags.app)} names no app of this project ` +
+    `(${root}) — its entry runs as ${ids.join(", ")}: am start ` +
+    `--app=${ids[0]}, or no --app`;
 }
 
 /** The client a launch with these flags runs: `--client=` first, else the
@@ -427,6 +481,9 @@ export async function cmdStart(
     }
   }
 
+  /** `--app` came from a positional that named a RUNNING app — not this
+   *  project's to judge: the lock below answers "already running". */
+  let runningNamed = false;
   // A project can be more than one app. When it says so — labelled build
   // targets with their own entries — `am start` means the PROJECT and
   // `am start <label>` means one component of it. Ordinary repos never take
@@ -446,6 +503,7 @@ export async function cmdStart(
     // on the wrong app, which is worse than the refusal it replaced.
     if (plan.kind === "single" && plan.appId) {
       flags = { ...flags, app: plan.appId };
+      runningNamed = true;
     }
     if (plan.kind === "one" || plan.kind === "all") {
       const list = plan.kind === "one" ? [plan.component] : plan.components;
@@ -465,6 +523,13 @@ export async function cmdStart(
       }
       progress.end();
       return;
+    }
+  }
+  {
+    const bad = runningNamed ? null : appFlagRefusal(flags);
+    if (bad) {
+      outError(bad, mode);
+      Deno.exit(1);
     }
   }
   const appId = resolveAmAppId(flags.app);
@@ -555,11 +620,15 @@ export async function cmdStart(
     if (result.held !== undefined) {
       outError(heldLockLine(appId, result.existing, result.held), mode);
     } else {
-      outError(
-        alreadyRunningLine(result.existing),
-        mode,
-        maintenanceOp(result.existing) ? undefined : ALREADY_RUNNING_FIX,
-      );
+      const shared = sharedLockStartRefusal(result.existing);
+      if (shared) outError(shared.error, mode, shared.fix);
+      else {
+        outError(
+          alreadyRunningLine(result.existing),
+          mode,
+          maintenanceOp(result.existing) ? undefined : alreadyRunningFix(),
+        );
+      }
     }
     Deno.exit(1);
   }
@@ -736,6 +805,7 @@ export async function cmdStart(
     interactive: amIsInteractive(),
     inheritedDisplay: Deno.env.get("DISPLAY"),
     inheritedXauthority: Deno.env.get("XAUTHORITY"),
+    inheritedElectronArgs: Deno.env.get("AIO_ELECTRON_ARGS"),
     // A client that never opens a tab gets no "tabs suppressed" note — the
     // note is about what WOULD have happened, and for server-only nothing
     // would (a hunter read it as "my server-only app tried to open a tab").
@@ -1319,14 +1389,9 @@ export function localAppUrl(port: number, tls = false): string | undefined {
   return port > 0 ? `${tls ? "https" : "http"}://localhost:${port}` : undefined;
 }
 
-/** Does this instance serve TLS? A `trojanPort` is the plain-HTTP control
- *  port TLS leaves beside the listener; `discovery.tls` is set on an exposed
- *  boot. Either says https. Pure. */
-export function servesTls(
-  lock?: { trojanPort?: number; discovery?: { tls: boolean } } | null,
-): boolean {
-  return lock?.trojanPort !== undefined || lock?.discovery?.tls === true;
-}
+// Moved beside `endpointOf` so `peer()` (src/server) reads the same rule.
+import { servesTls } from "../server/lock-owner.ts";
+export { servesTls };
 
 /** `am start`'s verdict for a child that is up — the pretty line and the
  *  JSON document. A SOCKET-ONLY app (the desktop shape) bound no port, and
@@ -1624,7 +1689,12 @@ export function noLockMessage(appId: string): string {
     // with --app=<id>" repeated the id that had already resolved and left out
     // the only thing that tells the instances apart.
     const same = running.filter((i) => i.appId === appId);
-    if (same.length > 0) {
+    // Running in an `--instance` (another lock dir): what status / state /
+    // dispatch already say. `am stop` listed every OTHER app instead.
+    const inInstances = same.length ? [] : runningInstancesOf(appId);
+    if (inInstances.length > 0) {
+      live = `\n  "${appId}" IS ${inInstancesHint(inInstances)}`;
+    } else if (same.length > 0) {
       const how = (i: (typeof same)[number]): string => {
         const home = i.home ?? appHome(appId);
         const profile = i.profile ?? profileOfHome(appId, home);

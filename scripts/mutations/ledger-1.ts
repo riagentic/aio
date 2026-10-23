@@ -1182,8 +1182,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "the sync handler keeps writing sync-res / acks / whole-cell pushes to a peer that stopped reading — unbounded server heap per stuck sync client",
     file: "src/sync/server-handler.ts",
-    find: "    if (!gone && held > SYNC_SOCKET_HIGH_WATER) {",
-    replace: "    if (!gone && held < 0) {",
+    find: "      !gone && !_firstAnswer.has(socket) &&",
+    replace: "      !gone && false &&",
     test: "tests/sync-send-high-water.test.ts",
     filter:
       "sync sendTo: a peer over the high-water mark is closed 1013, not written to; a draining one is answered",
@@ -4263,6 +4263,16 @@ export const LEDGER_1: readonly Mutation[] = [
   },
   {
     what:
+      "a server stop broadcasts its cell reset — every connected page blanks to initial state while the server is down",
+    file: "src/server/aio-dispatch.ts",
+    find: "      if (teardown) return;",
+    replace: "      void teardown;",
+    test: "tests/shutdown-reset-not-broadcast.test.ts",
+    filter:
+      "shutdown: the cell reset on the way out is not broadcast to clients",
+  },
+  {
+    what:
       "a keyed list turning unkeyed anchors later siblings on an emptied DocumentFragment, so a fragment row's following siblings land past the region's end",
     file: "src/air/vdom-diff-children.ts",
     find:
@@ -5111,9 +5121,9 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "a typo below the head of a nested exclude path silently excludes nothing and leaks the field",
     file: "src/state/cell-helpers.ts",
-    find: "if (excludePathCanMatch(decl[segs[0]!], segs, 1)) continue;",
+    find: "if (excludePathCanMatch(decl[segs[0]!], segs, 1, wild)) continue;",
     replace:
-      "if (excludePathCanMatch(decl[segs[0]!], segs, 1) || segs.length > 0) continue;",
+      "if (excludePathCanMatch(decl[segs[0]!], segs, 1, wild) || segs.length > 0) continue;",
     test: "tests/nested-exclude-typo-warns.test.ts",
     filter:
       "a nested exclude path whose inner segment matches nothing in a closed declared shape warns, per side",
@@ -5499,7 +5509,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "the dev checkpoint writes persist-excluded fields (top-level and nested secrets) to logs/checkpoint.json on disk",
     file: "src/server/boot-scrub.ts",
-    find: "const kept = applyCellFieldFilter(filter, slice);",
+    find:
+      "const kept = applyCellFieldFilter(filter, slice, { wildcard: true });",
     replace: "const kept: Record<string, unknown> | undefined = slice;",
     test: "tests/checkpoint-persist-exclude.test.ts",
     filter:
@@ -5641,8 +5652,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "amui restart of a profile instance relaunches without its profile and boots the default instance instead",
     file: "amui/src/manager.ts",
-    find: `const r = await startApp(path, "browser", running?.profile, {`,
-    replace: `const r = await startApp(path, "browser", undefined, {`,
+    find: `const r = await startApp(path, client, running?.profile, {`,
+    replace: `const r = await startApp(path, client, undefined, {`,
     test: "tests/amui-multi-instance.test.ts",
     filter:
       "amui restart of a profile instance boots that profile and waits for IT",
@@ -5661,8 +5672,9 @@ export const LEDGER_1: readonly Mutation[] = [
       "amui start/restart counts a sibling instance already up in the directory as the new boot succeeding",
     file: "amui/src/server/proc.server.ts",
     find:
-      `if (await registeredAt(dir, undefined, before)) return { up: true };`,
-    replace: `if (await registeredAt(dir)) return { up: true };`,
+      `if (await registeredAt(dir, undefined, before, true)) return { up: true };`,
+    replace:
+      `if (await registeredAt(dir, undefined, undefined, true)) return { up: true };`,
     test: "tests/amui-multi-instance.test.ts",
     filter:
       "amui restart of a profile instance boots that profile and waits for IT",
@@ -5939,8 +5951,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "the report timeline screen reads only the visible declaration and ignores persist, so diff values of persist-excluded fields reach the report",
     file: "src/server/report.ts",
-    find: "    for (const filters of screens) {",
-    replace: "    for (const filters of screens.slice(0, 1)) {",
+    find: "    for (const { filters, wildcard } of screens) {",
+    replace: "    for (const { filters, wildcard } of screens.slice(0, 1)) {",
     test: "tests/report-persist-exclude.test.ts",
     filter:
       "report timeline: diff values and args of writes to a persist-excluded field are withheld",
@@ -6057,9 +6069,9 @@ export const LEDGER_1: readonly Mutation[] = [
       "removeDom skips unmount teardown entirely for an element no longer inside its parent, leaking its actions",
     file: "src/air/vdom-remove.ts",
     find:
-      '  } else if (\n    typeof vnode === "object" && typeof vnode.tag === "string" && vnode._dom\n  ) {',
+      '  } else if (typeof vnode === "object" && typeof vnode.tag === "string") {',
     replace:
-      '  } else if (\n    false as boolean && typeof vnode === "object" && typeof vnode.tag === "string" && vnode._dom\n  ) {',
+      '  } else if (false as boolean && typeof vnode === "object" && typeof vnode.tag === "string") {',
     test: "tests/air-remove-detached-teardown.test.ts",
     filter:
       "removeDom: an element taken out of its parent by someone else still has its teardown run",
@@ -6332,7 +6344,7 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "amui Logs tab of a profile instance tails the default home's log dir instead of the instance's own",
     file: "amui/src/manager.ts",
-    find: "          proj.running?.home ?? null,\n",
+    find: "          ident?.home ?? null,\n",
     replace: "          null,\n",
     test: "tests/amui-multi-instance.test.ts",
     filter:
@@ -6401,8 +6413,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "no-lock message for a running id lists it twice and never names the profile or home",
     file: "src/am/am-cmd-start.ts",
-    find: "    if (same.length > 0) {",
-    replace: "    if (same.length > 99) {",
+    find: "    } else if (same.length > 0) {",
+    replace: "    } else if (same.length > 99) {",
     test: "tests/am-no-lock-names-sibling-homes.test.ts",
     filter: "am: a lock miss on a running id names the homes it runs from",
   },

@@ -70,6 +70,8 @@ export function splashSession(spec: SplashSpec, opts: {
   /** Electron's main process draws the splash when Electron is already
    *  here (Windows): the helper opens only for a download. */
   electronDraws?: boolean;
+  /** `spec`'s `show` is the app's run-time one (`aio.run({ splash })`). */
+  showByApp?: boolean;
 }): SplashSession {
   const now = opts.now ?? (() => performance.now());
   const look = lookOf(spec);
@@ -150,6 +152,8 @@ export function splashSession(spec: SplashSpec, opts: {
         (() =>
           splashBackend(spec, { log: opts.log.info, target: opts.target })))();
       if (!opener) return step({ type: "lost" });
+      // Closed while the helper was starting: it never maps.
+      if (state.closed) return opener.dispose?.();
       const d = await opener.open(opts.title, text());
       dialog = d;
       if (state.closed) return void d.close();
@@ -225,7 +229,9 @@ export function splashSession(spec: SplashSpec, opts: {
         deferred = false;
         state = { ...state, readyAt: now(), closed: "ready" };
         opts.log.info(
-          `electron: splash — not shown (show: "firstStart", no download)`,
+          opts.showByApp
+            ? `electron: splash — not shown (the app's run-time show: "firstStart")`
+            : `electron: splash — not shown (show: "firstStart", no download)`,
         );
         return done("ready");
       }

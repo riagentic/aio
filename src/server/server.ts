@@ -52,6 +52,13 @@ import {
   mountOutsideMessage,
 } from "./paths.ts";
 import { PIN_TTL_MS, verifyPin } from "./pairing.ts";
+import { BLOB_URL_PREFIX } from "./blobs.ts";
+import {
+  PEER_HEADER,
+  PEER_UPLOAD_PATH,
+  peerUpload,
+  verifyPeer,
+} from "./peer-proof.ts";
 export type { ServerConfig, ServerHandle } from "./server-types.ts";
 export { _timingSafeEqual } from "./server-auth.ts";
 
@@ -81,6 +88,7 @@ import {
   _buildUserResolver,
   _extractTokenWithSource,
   _isPresented,
+  _shapeChecked,
   _timingSafeEqual,
   armLocalControl,
   authFailBudgetExceeded,
@@ -474,6 +482,10 @@ export function createServer(config: ServerConfig): ServerHandle {
   // navigations, so they carry no Referer. Static `users` / `resolveUser`
   // tokens are unaffected everywhere, and the loud ?token= warning still
   // fires (see `_warnTokenInUrl`).
+  /** `resolvePeer`, shape-checked like `resolveUser` (absent: no path 0). */
+  const _peerResolver = config.resolvePeer
+    ? _shapeChecked("resolvePeer", config.resolvePeer)
+    : undefined;
   const _userResolver = _sessionResolver
     ? async (tok: string, urlBlocked = false) =>
       (urlBlocked ? null : _sessionResolver(tok)) ??
@@ -947,6 +959,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     lang: config.lang,
     dir: config.dir,
     themeName: config.themeName,
+    hue: config.hue,
     // Injected into the page's `window.__aioConfig` — see `clientConfig`
     // above. The shell carries it as well as the `cfg` frame because a page
     // can boot sync before the frame lands.
@@ -1124,18 +1137,37 @@ export function createServer(config: ServerConfig): ServerHandle {
   // — and fell back to the last one booted. The boot's own context, captured
   // here, is put back around every request (and the sockets it upgrades).
   const _asThisApp = AsyncLocalStorage.snapshot();
-  const handleRequest = async (
+  const handleRequest = (
     req: Request,
     info?: Deno.ServeHandlerInfo,
-  ): Promise<Response> => {
-    const resp = await _asThisApp(handleRequestInner, req, info);
-    // A 101 is a protocol switch: its headers are the handshake, and adding to
-    // them is at best ignored and at worst a failed upgrade.
-    if (resp.status === 101) return resp;
-    return await encodeResponse(req, withSecurityHeaders(resp), {
-      compress: config.security?.compress,
+  ): Promise<Response> =>
+    _asThisApp(async () => {
+      try {
+        const resp = await handleRequestInner(req, info);
+        // A 101 is a protocol switch: its headers are the handshake, and
+        // adding to them is at best ignored and at worst a failed upgrade.
+        if (resp.status === 101) return resp;
+        return await encodeResponse(req, withSecurityHeaders(resp), {
+          compress: config.security?.compress,
+        });
+      } catch (e) {
+        // Anything that escapes here reached `Deno.serve`'s default handler:
+        // a bare `Error: …` on stderr naming no method, path or app, and in no
+        // log file. The common case is a route whose STREAMED body errors
+        // while the finisher reads it (a DB cursor that dies mid-response).
+        log.error(
+          "http",
+          `${req.method} ${
+            parseRequestUrl(req)?.pathname ?? "?"
+          } failed before its response was sent — ${
+            e instanceof Error ? (e.stack ?? e.message) : String(e)
+          }`,
+        );
+        return withSecurityHeaders(
+          new Response("Internal Server Error", { status: 500 }),
+        );
+      }
     });
-  };
 
   const handleRequestInner = async (
     req: Request,
@@ -1390,15 +1422,66 @@ export function createServer(config: ServerConfig): ServerHandle {
       } catch {
         return json(400, { error: "invalid request" });
       }
-      if (authFailBudgetExceeded(clientKey)) {
-        return new Response("Too Many Requests", { status: 429 });
-      }
+      // The tag FIRST, like the shared-key gate: it is an HMAC under the app
+      // key, so the budget slows no guesser worth slowing — checked first, it
+      // refused the device that HOLDS the key (often the one whose stale key
+      // spent the budget). Only a wrong tag meets it.
       const answer = await answerPinProof(body, config.token, config.cert);
       if (answer.ok) {
         return json(200, { proof: answer.proof, cert: answer.cert });
       }
       if (answer.wrong) recordAuthFail(clientKey, "wrong pin-proof tag");
+      if (authFailBudgetExceeded(clientKey)) {
+        return new Response("Too Many Requests", { status: 429 });
+      }
       return json(answer.wrong ? 401 : 400, { error: answer.error });
+    }
+
+    // Auth path 0: a PROVEN local aio app (`peer()`), when this app opted in
+    // with `resolvePeer`. Without the option the header means nothing and
+    // every request takes the paths below, exactly as before. With it, a
+    // proof is honoured only from this machine and never through a proxy;
+    // a proof that is presented and wrong is refused and charged, never
+    // quietly downgraded to anonymous.
+    // Its doors: the socket, blob bytes (`peer().blob`), and the upload only
+    // a proven peer has (`peer().upload`) — nothing else takes a proof.
+    const peerDoor = pathname === "/ws" || pathname === PEER_UPLOAD_PATH ||
+      pathname.startsWith(BLOB_URL_PREFIX);
+    if (peerDoor && _peerResolver && req.headers.has(PEER_HEADER)) {
+      const why = !_isLocalRequest(
+          info?.remoteAddr,
+          req,
+          config.trustProxyHeader,
+        )
+        ? "a peer proof from off this machine"
+        : null;
+      const proven = why === null
+        ? await verifyPeer(req.headers.get(PEER_HEADER)!, config.appId ?? "")
+        : { ok: false as const, why };
+      if (!proven.ok) {
+        recordAuthFail(clientKey, `peer: ${proven.why}`);
+        log.warn("auth", `peer connection refused — ${proven.why}`);
+        // The same budget every other credential meets: a caller that keeps
+        // presenting wrong proofs is told to back off.
+        return authFailBudgetExceeded(clientKey)
+          ? new Response("Too Many Requests", { status: 429 })
+          : new Response("Unauthorized", { status: 401 });
+      }
+      const user = await _peerResolver(proven.peer);
+      if (user && pathname === "/ws") {
+        return wsMgr.handleWs(req, user, clientKey);
+      }
+      if (user && pathname === PEER_UPLOAD_PATH) {
+        return await peerUpload(req, url, config.blobs);
+      }
+      if (user) {
+        // Blob bytes: the store's own GET/HEAD, Range and caching rules.
+        const resp = await staticHandler.serveStatic(pathname, req);
+        resp.headers.set("X-Content-Type-Options", "nosniff");
+        return resp;
+      }
+      // null: this app admits no identity for that peer — the paths below
+      // decide, as for any other caller.
     }
 
     // Auth path 1: per-user auth — resolveUser hook or static users map (AIO-171)
@@ -1664,8 +1747,23 @@ export function createServer(config: ServerConfig): ServerHandle {
     /** Attach the shared-key cookie when this request earned one. `append`,
      *  never `set`: an app route may have set cookies of its own. */
     const withKeyCookie = (r: Response): Response => {
-      if (setKeyCookie) r.headers.append("Set-Cookie", setKeyCookie);
-      return r;
+      if (!setKeyCookie) return r;
+      try {
+        r.headers.append("Set-Cookie", setKeyCookie);
+        return r;
+      } catch {
+        // aio-ok: IMMUTABLE headers (`Response.redirect()`, a proxied
+        // `fetch()` from a route) — the append threw, and the `?token=` share
+        // link into such a route answered 500. Copied, as withSecurityHeaders
+        // does.
+        const out = new Response(r.body, {
+          status: r.status,
+          statusText: r.statusText,
+          headers: new Headers(r.headers),
+        });
+        out.headers.append("Set-Cookie", setKeyCookie);
+        return out;
+      }
     };
 
     // Auth path 2: single shared token (--expose without users)

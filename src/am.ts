@@ -106,6 +106,7 @@ import {
   targetHome,
 } from "./am/am-utils.ts";
 import { cmdWhere } from "./am/am-cmd-where.ts";
+import { cmdPeer } from "./am/am-cmd-peer.ts";
 import { cmdFeedback } from "./am/am-cmd-feedback.ts";
 import { cmdCheck } from "./am/am-cmd-check.ts";
 import { cmdMigrate } from "./am/am-cmd-migrate.ts";
@@ -158,6 +159,7 @@ const COMMANDS: Record<string, CmdHandler> = {
   surface: cmdSurface,
   trigger: cmdTrigger,
   where: cmdWhere, // which execution context a file runs in, from the graph
+  peer: cmdPeer, // what another running app lets a caller do, and its types
   feedback: cmdFeedback, // where findings about aio go — outside the version store
   check: cmdCheck, // does the client graph BUILD? (deno check cannot answer this)
   migrate: cmdMigrate, // which retired spellings THIS app still uses

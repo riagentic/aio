@@ -5,7 +5,7 @@
 //
 // Seeded-random: prints its seed; replay a failure with SEED=<n> deno test.
 // deno-lint-ignore-file no-explicit-any
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { Window } from "happy-dom";
 import { closeWindow } from "../src/testing/close-window.ts";
 import { ErrorBoundary, Fragment, h, Portal } from "../src/air/vdom.ts";
@@ -648,7 +648,9 @@ Deno.test("conformance: component-LOCAL re-render throw with NO boundary keeps o
     boom.set(false);
     await tick();
     assertEquals((doc as any).querySelector("#ok").textContent, "ok");
-    t.unmount();
+    // The contained throw still FAILS the test at the harness's observation
+    // point: the UI showed stale content in between.
+    assertThrows(() => t.unmount(), Error, "STALE content: boom-local-nb");
   } finally {
     console.error = realError;
   }
@@ -697,7 +699,11 @@ Deno.test("conformance: a fallback that ALSO throws degrades, it does not loop",
       "ok",
       "and the component is still live afterwards",
     );
-    t.unmount();
+    assertThrows(
+      () => t.unmount(),
+      Error,
+      "STALE content: fallback-also-throws",
+    );
   } finally {
     console.error = realError;
   }

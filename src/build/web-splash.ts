@@ -10,7 +10,7 @@
  * No download runs on the web, so `progress` and `bar` mean nothing here.
  */
 import { appIdentityColors } from "./app-theme.ts";
-import { pngFromRgba } from "./app-icon.ts";
+import { type HueKey, pngFromRgba } from "./app-icon.ts";
 import { decodePng } from "./png-scale.ts";
 import { escHtml } from "../server/server-html-constants.ts";
 import { lookOf, type SplashSpec, splashText } from "../electron/splash.ts";
@@ -23,7 +23,7 @@ export function webSplashFile(s: SplashSpec): string {
 /** The manifest's colours with a splash: the app's page background (the
  *  splash's), so the screen a browser paints before the page matches it. */
 export function webSplashColors(
-  appId: string,
+  appId: HueKey,
 ): { background: string; theme: string } {
   const bg = appIdentityColors(appId).light.background;
   return { background: bg, theme: bg };

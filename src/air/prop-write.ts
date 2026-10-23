@@ -25,6 +25,7 @@ import {
   styleValue as _styleValue,
 } from "./ssr-utils.ts";
 import { _DOM_PROPS, _wrong } from "./vdom-types.ts";
+import { pendingAmong, pendingStarted } from "../protocol/pending-calls.ts";
 
 // SVG namespaced attribute prefixes — require setAttributeNS/removeAttributeNS
 // so the attr lands in the correct namespace. Plain setAttribute puts it in the
@@ -327,12 +328,14 @@ export function _writeProp(
     (el as any)[k] = v;
     return;
   }
-  const ns = _attrNS(k);
+  // The namespace is read off the MAPPED name: `xlinkHref` is `xlink:href`.
+  const name = _attrName(k);
+  const ns = _attrNS(name);
   // The name the DOM is about to be asked for — refused here, with the
   // element and the prop in the message, instead of as a bare
   // `InvalidCharacterError` from deep inside the patcher. Same rule, same
   // answer, as the SSR writers: see `_assertAttrName`.
-  _assertAttrName(ns ? k : _attrName(k), el.tagName?.toLowerCase() ?? "");
+  _assertAttrName(name, el.tagName?.toLowerCase() ?? "");
   if (v === false && _STRING_FALSE_ATTRS(k)) {
     // …but not for the attributes where "false" is a VALUE.
     //
@@ -351,17 +354,17 @@ export function _writeProp(
     // `src/ui/controls.ts`), and aio's own app manager did not:
     // `aria-checked={showAll.value === v}` rendered nothing whenever it was
     // false.
-    if (ns) el.setAttributeNS(ns, k, "false");
-    else el.setAttribute(_attrName(k), "false");
+    if (ns) el.setAttributeNS(ns, name, "false");
+    else el.setAttribute(name, "false");
     return;
   }
   if (v === false || v == null) {
-    if (ns) el.removeAttributeNS(ns, k.slice(k.indexOf(":") + 1));
-    else el.removeAttribute(_attrName(k));
+    if (ns) el.removeAttributeNS(ns, name.slice(name.indexOf(":") + 1));
+    else el.removeAttribute(name);
     return;
   }
-  if (ns) el.setAttributeNS(ns, k, String(v));
-  else el.setAttribute(_attrName(k), String(v));
+  if (ns) el.setAttributeNS(ns, name, String(v));
+  else el.setAttribute(name, String(v));
 }
 
 /** `setProperty` for one style-object declaration, honouring `!important`.
@@ -553,10 +556,34 @@ export function _controlDrifted(
  *  The newest echo still lands (DOM and state converge), a value it never
  *  emitted still wins (a server-side transform, a reset), and a write in the
  *  SAME task as the keystroke is the handler's own synchronous answer (a local
- *  signal that refused the input) — also written. One path, dev and prod. */
+ *  signal that refused the input) — also written. One path, dev and prod.
+ *
+ *  While a call is IN FLIGHT (any, this runtime) a `value` echo is not
+ *  consumed when skipped: a parent that re-renders mid-flight (a `$pending`
+ *  sibling, a clock) re-asserts the SAME stale prop on every render, and the
+ *  second one used to land — "abcdef" typed at 40 ms against a 120 ms method
+ *  stored "cf" in Chromium. The value the field showed before the first
+ *  unanswered keystroke (`base`) is such an echo too, in flight only: once
+ *  every call has answered, the state wins again (a refusal snaps back). */
 const _ECHO = Symbol.for("aio.air.inputEcho");
 const _ECHO_RING = 256;
-type Echo = { vals: string[]; live: boolean };
+type Echo = {
+  vals: string[];
+  live: boolean;
+  /** What the field showed before its first unanswered keystroke. */
+  base?: string;
+  /** What the renderer last wrote or confirmed. */
+  shown?: string;
+  /** `pendingStarted()` at the newest keystroke. */
+  started?: number;
+  /** The start numbers of the calls this field's own keystrokes started —
+   *  only those count as its in-flight edit, never a poll or an upload that
+   *  happened to start while the user was typing. */
+  mine: number[];
+  /** `pendingStarted()` when the newest keystroke's event began, until its
+   *  dispatch is over (see `_closeKeystroke`). */
+  open?: number;
+};
 // PER PROPERTY, not one ring per element. A `<input type="checkbox">` carries
 // both `value` and `checked`, and one shared ring keyed by whichever property
 // asked first collided their fingerprints: `_echoKey("checked", true)` is the
@@ -591,9 +618,19 @@ function _echoRing(el: EchoEl, k: string): Echo {
   }
   const had = rings.get(k);
   if (had) return had;
-  const r: Echo = { vals: [], live: false };
+  const r: Echo = {
+    vals: [],
+    mine: [],
+    live: false,
+    shown: _echoKey(k, (el as unknown as Record<string, unknown>)[k]),
+  };
   rings.set(k, r);
   el.addEventListener("input", () => {
+    _closeKeystroke(r);
+    if (!r.vals.length) r.base = r.shown, r.mine = [];
+    r.open = pendingStarted();
+    _openRings(el).add(r);
+    r.started = pendingStarted();
     r.vals.push(_echoKey(k, (el as unknown as Record<string, unknown>)[k]));
     if (r.vals.length > _ECHO_RING) r.vals.shift();
     r.live = true;
@@ -610,15 +647,61 @@ function _echoRing(el: EchoEl, k: string): Echo {
   return r;
 }
 
+/** The calls started from this keystroke's capture listener (which runs
+ *  first) to the end of its dispatch are the field's own. */
+function _closeKeystroke(r: Echo): void {
+  if (r.open === undefined) return;
+  for (let s = r.open + 1; s <= pendingStarted(); s++) r.mine.push(s);
+  r.open = undefined;
+}
+
+/** Rings whose keystroke is still dispatching, per window. A window-level
+ *  bubble listener runs after the element's and the delegation root's
+ *  handlers, so it closes them at the end of the event — a microtask would
+ *  not (a real event runs one between listeners). */
+const _open = new WeakMap<object, Set<Echo>>();
+function _openRings(el: Element): Set<Echo> {
+  const win = el.ownerDocument?.defaultView ?? globalThis;
+  let set = _open.get(win);
+  if (!set) {
+    const fresh = new Set<Echo>();
+    set = fresh;
+    _open.set(win, fresh);
+    win.addEventListener("input", () => {
+      for (const r of fresh) _closeKeystroke(r);
+      fresh.clear();
+    });
+  }
+  return set;
+}
+
 /** True when writing `v` would replay a keystroke the user typed past. */
 function _staleEcho(el: EchoEl, k: string, v: unknown): boolean {
   const r = _echoRing(el, k);
-  const i = r.vals.indexOf(_echoKey(k, v));
+  _closeKeystroke(r); // a handler that stopped propagation: close it here
+  const key = _echoKey(k, v);
+  const i = r.vals.indexOf(key);
   const root = el.getRootNode?.() as { activeElement?: unknown } | undefined;
   const focused = (root?.activeElement ?? el.ownerDocument?.activeElement) ===
     el;
+  if (
+    k === "value" && focused && r.vals.length &&
+    pendingAmong(r.mine) &&
+    // In the keystroke's own task, a render is the handler's answer — unless
+    // the handler sent the keystroke away (a call): then it is a sibling's.
+    (!r.live || r.started !== pendingStarted())
+  ) {
+    if (i >= 0 && i < r.vals.length - 1) {
+      r.vals.splice(0, i); // older keys answered; this one may render again
+      r.base = undefined;
+      return true;
+    }
+    if (i < 0 && key === r.base) return true;
+  }
   if (r.live || !focused || i < 0 || i === r.vals.length - 1) {
     r.vals.length = 0;
+    r.base = undefined;
+    r.shown = key;
     return false;
   }
   r.vals.splice(0, i + 1); // acknowledged up to i; newer keys still in flight
@@ -629,8 +712,11 @@ function _staleEcho(el: EchoEl, k: string, v: unknown): boolean {
 function _echoArrived(el: EchoEl, want: string): void {
   const r = el[_ECHO]?.get("value");
   if (!r) return;
-  const i = r.vals.indexOf(_echoKey("value", want));
+  const key = _echoKey("value", want);
+  r.shown = key;
+  const i = r.vals.indexOf(key);
   if (i >= 0) r.vals.splice(0, i + 1);
+  if (!r.vals.length) r.base = undefined;
 }
 
 /** Where a form control keeps the props it last rendered with — read by the
@@ -646,6 +732,8 @@ export function _recordControlled(
 ): void {
   const tag = el.tagName;
   if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") return;
+  // A hydrated field the renderer never wrote still needs its keystrokes.
+  if ("value" in props && tag !== "SELECT") _echoRing(el as EchoEl, "value");
   if ("value" in props || "checked" in props) (el as CtrlEl)[_CTRL] = props;
   else delete (el as CtrlEl)[_CTRL];
 }

@@ -20,7 +20,7 @@ page is the short door.
 - [Tutorial](tutorial.md) — step-by-step from zero to running
 - [Migration](migration.md) — adopting aio in an existing app
 - [Common Pitfalls](pitfalls.md) — traps people hit, each with the avoiding rule
-- [Cookbook](cookbook.md) — twenty copy-paste recipes, every one driven by a
+- [Cookbook](cookbook.md) — twenty-two copy-paste recipes, every one driven by a
   test
 
 ## Reference

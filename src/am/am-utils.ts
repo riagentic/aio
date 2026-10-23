@@ -5,7 +5,7 @@
  */
 
 import { readDenoJsonSync } from "../server/deno-json.ts";
-import { envPort, resolveEntryPath } from "../server/paths.ts";
+import { envPort, homedir, resolveEntryPath } from "../server/paths.ts";
 import { envDefaultPort } from "../server/aio-cli.ts";
 import {
   type AppLock,
@@ -13,6 +13,7 @@ import {
   instances,
   isHold,
   isLockOwnerAlive,
+  liveInstancesUnder,
   type LockData,
   lockKey,
   noteDeadHolder,
@@ -25,11 +26,20 @@ import {
   writeLock,
 } from "../server/single-instance-lock.ts";
 import { sameLockFolderNote } from "../server/aio-run-helpers.ts";
-import { basename, join, resolve } from "@std/path";
+import {
+  basename,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  SEPARATOR,
+} from "@std/path";
 import {
   appDirs,
   appsDirEnv,
   expandProfilePath,
+  instanceAppsDir,
+  instanceOfAppsDir,
   isProfilePath,
   profileHome,
   profileNameError,
@@ -585,7 +595,91 @@ export function otherRootRefusal(
   return `refusing to ${verb} "${printable(pf.appId)}" (pid ${pf.pid}, home ` +
     `${printable(pf.home ?? "")}): it runs under another apps dir. ` +
     `${sameLockFolderNote(other, appsDir)}\n` +
-    `  fix: run am with that root — AIO_APPS_DIR=${other}`;
+    `  fix: run am with that root — ${scopeWord(other)}`;
+}
+
+/** How a reader names the apps root `root` on an am command line: the
+ *  `--instance=<name>` it is, or its `AIO_APPS_DIR`. Pure over the env. */
+function scopeWord(root: string): string {
+  const name = instanceOfAppsDir(root);
+  return name !== undefined ? `--instance=${name}` : `AIO_APPS_DIR=${root}`;
+}
+
+/** `am start`'s refusal when the lock it needs is held by an app of ANOTHER
+ *  apps root that shares this root's lock folder (`otherAppsRootOf`) — or
+ *  null. `--instance=hx.1` and `--instance=hx_1` are two such roots (the
+ *  folder name keeps only ASCII letters and digits, a contract between aio
+ *  builds): the second start read "already running" with the fix
+ *  `--instance=<name>` — the flag it had just passed. Pure but for the env. */
+export function sharedLockStartRefusal(
+  pf: Pick<LockData, "appId" | "pid" | "home">,
+): { error: string; fix: string } | null {
+  const appsDir = appsDirEnv();
+  const other = otherAppsRootOf(pf, appsDir);
+  if (!other || !appsDir) return null;
+  const app = printable(pf.appId);
+  const theirs = instanceOfAppsDir(other);
+  const where = scopeWord(other);
+  return {
+    error: `cannot start "${app}" here: the ${app} in ${where} (pid ` +
+      `${pf.pid}) holds the lock this one needs. ` +
+      sameLockFolderNote(other, appsDir),
+    fix:
+      (theirs !== undefined && instanceOfAppsDir(appsDir) !== undefined
+        ? `pick an --instance name whose letters and digits differ from ` +
+          `"${theirs}"`
+        : `give one root a path whose ASCII letters and digits differ`) +
+      ` — or stop that one: ` +
+      (theirs !== undefined
+        ? `am stop --app=${app} ${where}`
+        : `${where} am stop --app=${app}`),
+  };
+}
+
+/** Every live app in the `--instance` scopes (`~/.aio-instances/<name>`),
+ *  each under the ONE name it runs in. Two names whose lock folder is one
+ *  (`hx.1`, `hx_1`) both read its lock; a home inside
+ *  `~/.aio-instances/<other>` is that other's, so the app is listed once,
+ *  under its own name — not again under a name it never ran in. */
+export function liveInInstances(): (InstanceInfo & { instance: string })[] {
+  const base = resolve(homedir(), ".aio-instances");
+  let names: string[] = [];
+  try {
+    names = [...Deno.readDirSync(base)].filter((e) => e.isDirectory)
+      .map((e) => e.name).sort();
+  } catch { /* aio-ok: no instance was ever made — none to list */ }
+  return names.flatMap((name) =>
+    liveInstancesUnder(instanceAppsDir(name)).filter((i) => {
+      // A lock that names no home (written by an older aio) cannot be
+      // placed in another instance: listed where it was found.
+      if (!i.home) return true;
+      const rel = relative(base, resolve(i.home));
+      const outside = rel === ".." || rel.startsWith(`..${SEPARATOR}`) ||
+        isAbsolute(rel);
+      return outside || rel.split(SEPARATOR)[0] === name;
+    }).map((i) => ({ ...i, instance: name }))
+  );
+}
+
+/** The `--instance` names `appId` runs in, when THIS scope (the shared one)
+ *  has none of it — so "not running — start it" is never the answer about
+ *  an app that runs in an instance (jot §8). Empty inside a scope. */
+export function runningInstancesOf(appId: string): string[] {
+  if (appsDirEnv() !== undefined) return [];
+  return [
+    ...new Set(
+      liveInInstances().filter((i) => i.appId === appId).map((i) => i.instance),
+    ),
+  ];
+}
+
+/** The sentence for {@linkcode runningInstancesOf}: "" for none. Pure. */
+export function inInstancesHint(names: readonly string[]): string {
+  if (!names.length) return "";
+  const flags = names.map((n) => `--instance=${n}`);
+  return `running in ${flags.join(", ")} — add ${
+    names.length === 1 ? flags[0] : "the --instance=<name> you mean"
+  }`;
 }
 
 const _otherRootSaid = new Set<string>();
@@ -887,6 +981,12 @@ export function resolvePort(
   // every unrelated app on the machine listed underneath as if one of them
   // were the answer. Only a GUESSED id (a cwd with no project, or an --app=X
   // that names nothing here) leaves am genuinely without a target.
+  // Not here — but running in an `--instance`: "start it" would start a
+  // second copy on other data (jot §8). Name where it runs, with the flag.
+  const inInstances = inInstancesHint(runningInstancesOf(id));
+  if (inInstances) {
+    throw new Error(`"${id}" is not running here — it is ${inInstances}.`);
+  }
   const start = startCommandFor(id);
   if (start) {
     throw new Error(

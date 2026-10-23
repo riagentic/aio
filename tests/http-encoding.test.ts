@@ -744,3 +744,23 @@ Deno.test("encoding: `gzip;q=0` is a REFUSAL, even oversized", async () => {
   );
   assertEquals(out.headers.get("Content-Encoding"), null);
 });
+
+// aio-ok: the assertion is the op sanitizer — a timer left running fails it
+Deno.test("encoding: a body that errors while buffered leaves no timer running", async () => {
+  // The buffering race's timer was cleared only when the read RESOLVED: a
+  // body that errors rejected it, and the timer ran on for MAX_BUFFER_MS
+  // after the request was answered (this test's leak sanitizer sees it).
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      c.enqueue(enc.encode("["));
+      queueMicrotask(() => c.error(new Error("cursor died")));
+    },
+  });
+  const resp = new Response(body, {
+    headers: { "Content-Type": "application/json" },
+  });
+  try {
+    const out = await encodeResponse(get({ "Accept-Encoding": "gzip" }), resp);
+    await out.body?.cancel();
+  } catch { /* the finisher's caller answers it with a 500 */ }
+});

@@ -50,7 +50,17 @@ persist: { include: ["count", "name"] },
 
 // Persist everything except these fields
 persist: { exclude: ["cache", "htmlCache"] },
+
+// A `*` segment is any key in that place: `busy` under every field,
+// and under every entry of the `feeds` map
+persist: { exclude: ["*.busy", "feeds.*.busy"] },
 ```
+
+The `*` is a whole path segment, never a pattern inside a name, and it is
+`persist`'s alone — `visible.exclude` reads `*` as a literal key. The typed
+`persist` of `cell({ state, methods })` takes a path that starts with a declared
+field (`"feeds.*.busy"`) as written; a path that STARTS with `*` is outside that
+type, so write it `"*.busy" as never` there.
 
 Wanting exactly one field kept is the common case, and `{ include: [...] }` is
 it — reach for that before hand-rolling storage. The same four forms work for
@@ -60,7 +70,8 @@ it — reach for that before hand-rolling storage. The same four forms work for
 cell's state throws at `cell()`, naming the nearest real field and what the
 mistake would have cost — a typo here is otherwise silent in both directions (an
 `include` typo drops a field you meant to keep; an `exclude` typo writes one you
-meant to leave out).
+meant to leave out). A `*`-headed path that nothing in the declared state can
+match (`"*.bussy"`) throws the same way.
 
 To opt every cell out by default (e.g. for privacy-sensitive apps), use
 `cellDefaults` in `aio.run()`:
@@ -257,6 +268,10 @@ a value of the wrong type into your state.
 | nested object                      | same rules, field by field, at every depth                     |
 | `state: { byId: {} }`              | an empty object means "dictionary" — every stored key is kept  |
 | a method `delete`d a declared key  | it comes back with its **default** — write `null` to clear one |
+
+**Adding a new declared field needs no `version` bump and no `onMigrate`** — new
+keys, nested ones included, fill from the declared defaults on restore (the boot
+log lists them: "filled from `state:` — no migration needed").
 
 Nothing is guessed: a rename is indistinguishable from a delete-plus-add, so aio
 does not try to match them up. Carry the value across yourself with `version` +

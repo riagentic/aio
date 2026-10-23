@@ -25,9 +25,10 @@ import {
 import type { BuildConfig } from "./build-config.ts";
 import { HEY, NO } from "../diagnostics/fmt.ts";
 import "../diagnostics/code-mask.ts"; // load order: evaluated here, as before the split
-import { compiled, summaryNote } from "./build-say.ts";
+import { bad, compiled, summaryNote } from "./build-say.ts";
 import { electronStagingDir, freshElectronStaging } from "./build-electron.ts";
 import { WINDOWS_ICON_FILE, writeWindowsIcon } from "./build-helpers.ts";
+import { appIconLabel } from "./app-icon.ts";
 import { warnMachineBoundImports } from "./machine-bound-imports.ts";
 import { unembeddedReadMessage, unembeddedReads } from "./unembedded-reads.ts";
 import { minifyDeclared, runCompile } from "./minify-server.ts";
@@ -408,6 +409,19 @@ export async function runDenoCompile(
       : join(outDir, outName));
   if (!doElectron || opts.out) {
     await Deno.mkdir(dirname(compileTarget), { recursive: true });
+    // A project directory named like the binary (`media/` in an app called
+    // `media`, as `am create media --template=assets` scaffolds) made
+    // `deno compile` fail with "a directory exists with the same name" under
+    // a hint about server-only imports. Refused here, naming the way out.
+    if ((await Deno.stat(compileTarget).catch(() => null))?.isDirectory) { // aio-ok: absent = free to write
+      bad(
+        `the "${outName}" binary is written to ${compileTarget}, which is a directory`,
+        undefined,
+        `rename that directory, or give the app another name: deno.json ` +
+          `"title", or a per-target "name"`,
+      );
+      Deno.exit(1);
+    }
   }
   if (cfg.targetTriple) {
     console.log(
@@ -424,8 +438,8 @@ export async function runDenoCompile(
         {
           root,
           appDir: cfg.appDir,
-          name: cfg.appTitle ?? binaryName,
-          id: binaryName,
+          name: appIconLabel(cfg.appTitle, cfg.appId ?? binaryName),
+          id: cfg.hue ?? cfg.appId ?? binaryName,
           warn: summaryNote,
         },
       ),

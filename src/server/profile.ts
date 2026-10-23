@@ -3,7 +3,7 @@
 // TLS cert to pin, and the auth key. Read from disk (lock + app.key + cert),
 // so it works without hitting the app's (auth-gated) control port.
 import { join } from "@std/path";
-import { readLock } from "./single-instance-lock.ts";
+import { type LockData, readLock } from "./single-instance-lock.ts";
 import { appKeyPath } from "./app-key.ts";
 import { appDirs } from "./app-dirs.ts";
 
@@ -49,8 +49,12 @@ function readFirst(paths: string[]): string | null {
 export function buildLocalProfile(
   appId: string,
   cwd = Deno.cwd(),
+  /** The instance's lock as the caller already found it (`am` resolves
+   *  `--home` / `--profile`); the default instance's lock otherwise — which
+   *  answered "no running app" about a running --profile=dev one. */
+  found?: LockData | null,
 ): AioProfile | null {
-  const lock = readLock(appId);
+  const lock = found ?? readLock(appId);
   if (!lock) return null;
   const tls = !!lock.discovery?.tls;
   const cert = tls
@@ -58,11 +62,11 @@ export function buildLocalProfile(
     // would otherwise shadow the cert the server is actually serving, and the
     // client would fail hostname verification against a stale SAN list.
     ? readFirst([
-      join(appDirs(appId).tls, "tls-cert.pem"),
+      join(appDirs(appId, lock.home).tls, "tls-cert.pem"),
       join(cwd, ".aio-tls", "tls-cert.pem"),
     ])
     : null;
-  const key = readFirst([appKeyPath(appId)]);
+  const key = readFirst([appKeyPath(appId, lock.home)]);
   return {
     aio: 1,
     name: appId,

@@ -284,9 +284,9 @@ workers when that is what the test is about. In-isolate `testServer` refuses
    automatic one when a cell file changes) is a new boot, so `onInit` runs
    again, once. When the entry is not a local module no worker can be spawned:
    the cell runs on the main isolate with a warning, and its `onInit` runs
-   there. `app.cells.disable` (or a `circuitBreaker` trip) runs the cell's
-   `onDestroy` and state reset in its worker, and `app.cells.enable` its
-   `onInit` — as for a main-isolate cell
+   there. `app.cells.disable` runs the cell's `onDestroy` and state reset in its
+   worker (a `circuitBreaker` trip runs `onDestroy` and KEEPS the state), and
+   `app.cells.enable` its `onInit` — as for a main-isolate cell
    ([lifecycle](lifecycle.md#runtime-control)).
 4. Each commit's patches stream home and are applied through the normal dispatch
    path, so everything downstream sees an ordinary state change. With

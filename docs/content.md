@@ -29,7 +29,7 @@
 - [App architectures — the two canonical shapes](basics/app-architectures.md) — Almost every aio deployment is one of two shapes.
 - [Architecture](basics/architecture.md) — AIO is a full-stack Deno/TypeScript application framework built around cells
 - [Core Concepts](basics/concepts.md) — Everything you need to understand about how aio works.
-- [Cookbook — twenty recipes, each one tested](basics/cookbook.md) — Twenty things an app needs on its first day, each as a complete file you can
+- [Cookbook — twenty-two recipes, each one tested](basics/cookbook.md) — Twenty-two things an app needs on its first day, each as a complete file you can
 - [Cross-app — one aio app using another](basics/cross-app.md) — An orchestrator that drives several apps, a service another app calls, an AI
 - [Every option, one page](basics/every-option.md) — cell(name, { … }) — the keys a cell takes.
 - [FAQ](basics/faq.md) — Common questions about what aio does, doesn't do, and why.
@@ -168,10 +168,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (98 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (99 pages)
+- [Upgrading from 1.0.23-beta to 1.0.24-beta](upgrade/from-1.0.23-beta-to-1.0.24-beta.md) — Nothing is removed or renamed, and no option changes meaning.
 - [Upgrading from 1.0.22-beta to 1.0.23-beta](upgrade/from-1.0.22-beta-to-1.0.23-beta.md) — Nothing is removed or renamed, and no option changes meaning.
 - [Upgrading from 1.0.21-beta to 1.0.22-beta](upgrade/from-1.0.21-beta-to-1.0.22-beta.md) — Nothing is removed or renamed.
-- [Upgrading from 1.0.20-beta to 1.0.21-beta](upgrade/from-1.0.20-beta-to-1.0.21-beta.md) — Nothing is removed or renamed, and no default moves.
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

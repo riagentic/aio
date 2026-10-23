@@ -32,7 +32,7 @@
 //
 // Pure and I/O-free — the server inlines the string into the shell.
 
-import { appHue } from "./app-icon.ts";
+import { appHue, type HueKey } from "./app-icon.ts";
 
 /** sRGB relative luminance of an HSL triple (h in deg, s/l in 0..1). */
 function luminance(h: number, s: number, l: number): number {
@@ -166,7 +166,7 @@ function oklabMixLum(a: Hsl, b: Hsl, p: number): number {
  *  app brings its own CSS — so `ui.chrome: "themed"`'s title bar (which reads
  *  `var(--aio-…, fallback)`) stays coherent, and an app can reference a token
  *  deliberately, while every VISUAL default steps aside. */
-export function appThemeTokensCss(name: string): string {
+export function appThemeTokensCss(name: HueKey): string {
   return sliceTokens(appThemeCss(name));
 }
 
@@ -220,7 +220,7 @@ const SHELL_REGIONS: ReadonlyArray<readonly [string, string]> = [
 /** The theme with every LAYOUT default removed: controls, type and colour
  *  stay; the page container and the six classes go. See
  *  {@linkcode SHELL_REGIONS}. */
-export function appThemeBaseCss(name: string): string {
+export function appThemeBaseCss(name: HueKey): string {
   let css = appThemeCss(name);
   // Back to front, so an earlier cut cannot move a later banner's index.
   for (const [start, end] of [...SHELL_REGIONS].reverse()) {
@@ -266,7 +266,7 @@ export type IdentityColors = {
  *  monogram icon and its theme ({@linkcode appHue}), as plain hex for the
  *  places no stylesheet reaches (the native start window). Pure. */
 export function appIdentityColors(
-  name: string,
+  name: HueKey,
 ): { light: IdentityColors; dark: IdentityColors } {
   const hue = appHue(name);
   const [ah, as, al] = accentFill(hue).fill;
@@ -294,7 +294,7 @@ export function appIdentityColors(
  *  wear it, light and dark: page background and text, the bar (the accent)
  *  and its ground — the splash's defaults exactly (`build/splash.ts`). Pure. */
 export function identityDialogColors(
-  appId: string,
+  appId: HueKey,
   /** The colours the app set (`electron.downloadWindow`): each is used in
    *  both modes, as the splash's are. */
   set: {
@@ -326,7 +326,7 @@ export function windowBackground(
   set: string | { light: string; dark: string } | null | undefined,
   theme: string | undefined,
   hasCSS: boolean,
-  appId: string,
+  appId: HueKey,
 ): { light: string; dark: string } | undefined {
   if (typeof set === "string") return { light: set, dark: set };
   if (set) return { light: set.light, dark: set.dark };
@@ -335,7 +335,7 @@ export function windowBackground(
   return { light: c.light.background, dark: c.dark.background };
 }
 
-export function appThemeCss(name: string): string {
+export function appThemeCss(name: HueKey): string {
   const hue = appHue(name);
   const { accent, onAccent, fill } = accentFill(hue);
   // The backgrounds accent TEXT lands on, as the HSL the tokens below emit:

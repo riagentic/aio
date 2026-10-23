@@ -286,7 +286,12 @@ const CEILING_GZ = {
   // (sync-engine.ts `noteServerClock`/`wallClock`, tests/sync/client-clock-
   // skew.test.ts). The rest: a useCell().send made before the server's hello
   // queues behind the reload carry (it overtook the carried calls).
-  air: 84,
+  // 84 → 85 after 1.0.23-beta (measured 85,814 → 86,929 B): +1,115 B gz of
+  // bug fixes, measured per commit — hunt rounds 1-4 (+554), the renderer's
+  // portal/boundary fixes (+300, incl. a since-reverted snap-back), the
+  // review fixes (+161), the offline-boot queue display (+56), the rest
+  // under 20 B each.
+  air: 85,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs.
    *  84 → 85 for the round after 1.0.12-beta: measured 85.3 (AIR 82.4). Every
    *  byte is a fix with a red-without-it test — SSR/createDom tag-name
@@ -306,7 +311,16 @@ const CEILING_GZ = {
    *  message text was tried first: 84 bytes. `air` did not move (81). */
   // 84 → 86 after 1.0.20-beta: the same +2 KB as `air` (the reload carry
   // of unsent calls, itemised there).
-  app: 86,
+  // 86 → 88 after 1.0.23-beta (measured 88,565 → 89,619 B): +1,054 B gz of
+  // bug fixes every page carries — hunt rounds 1-4 after the release (+536),
+  // the browser stub sending an undeclared Event as its wire shape (+452),
+  // am shot's mounted marker (+34), the rest under 20 B each.
+  // 88 → 89 the same day (90,169 → 90,736 B): +567 B gz — the controlled
+  // input that dropped keys typed while its call was out ("abcdef" stored
+  // "cf" in Chromium; the echo rule in air/prop-write.ts and the per-call
+  // start numbers it reads), and `$pending` on the browser cell stub (a page
+  // calling it was blank).
+  app: 89,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";

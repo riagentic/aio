@@ -6,7 +6,15 @@
 //
 // Nothing pinned that side: `sameDocument` answering `true` for everything
 // (deleting a layout that held different data) passed every test.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
+import { join } from "@std/path";
+import { aio } from "../src/server/aio.ts";
+import { cell } from "../src/state/cell-create.ts";
+import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
+import { freePort } from "../src/testing/server-test.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { createDB } from "../src/db/async-db.ts";
+import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";
 import { loadAndMigrateSnapshot } from "../src/server/aio-boot.ts";
 import type { SkvInstance } from "../src/server/skv.ts";
 
@@ -77,7 +85,13 @@ for (const mode of ["single", "multi"] as const) {
       const { log, lines } = logger();
       const got = await loadAndMigrateSnapshot(s.kv, "app", "state", mode, log);
       assertEquals(got, mode === "single" ? single : multi);
-      assertEquals(s.rows(), before, "nothing retired, nothing rewritten");
+      const { "app:__layout": layout, ...after } = s.rows();
+      assertEquals(after, before, "nothing retired, nothing rewritten");
+      assertEquals(
+        layout,
+        JSON.stringify(mode),
+        "the copy it booted on is recorded, for a reader without the config",
+      );
       assert(
         lines.some((l) => l.includes("BOTH layouts")),
         `the ambiguity is said:\n${lines.join("\n")}`,
@@ -100,3 +114,64 @@ for (const mode of ["single", "multi"] as const) {
     assert(lines.some((l) => l.includes("finished an interrupted")));
   });
 }
+
+// A stored document is an object of cells. `42` (a hand-edited or foreign
+// store) used to boot on defaults without a word — and the first save
+// replaced it. Refused now, whichever layout holds it, and left on disk.
+const notDocuments: [string, unknown][] = [
+  ["a number", 42],
+  ["a string", "x"],
+  ["an array", [1, 2]],
+  ["false", false],
+];
+for (const mode of ["single", "multi"] as const) {
+  for (const [what, doc] of notDocuments) {
+    Deno.test(`persist layouts (${mode}): a stored document that is ${what} is refused, not replaced`, async () => {
+      const s = store({ state: doc });
+      const before = s.rows();
+      await assertRejects(
+        () => loadAndMigrateSnapshot(s.kv, "app", "state", mode, logger().log),
+        Error,
+        "not an object of cells",
+      );
+      assertEquals(s.rows(), before);
+    });
+  }
+}
+
+Deno.test("boot: a stored document that is not an object refuses with the malformed-store advice, and stays on disk", async () => {
+  const dir = await tempDir("persist-not-doc-");
+  const db = join(dir, "state.db");
+  try {
+    const raw = createDB(db);
+    await raw.execute(SKV_SCHEMA);
+    await sqliteKv(raw).set("state", 42);
+    await raw.close();
+    _resetAioRuntime();
+    const err = await assertRejects(() =>
+      aio.run({
+        cells: [cell("ctr", { state: { n: 0 }, methods: {} })],
+        appId: "persist-not-doc",
+        dbPath: db,
+        port: freePort(),
+        libraryMode: true,
+        client: "server-only",
+        baseDir: dir,
+        // deno-lint-ignore no-explicit-any
+      } as any)
+    );
+    const msg = String((err as Error).message);
+    assert(msg.includes("not an object of cells"), msg);
+    assert(msg.includes("persistence unavailable"), msg);
+    assert(msg.includes("am restore"), msg);
+    const back = createDB(db, { readonly: true });
+    try {
+      assertEquals(await sqliteKv(back).get("state"), 42);
+    } finally {
+      await back.close();
+    }
+  } finally {
+    _resetAioRuntime();
+    await dropTempDir(dir);
+  }
+});

@@ -30,6 +30,16 @@ import { runWithUser } from "./auth-context.ts";
 /** User identity — mirrors AioUser from aio.ts without circular import */
 type User = { id: string; role: string };
 
+/** `destroyAll`'s reset on the way out (`cell-compose-registry.ts`): System,
+ *  `:__destroy`, no `reset`/`keep` — those two are `app.cells.disable`'s,
+ *  a live write that clients must see. */
+function isShutdownTeardown(a: unknown): boolean {
+  const x = a as { type?: unknown; _source?: unknown; payload?: unknown };
+  const p = x?.payload as { reset?: unknown; keep?: unknown } | undefined;
+  return x?._source === "System" && typeof x.type === "string" &&
+    x.type.endsWith(":__destroy") && p?.reset !== true && p?.keep !== true;
+}
+
 /** Patch entry — cell name + immer ops from a single reduce call */
 /** Show a `notify()` effect: a desktop notification is rendered by a CLIENT,
  *  so the server's job is to hand it to every connected one — and to SAY so
@@ -304,6 +314,8 @@ export function setupDispatch<S, A, E, App = any>(
   let _currentActionUser: User | undefined;
   // Tracks whether any action actually ran reduce() in this drain cycle
   let _anyProcessed = false;
+  // A shutdown's cell teardown ran in this drain cycle (see onDone).
+  let _teardownSeen = false;
   // `notifyCrossUserNotice` — once per app, not per call (see the gate).
   const _notifyCrossUser = deps.notifyCrossUser ??
     notifyCrossUserGate((m) => log.warn(m));
@@ -341,6 +353,7 @@ export function setupDispatch<S, A, E, App = any>(
       }
     }
     _anyProcessed = true;
+    if (isShutdownTeardown(a)) _teardownSeen = true;
     _currentActionUser = user;
     if (onAction) {
       const failed = (e: unknown) => {
@@ -471,6 +484,15 @@ export function setupDispatch<S, A, E, App = any>(
       // patches already name the rows a batch touched (perf audit P8), so
       // persistence need not clone-and-diff a whole `db:` table to find them.
       if (!tt?.paused) schedulePersist(groupCellPatches(patches));
+      // A shutdown's `destroyAll` resets every cell to its declared initial
+      // state AFTER the final persist and BEFORE the server closes. Broadcast,
+      // that reset reached every connected page: on each stop or restart the
+      // UI blanked to initial state (an empty list, a zero counter) and stayed
+      // that way while the server was down — data the disk still held, shown
+      // as gone. The server is leaving; the next connection gets real state.
+      const teardown = _teardownSeen;
+      _teardownSeen = false;
+      if (teardown) return;
       // NOTHING CHANGED → NOTHING TO SEND. A dispatch that produces no patches
       // (an idempotent reducer: "the device is still absent", "the poll found
       // the same value") used to fall through to the full-state branch, which

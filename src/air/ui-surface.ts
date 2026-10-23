@@ -10,10 +10,11 @@
  * bookkeeping, zero production overhead).
  */
 import type { VNode } from "./vdom-types.ts";
-import { _SignalText } from "./vdom-types.ts";
+import { _SignalText, ErrorBoundary, Suspense } from "./vdom-types.ts";
 import { _sigText } from "./vdom-helpers.ts";
 import type { Signal } from "../state/signal.ts";
 import { isSubmitControl } from "./ui-trigger.ts";
+import { _cleanupChildren } from "./vdom-remove.ts";
 
 /** An interactive element (has `on*` handlers) owned by a component.
  *  Named LABEL + ROLE, label by priority: `t` prop > `data-testid` >
@@ -342,9 +343,15 @@ function elementName(
       base = role; // unlabeled: bare role, de-duped below
     }
   }
+  // A number is never one an author WROTE further on in this component:
+  // two `t="row"` made the second `row2`, and the real `t="row2"` became
+  // `row22` — `ui.row2` then drove the wrong element.
+  const reserved = (taken as Taken).reserved;
+  const free = (n: string) =>
+    !taken.has(n) && (!reserved?.has(n) || (n === base && !!explicit));
   let name = base;
   let i = 2;
-  while (taken.has(name)) name = `${base}${i++}`;
+  while (!free(name)) name = `${base}${i++}`;
   if (explicit && name !== base) warnDuplicateHandle(base, name);
   taken.add(name);
   return name;
@@ -505,6 +512,43 @@ function surfaceAriaBool(
   return undefined;
 }
 
+/** One component's assigned names, and the handles its authors wrote in it
+ *  ({@linkcode explicitHandles}) — names a generated or numbered one skips. */
+type Taken = Set<string> & {
+  reserved?: Set<string>;
+  /** Shown boundary fallbacks, walked once the rest of the output is named. */
+  deferred?: (() => void)[];
+};
+
+/** A fresh name set for the component that rendered `out`. */
+function namesFor(out: VNode | string | number | null | undefined): Taken {
+  const taken: Taken = new Set();
+  taken.reserved = explicitHandles(out, new Set());
+  taken.deferred = [];
+  return taken;
+}
+
+/** Every `t`/`data-testid` written in `out` itself — not inside the child
+ *  components it renders, which name their own (`taken` is per component). */
+function explicitHandles(
+  out: VNode | string | number | null | undefined,
+  into: Set<string>,
+): Set<string> {
+  if (out == null || typeof out !== "object" || typeof out.tag === "function") {
+    return into;
+  }
+  if (typeof out.tag === "string") {
+    const h = explicitHandle(out);
+    if (h) into.add(h);
+  }
+  // The same on-screen children the walk names (a shown fallback, not the
+  // unmounted subtree behind it).
+  for (const c of _cleanupChildren(out)) {
+    if (isVNode(c)) explicitHandles(c, into);
+  }
+  return into;
+}
+
 /** Walk a component's rendered output, collecting its own interactive elements
  *  and descending into child components. */
 function walkOutput(
@@ -605,9 +649,35 @@ function walkOutput(
   // control below it — same nesting rule, same crossing of component
   // boundaries. A nested form is not valid HTML; the innermost one wins.
   const form = v.tag === "form" ? eventKinds(v) : formCtx;
-  for (const c of v.children) {
-    if (isVNode(c)) walkOutput(c, owner, taken, inner, form);
-  }
+  // What is ON SCREEN under this vnode — not always `children`: an
+  // ErrorBoundary/Suspense showing its fallback has the fallback there and its
+  // children unmounted, so a "Retry" button in a fallback was unaddressable.
+  const kids = _cleanupChildren(v);
+  const walk = () => {
+    for (const c of kids) {
+      if (isVNode(c)) walkOutput(c, owner, taken, inner, form);
+    }
+  };
+  // A shown FALLBACK is named after the rest of the component, so a name an
+  // app already addressed (a later sibling `RetryButton`) keeps its slot and
+  // the fallback's twin takes the next ordinal.
+  const deferred = (taken as Taken).deferred;
+  if (v.tag === ErrorBoundary || v.tag === Suspense) {
+    if (deferred && v._rendered != null) deferred.push(walk);
+    else walk();
+  } else walk();
+}
+
+/** Walk `out` with `taken`, then the fallbacks it deferred. */
+function walkOwn(
+  out: VNode | string | number | null | undefined,
+  owner: UISurfaceNode,
+  taken: Taken,
+  labelCtx?: LabelCtx,
+  formCtx?: FormCtx,
+): void {
+  walkOutput(out, owner, taken, labelCtx, formCtx);
+  for (let f = taken.deferred?.shift(); f; f = taken.deferred?.shift()) f();
 }
 
 /** A list key, made safe to put inside an ADDRESS.
@@ -686,7 +756,13 @@ function walkComponent(
     const t = (v._dom as { textContent?: string }).textContent?.trim();
     if (t) node.text = capText(t);
   }
-  walkOutput(v._rendered ?? null, node, new Set(), labelCtx, formCtx);
+  walkOwn(
+    v._rendered ?? null,
+    node,
+    namesFor(v._rendered),
+    labelCtx,
+    formCtx,
+  );
   // The subtree is built: if this component's `t` handle is ALSO the name of
   // something it rendered, the author gave that name to the element and the
   // component merely carried it. Remember it (see _forwardedHandles).
@@ -738,7 +814,7 @@ export function buildUISurface(
     children: [],
     text: "",
   };
-  walkOutput(root, node, new Set());
+  walkOwn(root, node, namesFor(root));
   _applyFormAttr(node);
   return node;
 }

@@ -126,6 +126,13 @@ Deno.test("pin proof: the route answers before the key gate, on the certificate 
     assert(seen.has(401), "a wrong tag was answered");
     assertEquals(last, 429, "wrong tags are not metered");
     assertEquals([...seen].sort(), [401, 429]);
+    // …and the budget throttles WRONG tags only: the device that holds the
+    // key (it may be the one whose stale key spent the budget) is answered.
+    assertEquals(
+      (await ask({ nonce: NONCE, tag: await pinProofTag(KEY, NONCE) })).status,
+      200,
+      "a correct tag was refused by the failure budget",
+    );
   } finally {
     client.close();
     await srv.close();

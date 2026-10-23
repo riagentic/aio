@@ -222,7 +222,9 @@ app.cells!.enable("analytics"); // re-enables, resets state
 4. Scheduled effects cancelled — every schedule the cell issued, whatever its id
    (`schedule.every("poll", …)` as well as `"analytics:poll"`)
 5. Destroy hook runs, `cell:__destroy` dispatches
-6. State resets to initial
+6. State resets to initial — on `app.cells.disable` only. A `circuitBreaker`
+   trip keeps the state (and what is persisted): an outside service that is down
+   must not cost the cell its data.
 
 ### What enable does
 
@@ -230,7 +232,8 @@ app.cells!.enable("analytics"); // re-enables, resets state
 2. Error counter resets
 3. `cell:__init` dispatches
 4. Init hook runs
-5. State starts fresh
+5. State starts fresh after `app.cells.disable`; after a breaker trip it is the
+   state the cell had when it tripped
 
 ### Health monitoring
 

@@ -279,6 +279,20 @@ const _ATTR_NAME: Readonly<Record<string, string>> = {
   // `nativesubmit` attribute nothing reads — the form was still intercepted,
   // silently. The `data-native-submit` spelling keeps working unchanged.
   nativeSubmit: "data-native-submit",
+  // React's spellings of the NAMESPACED attributes. Written verbatim they made
+  // an attribute literally named `xlinkHref`, which nothing reads — the classic
+  // sprite icon `<use xlinkHref="#i"/>` rendered blank. Mapped to the prefixed
+  // name, `_attrNS` puts them in their namespace like `xlink:href` itself.
+  xlinkActuate: "xlink:actuate",
+  xlinkArcrole: "xlink:arcrole",
+  xlinkHref: "xlink:href",
+  xlinkRole: "xlink:role",
+  xlinkShow: "xlink:show",
+  xlinkTitle: "xlink:title",
+  xlinkType: "xlink:type",
+  xmlBase: "xml:base",
+  xmlLang: "xml:lang",
+  xmlSpace: "xml:space",
   stopColor: "stop-color",
   stopOpacity: "stop-opacity",
   strokeWidth: "stroke-width",

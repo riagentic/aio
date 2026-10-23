@@ -361,14 +361,7 @@ export function installDefaultStateGetters(def: CellDef): void {
   //
   // Installed at CREATION rather than at bind, so one definition serves the
   // server executor and a browser's own outstanding calls alike.
-  if (!("$pending" in def)) {
-    Object.defineProperty(def, "$pending", {
-      value: (method?: string) => pendingSignal(def.__aio.id, method),
-      enumerable: false,
-      configurable: true,
-      writable: false,
-    });
-  }
+  installPending(def);
   const state = def.__aio.state as Record<string, unknown>;
   for (const key of Object.keys(state)) {
     // `def` is the cell itself, not data: a state field must not shadow what
@@ -384,6 +377,19 @@ export function installDefaultStateGetters(def: CellDef): void {
     });
   }
   installReflexGuards(def);
+}
+
+/** `cell.$pending(method?)` — shared by the real factory and the browser
+ *  stub (src/browser/protocol-cell.ts), whose cells lacked it: a page reading
+ *  it rendered blank with "c.$pending is not a function" in the browser only. */
+export function installPending(def: CellDef): void {
+  if ("$pending" in def) return;
+  Object.defineProperty(def, "$pending", {
+    value: (method?: string) => pendingSignal(def.__aio.id, method),
+    enumerable: false,
+    configurable: true,
+    writable: false,
+  });
 }
 
 /** `timer.state.x` / `timer.selectors.x()` — the React/Redux reflex.

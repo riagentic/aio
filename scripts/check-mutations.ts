@@ -868,8 +868,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a keepAlive remount ignores the page the last guest browsed to and restarts at src",
     file: "src/ui/browser.ts",
-    find: "    navigate(wv, kept.at);",
-    replace: "    navigate(wv, kept.src);",
+    find: "    navigate(wv, kept.at, props.httpReferrer);",
+    replace: "    navigate(wv, kept.src, props.httpReferrer);",
     test: "tests/ui-browser.test.ts",
     filter:
       "keepAlive: a remount opens the page the last guest was on, and nothing is moved or hidden",
@@ -4093,7 +4093,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "every restart reports a cell's UNPERSISTED fields as 'not in the stored data — new, or a method deleted it'",
     file: "src/server/boot-restore.ts",
-    find: "      ? applyCellFieldFilter(filter, declState)",
+    find:
+      "      ? applyCellFieldFilter(filter, declState, {\n        wildcard: true,\n        declared: declState,\n      })",
     replace: "      ? declState",
     test: "tests/persist-filtered-field-not-new-on-restart.test.ts",
     filter:

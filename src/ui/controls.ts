@@ -30,6 +30,7 @@ import {
 } from "../air/aio-renderer.ts";
 import type { VChild, VNode } from "../air/vdom.ts";
 import { firstTime } from "../protocol/said-once.ts";
+import { _noteKitRender } from "./styles.ts";
 
 /** Inline style object accepted by every kit component. */
 type Style = Record<string, string | number>;
@@ -45,6 +46,7 @@ interface Common {
 }
 
 function cx(base: string, extra?: string): string {
+  _noteKitRender(base.split(" ")[0]!);
   return extra ? `${base} ${extra}` : base;
 }
 

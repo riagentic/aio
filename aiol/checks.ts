@@ -2003,6 +2003,59 @@ function memberChain(
   }
 }
 
+/** `[s.a, s.b] = v` / `({ k: s.a } = v)` / `[...s.rest] = v` — a
+ *  destructuring-assignment TARGET is a write. The member must sit at an
+ *  element position (after `[` `,` `:` or a rest `...`, before `,` `]` `}`),
+ *  walking out through nested patterns until a close bracket is followed by a
+ *  plain `=`. A default (`[s.a = s.b]`) or computed key (`{ [s.k]: v }`) is not
+ *  at an element position, so it stays a read. Pure. */
+function isDestructureTarget(
+  code: string,
+  start: number,
+  end: number,
+): boolean {
+  let lo = start, hi = end;
+  for (;;) {
+    let i = lo - 1;
+    while (i >= 0 && /\s/.test(code[i]!)) i--;
+    const rest = code.slice(i - 2, i + 1) === "...";
+    if (rest) {
+      i -= 3;
+      while (i >= 0 && /\s/.test(code[i]!)) i--;
+    }
+    // `{` only before a rest: `{ s.x }` is otherwise a block, not a pattern.
+    if (!/[[,:]/.test(code[i] ?? "") && !(rest && code[i] === "{")) {
+      return false;
+    }
+    const after = skipTrivia(code, hi);
+    if (!/[,\]}]/.test(code[after] ?? "")) return false;
+    // The enclosing open bracket.
+    let open = i, depth = 0;
+    for (; open >= 0; open--) {
+      const ch = code[open]!;
+      if (")]}".includes(ch)) depth++;
+      else if ("([{".includes(ch) && depth-- === 0) break;
+    }
+    if (open < 0 || code[open] === "(") return false;
+    // `x[s.i]` — an INDEX bracket, not an array pattern.
+    let p = open - 1;
+    while (p >= 0 && /\s/.test(code[p]!)) p--;
+    if (code[open] === "[" && /[\w$)\]]/.test(code[p] ?? "")) return false;
+    // Its matching close.
+    let close = after;
+    for (depth = 0; close < code.length; close++) {
+      const ch = code[close]!;
+      if ("([{".includes(ch)) depth++;
+      else if (")]}".includes(ch) && depth-- === 0) break;
+    }
+    if (close >= code.length) return false;
+    const next = skipTrivia(code, close + 1);
+    if (code[next] === "=" && !/[=>]/.test(code[next + 1] ?? "")) return true;
+    lo = open;
+    hi = close + 1;
+  }
+}
+
 /** `++s.x` / `--s.x` / `delete s.x` — a write dressed as a prefix. Pure. */
 function isPrefixWrite(code: string, start: number): boolean {
   let i = start - 1;
@@ -2198,7 +2251,12 @@ export function draftReadOffsets(code: string, param: string): number[] {
   // with $". A blanket `(?!\$)` also excused `s.$myField`, and while a
   // $-prefixed state key is refused at `cell()` today, an exemption whose
   // breadth is accidental outlives the rule that made it safe.
-  const startRe = new RegExp(`(?<![\\w$.])${param}\\.[\\w$]`, "g");
+  // A spread (`[...s.items]`) IS a read: the one `.` run allowed before the
+  // param is `...`.
+  const startRe = new RegExp(
+    `(?<![\\w$])(?:(?<=\\.\\.\\.)|(?<!\\.))${param}\\.[\\w$]`,
+    "g",
+  );
   for (const m of code.matchAll(startRe)) {
     const start = m.index!;
     if (DRAFT_META.some((meta) => code.startsWith(`${param}.${meta}`, start))) {
@@ -2209,6 +2267,7 @@ export function draftReadOffsets(code: string, param: string): number[] {
     const after = skipTrivia(code, chain.end);
     if (ASSIGN_AT.test(code.slice(after, after + 5))) continue;
     if (isPrefixWrite(code, start)) continue;
+    if (isDestructureTarget(code, start, chain.end)) continue;
     out.push(start);
   }
   return out;
@@ -7799,6 +7858,54 @@ export const checkHookOrder: Checker = (ctx) => {
   }
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// A STATE KEY NAMED LIKE A METHOD OR SELECTOR
+// ══════════════════════════════════════════════════════════════════════
+// `cell()` throws at boot on it (src/state/cell-methods-factory.ts, AIO-6.1):
+// the callable wins on the cell object, so the state would be unreachable.
+// Caught here before the first run. Only the plain literal shape —
+// `cell("c", { state: { … }, methods: { … } })` — is read; a bound config,
+// spread, shorthand or quoted key is skipped, never guessed at.
+export const checkStateKeyCollision: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, report } = ctx;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    if (/\.test\.tsx?$/.test(file.name)) continue;
+    const code = codeText(file.content);
+    for (const m of codeMatches(file.content, _CELL_BLOCK_RE)) {
+      const name = m[1]!;
+      const open = code.indexOf("{", m.index! + m[0].length - 1);
+      const end = _balancedClose(code, open);
+      if (end === -1) continue;
+      const state = _blockOf(code, open, end, "state");
+      if (!state) continue;
+      const stateKeys = _topLevelKeys(code.slice(state[0], state[1] + 1));
+      for (const kind of ["method", "selector"] as const) {
+        const block = _blockOf(code, open, end, `${kind}s`);
+        if (!block) continue;
+        for (const fn of _members(code, block[0], block[1])) {
+          if (!stateKeys.has(fn.name)) continue;
+          const line = code.slice(0, fn.start).split("\n").length;
+          if (isSuppressed(file.lines, line - 1)) continue;
+          report(
+            "error",
+            "cells",
+            `${file.relative}:${line} — cell "${name}" state key "${fn.name}" ` +
+              `collides with ${kind} "${fn.name}" — cell() throws at boot ` +
+              `(${name}.${fn.name} would return the function, not the state)`,
+            {
+              file: file.relative,
+              line,
+              fix: `rename one, e.g. state key "last${
+                fn.name.charAt(0).toUpperCase() + fn.name.slice(1)
+              }"`,
+            },
+          );
+        }
+      }
+    }
+  }
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkScanCoverage,
   checkCellStateInterface,
@@ -7842,4 +7949,5 @@ export const ALL_CHECKS: Checker[] = [
   checkStyles,
   checkBodyCleanupTeardown,
   checkHookOrder,
+  checkStateKeyCollision,
 ];

@@ -341,6 +341,8 @@ circuitBreaker: {
 ```
 
 Re-enable: fix root cause, then `app.cells.enable("name")` (or restart the app).
+A trip keeps the cell's state and what is persisted — enabling it again picks up
+where it stopped.
 
 ---
 

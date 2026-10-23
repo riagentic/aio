@@ -63,6 +63,7 @@ function boot(dgram: unknown, platform = "linux") {
     },
     BrowserWindow,
     Menu: { setApplicationMenu() {} },
+    ipcMain: { on() {}, handle() {} }, // print() (__aio:print)
     nativeImage: { createFromBuffer: () => ({}) },
     session: { defaultSession: {} },
   };
@@ -86,7 +87,12 @@ function boot(dgram: unknown, platform = "linux") {
   const con = {
     log() {},
     warn() {},
-    error: (...a: unknown[]) => errors.push(a.map(String).join(" ")),
+    // The stub's profile cannot be written: the client says print() falls
+    // back (its preload) — true, and not what these tests count.
+    error: (...a: unknown[]) => {
+      const m = a.map(String).join(" ");
+      if (!m.includes("its preload could not be written")) errors.push(m);
+    },
   };
   // Timers are recorded, never armed: the sweep's own timeout and the 4 s
   // re-scan are driven by hand.

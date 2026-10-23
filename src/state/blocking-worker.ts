@@ -14,6 +14,9 @@ type Req = {
   name?: string;
   url?: string;
   arg: unknown;
+  /** 1 while this thread is inside the task's synchronous call — read by the
+   *  pool on cancel (see `syncCall`). */
+  busy?: SharedArrayBuffer;
 };
 type Res =
   | { n: number; ok: true; data: unknown }
@@ -165,8 +168,22 @@ self.onmessage = ({ data }: MessageEvent<Req>) => {
   });
 };
 
+/** Call the task, flagging the SYNCHRONOUS part of the call. Deno's
+ *  `Worker.terminate()` stops the event loop but does not interrupt running
+ *  synchronous code (measured on Deno 2.9.7: a cancelled CPU loop kept its
+ *  core until it returned), so the pool reads this flag to say so on cancel. */
+function syncCall<T>(busy: Int32Array | null, call: () => T): T {
+  if (busy) Atomics.store(busy, 0, 1);
+  try {
+    return call();
+  } finally {
+    if (busy) Atomics.store(busy, 0, 0);
+  }
+}
+
 async function runTask(data: Req): Promise<void> {
   const { n, src, name, url, arg } = data;
+  const busy = data.busy ? new Int32Array(data.busy) : null;
   try {
     // The module form (`pool.run(id, new URL(…), arg)`): a real module, with
     // its own imports — nothing is rebuilt from text.
@@ -189,7 +206,11 @@ async function runTask(data: Req): Promise<void> {
             `the worker calls \`export default (arg) => …\``,
         );
       }
-      const res: Res = { n, ok: true, data: await job(arg) };
+      const res: Res = {
+        n,
+        ok: true,
+        data: await syncCall(busy, () => job(arg)),
+      };
       self.postMessage(res);
       return;
     }
@@ -197,7 +218,7 @@ async function runTask(data: Req): Promise<void> {
     // The name it had where it was written: a minified source carries the
     // minifier's (`function e(){…}`), and a function may read its own `.name`.
     if (name) Object.defineProperty(fn, "name", { value: name });
-    const out = await fn(arg);
+    const out = await syncCall(busy, () => fn(arg));
     const res: Res = { n, ok: true, data: out };
     self.postMessage(res);
   } catch (e) {

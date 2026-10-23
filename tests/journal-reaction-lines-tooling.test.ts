@@ -95,3 +95,22 @@ Deno.test("journal readers: a reaction a sync op caused is said to be unreproduc
   );
   assert(!flow.includes("TIME-TRAVELLED"), flow);
 });
+
+Deno.test("journal readers: an app.cells.disable reset is said in a recorded test, never dropped silently", () => {
+  const reset = {
+    seq: 9,
+    ts: call.ts + 5,
+    type: "inbox:__destroy",
+    payload: { reset: true },
+  };
+  const out = generateReplayTest(
+    [call, reset] as Parameters<
+      typeof generateReplayTest
+    >[0],
+  );
+  assert(out.includes("RESET by app.cells.disable (1 reset)"), out);
+  assert(
+    !generateReplayTest([call]).includes("RESET by"),
+    "quiet without one",
+  );
+});

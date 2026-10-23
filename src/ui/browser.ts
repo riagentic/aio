@@ -41,7 +41,7 @@ import {
  *  dependency on Electron would put a Node package in every app's bundle. */
 type WebviewEl = HTMLElement & {
   src?: string;
-  loadURL?: (url: string) => Promise<void>;
+  loadURL?: (url: string, opts?: { httpReferrer?: string }) => Promise<void>;
   getURL?: () => string;
   reload?: () => void;
   goBack?: () => void;
@@ -82,6 +82,11 @@ export interface BrowserProps {
    *  declared in deno.json `build.guestPreloads` — the one form that loads in
    *  dev and in a packaged build. Read once, when the guest attaches. */
   preload?: string;
+  /** The `Referer` the guest's navigations send. An app page is
+   *  `aio://app/`, which sends none, and an embed that checks it refuses to
+   *  play (YouTube: error 153) — pass the origin the embed expects, e.g.
+   *  `"https://example.com/"`. */
+  httpReferrer?: string;
   /** Called after the guest navigates, with the URL it landed on. Write this
    *  to state if you want an address bar — and note that doing so is safe
    *  precisely because `src` is only applied when it differs. */
@@ -145,11 +150,13 @@ function hostKeysAttr(keys: readonly string[] | undefined): string | undefined {
  * decision an app should make on purpose.
  */
 export function Browser(props: BrowserProps): VNode {
-  const { partition, preload } = props;
+  const { partition, preload, httpReferrer } = props;
   const hostKeys = hostKeysAttr(props.hostKeys);
   return h("webview", {
     ...(partition ? { partition } : {}),
     ...(preload ? { preload } : {}),
+    // The first load reads the attribute; later ones pass it to `loadURL`.
+    ...(httpReferrer ? { httpreferrer: httpReferrer } : {}),
     // An attribute, set at creation: the main process reads it when the guest
     // attaches, which is after this element exists and before it loads.
     ...(hostKeys ? { [HOST_KEYS_ATTR]: hostKeys } : {}),
@@ -242,7 +249,7 @@ function activate(el: HTMLElement, m: Mount): void {
   m.guest = wv;
   const kept = props.keepAlive ? _kept.get(props.keepAlive) : undefined;
   if (kept && kept.src === props.src && kept.at && kept.at !== props.src) {
-    navigate(wv, kept.at);
+    navigate(wv, kept.at, props.httpReferrer);
     // What `navigate` compares the next render's `src` with: the prop, as it
     // was before the unmount — so the unchanged prop does not send the guest
     // back to it, and a changed one still navigates.
@@ -259,7 +266,7 @@ function wire(wv: WebviewEl, props: BrowserProps, mounted: boolean): void {
   if (partition && !wv.getAttribute("partition")) {
     wv.setAttribute("partition", partition);
   }
-  navigate(wv, props.src);
+  navigate(wv, props.src, props.httpReferrer);
   // The listeners read the CURRENT mount's callback when they fire, so a
   // handler that changed between renders is the one that is called.
   const cb = wv as { _aioOnNav?: (url: string) => void; _aioNav?: boolean };
@@ -308,7 +315,11 @@ function setHostKeyHandler(
  *  render sets `src` again. Comparing first breaks it at the only place it can
  *  be broken — the page never settles otherwise, and nothing in the stack says
  *  why. Exported so a test can drive the rule without an Electron guest. */
-export function navigate(wv: WebviewEl, url: string): void {
+export function navigate(
+  wv: WebviewEl,
+  url: string,
+  httpReferrer?: string,
+): void {
   if (!url) return;
   const current = (wv as { _aioUrl?: string })._aioUrl ??
     (() => {
@@ -323,10 +334,12 @@ export function navigate(wv: WebviewEl, url: string): void {
   // `loadURL` where the guest is attached and ready; `src` before that, which
   // is what the tag itself reads on first paint.
   if (typeof wv.loadURL === "function" && current) {
-    void wv.loadURL(url).catch(() => {
-      // aio-ok: a navigation the guest refuses (an offline host, a blocked
-      // scheme) is the guest's business and shows in its own error page.
-    });
+    void wv.loadURL(url, httpReferrer ? { httpReferrer } : undefined).catch(
+      () => {
+        // aio-ok: a navigation the guest refuses (an offline host, a blocked
+        // scheme) is the guest's business and shows in its own error page.
+      },
+    );
   } else {
     wv.src = url;
     wv.setAttribute("src", url);

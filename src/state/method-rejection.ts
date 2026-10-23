@@ -23,6 +23,22 @@
  *  test. The class carries the classification to whoever wraps the throw. */
 export class RefusedWrite extends Error {}
 
+/** The cell whose code threw inside ANOTHER cell's action — a `listensTo`
+ *  handler. Its throw still fails the whole action, but it is that cell's
+ *  error: charged to the action's prefix, the circuit breaker disabled the
+ *  innocent source and left the broken listener running. */
+const _thrower = new WeakMap<object, string>();
+
+/** Record that `cell` threw `e` while reducing a foreign action. */
+export function markThrower(e: unknown, cell: string): void {
+  if (e !== null && typeof e === "object") _thrower.set(e, cell);
+}
+
+/** The cell `markThrower` recorded for `e`, if any. */
+export function throwerOf(e: unknown): string | undefined {
+  return e !== null && typeof e === "object" ? _thrower.get(e) : undefined;
+}
+
 /** The code an in-process caller gets for what a reduce threw. */
 export function reduceThrowCode(e: unknown): "ACTION_REFUSED" | "REDUCE_ERROR" {
   return e instanceof RefusedWrite ? "ACTION_REFUSED" : "REDUCE_ERROR";

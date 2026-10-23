@@ -356,3 +356,25 @@ Deno.test("SignIn: a signup that needs verification says so instead of signing i
   // …and back on the login form, which is where they will come back to.
   assertStringIncludes(after, 'autoComplete="current-password"');
 });
+
+Deno.test("SignIn: a signup whose verification mail failed never says to check the inbox", async () => {
+  _resetAuthUi();
+  _setAuthFeatures({ signup: true, oidc: false, totp: false, mail: true });
+  click(render(), "Create an account");
+  const f = withFetch({
+    "/__aio/auth/signup": { body: { verificationSent: false } },
+  });
+  try {
+    await submit(render(), {
+      id: "alice",
+      password: "correct-horse-9",
+      email: "a@example.com",
+    });
+  } finally {
+    await f.restore();
+  }
+  const after = html();
+  assert(!after.includes("check your inbox"), after);
+  assertStringIncludes(after, "could not be sent");
+  assertEquals(authUser.value ?? null, null, "signed in before verifying");
+});

@@ -139,12 +139,15 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
   /** Workers a settled task's stray landed on: retired once their running
    *  task settles, never reused (their loop may hold more of it). */
   const tainted = new WeakSet<Worker>();
+  /** Per worker: 1 while it is inside its task's synchronous call. */
+  const busyFlag = new WeakMap<Worker, Int32Array>();
   let seq = 0;
   let disposed = false;
 
   function spawn(): Worker {
     const w = new Worker(workerUrl(), { type: "module" });
     all.add(w);
+    busyFlag.set(w, new Int32Array(new SharedArrayBuffer(4)));
     w.onmessage = ({ data }: MessageEvent<WorkerRes | WorkerStray>) => {
       const task = active.get(w);
       if ("stray" in data) {
@@ -249,6 +252,7 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
         name: task.name,
         url: task.url,
         arg: task.arg,
+        busy: busyFlag.get(w)!.buffer,
       });
     } catch (e) {
       // `postMessage` refuses an uncloneable `arg` SYNCHRONOUSLY. The throw
@@ -381,6 +385,24 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
       // spawn a fresh one to keep capacity, then re-feed the queue.
       for (const [w, t] of [...active]) {
         if (t.id === id) {
+          // Deno's terminate() does not interrupt running synchronous code
+          // (Deno 2.9.7, measured): a cancelled CPU loop kept its core until
+          // it returned, outside the pool's size — three cancels on a size-1
+          // pool left three cores busy. The caller is released either way;
+          // the thread's survival is said, not hidden.
+          if (Atomics.load(busyFlag.get(w)!, 0) === 1) {
+            log.warn(
+              "blocking",
+              `blocking task '${id}' was cancelled inside synchronous code ` +
+                `(a CPU loop, a *Sync or FFI call). Its caller is released, ` +
+                `but Deno cannot interrupt synchronous code: the thread keeps ` +
+                `running — and a CPU core busy — until that call returns, ` +
+                `outside the pool's limit of ${size}. To make a long task ` +
+                `stoppable, yield between chunks of work ` +
+                `(\`await new Promise((r) => setTimeout(r))\`) — a cancel ` +
+                `stops it at the next yield.`,
+            );
+          }
           t.reject(new Error(`blocking task '${id}' cancelled`));
           retire(w);
           cancelled = true;

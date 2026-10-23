@@ -251,7 +251,7 @@ const PATCH: ReleasePatch = {
 async function manifest(
   o: { sign?: boolean; patches?: ReleasePatch[]; version?: string } = {},
 ): Promise<ShipManifest> {
-  const sign = o.sign === false ? undefined : await KEYS;
+  const sign = o.sign === false ? undefined : KEYS;
   return await withPatches(
     await buildReleaseManifest({
       name: "app",
@@ -269,7 +269,9 @@ async function manifest(
     sign?.privateKey,
   );
 }
-const KEYS = generateSigningKey();
+// Awaited here: an unawaited keygen left its `exportKey` pending into the
+// first test, which the op sanitizer charged to it under load.
+const KEYS = await generateSigningKey();
 
 Deno.test("manifest patches: the core a 1.0.19 client verifies is what it always was — patches are outside it", async () => {
   // The string below is what 1.0.19-beta's own `manifestCore` returns for this
@@ -315,7 +317,7 @@ Deno.test("manifest patches: the core a 1.0.19 client verifies is what it always
   // …and a signed manifest with patches passes the claims check and the
   // manifest parser exactly as one without.
   const signed = await manifest({ patches: [PATCH] });
-  const expect = { key: (await KEYS).publicKey, channel: "prod" };
+  const expect = { key: KEYS.publicKey, channel: "prod" };
   assertEquals((await verifyManifestClaims(signed, expect)).ok, true);
   assertEquals(
     parseShipManifest(JSON.stringify(signed), "test").ok,
@@ -508,7 +510,7 @@ async function publish(r: Rig, o: {
     ? patchOf(new Uint8Array(0), to)
     : patchOf(from, target);
   const name = "app-2.0.0.patch";
-  const sign = o.sign === false ? undefined : await KEYS;
+  const sign = o.sign === false ? undefined : KEYS;
   const m = await withPatches(
     await buildReleaseManifest({
       name: "app",

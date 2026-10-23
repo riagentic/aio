@@ -24,6 +24,9 @@ import {
   SLOW_START_WAIT_MS,
   slowStartReason,
 } from "../../../src/am/am-cmd-process.ts";
+// THE command word an app's `dev` task gives its entry (`serve`).
+import { entryTaskWords } from "../../../src/am/am-launch.ts";
+import { readDenoJsonSync } from "../../../src/server/deno-json.ts";
 import { pathKey, pathOf, readProjectMeta } from "./scan.server.ts";
 
 type OS = typeof Deno.build.os;
@@ -109,7 +112,7 @@ function projectEnv(): Record<string, string> {
  *  `client` picks the shell (browser is safe/instant; others as-is). */
 export async function startApp(
   dir: string,
-  client: "browser" | "electron" | "server-only" = "browser",
+  client: ReturnType<typeof launchClient> = "browser",
   /** The profile to boot under (`--profile=<name>`) — a restart of a
    *  profile instance must come back as that instance. */
   profile?: string,
@@ -138,6 +141,9 @@ export async function startApp(
       "-A",
       "--unstable-kv",
       entry,
+      // The cli scaffold routes on `Deno.args[0]`: without its dev task's
+      // `serve` it exited "missing command" and Start never came up.
+      ...entryTaskWords(devTaskOf(dir), join(dir, entry), dir),
       `--client=${client}`,
       ...(profile ? [`--profile=${profile}`] : []),
       ...(home ? [`--home=${home}`] : []),
@@ -157,6 +163,18 @@ export async function startApp(
     return { ok: true, pid };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** The project's `dev` task line, if it declares one. */
+function devTaskOf(dir: string): string | undefined {
+  try {
+    const tasks = readDenoJsonSync(dir)?.config.tasks as
+      | Record<string, unknown>
+      | undefined;
+    return typeof tasks?.dev === "string" ? tasks.dev : undefined;
+  } catch {
+    return undefined; // aio-ok: an unreadable deno.json — resolveEntry said it
   }
 }
 
@@ -227,15 +245,42 @@ export async function pidsAt(dir: string): Promise<number[]> {
 
 /** Is an app registered as running from `dir` — `pid` when given (one
  *  instance of several in a directory), else any, and never one of
- *  `except` (the instances that were already there before a start). */
+ *  `except` (the instances that were already there before a start).
+ *  `served`: only a lock that reached `started`. An app takes its lock at
+ *  `starting`, BEFORE its config is checked — so a boot that was then refused
+ *  (no App.tsx, a bad option) read as up, and amui said "started" over an app
+ *  that had already exited. */
 async function registeredAt(
   dir: string,
   pid?: number,
   except?: readonly number[],
+  served = false,
 ): Promise<boolean> {
-  return (await pidsAt(dir)).some((p) =>
-    (pid === undefined || p === pid) && !except?.includes(p)
+  const { instances } = await import("./control.server.ts");
+  return instances().some((i) =>
+    i.alive && i.cwd === dir && (!served || i.status === "started") &&
+    (pid === undefined || i.pid === pid) && !except?.includes(i.pid)
   );
+}
+
+/** The client a launch boots: on a restart, the instance's RECORDED one (a
+ *  server-only service restarted as `browser` was refused for having no
+ *  App.tsx, and an electron app came back as a browser tab); on a start, a
+ *  headless client the project declares; else `browser` — amui never opens a
+ *  window on its own. Pure. */
+export function launchClient(
+  recorded: string | undefined,
+  declared: string | null | undefined,
+): "browser" | "electron" | "server-only" | "cli" {
+  // The runtime's own reading of deno.json `client`: "server" (what
+  // `am create --target=server` writes) and "server-only" are no UI.
+  const c = recorded ??
+    (declared === "server" || declared === "server-only"
+      ? "server-only"
+      : declared === "cli"
+      ? "cli"
+      : undefined);
+  return c === "electron" || c === "server-only" || c === "cli" ? c : "browser";
 }
 
 /** The reason a boot failed, out of the launcher's captured output — pure.
@@ -298,7 +343,7 @@ export async function awaitBoot(
   let died = false;
   while (Date.now() < deadline) {
     await sleep(REGISTRY_POLL_MS);
-    if (await registeredAt(dir, undefined, before)) return { up: true };
+    if (await registeredAt(dir, undefined, before, true)) return { up: true };
     if (pid !== undefined && !isProcessAlive(pid)) {
       died = true;
       break;
@@ -312,7 +357,7 @@ export async function awaitBoot(
   const tail = await startLogTail(dir);
   const why = died
     ? "the process exited before the app came up"
-    : `no app registered from this directory within ${
+    : `no app came up from this directory within ${
       Math.round(timeoutMs / 1000)
     }s`;
   return {
@@ -763,9 +808,22 @@ export async function createApp(
       stdout: "piped",
       stderr: "piped",
     }).output();
-    return out.code === 0 ? { ok: true, dir: join(workspace, name) } : {
+    if (out.code === 0) return { ok: true, dir: join(workspace, name) };
+    // `am` piped answers in JSON on STDOUT (`{"error":…}`); reading stderr
+    // alone showed "create failed: " with no reason at all.
+    // The JSON reason first: stderr can hold anything else at the same time
+    // (deno's "Download …" lines, an undo note) and won over it.
+    const dec = new TextDecoder();
+    const stdout = dec.decode(out.stdout).trim();
+    let error = "";
+    try {
+      const j = JSON.parse(stdout);
+      if (typeof j?.error === "string") error = j.error;
+    } catch { /* not JSON */ }
+    if (!error) error = dec.decode(out.stderr).trim() || stdout;
+    return {
       ok: false,
-      error: new TextDecoder().decode(out.stderr).slice(0, 200),
+      error: (error || `am create exited with code ${out.code}`).slice(0, 200),
     };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };

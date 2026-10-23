@@ -583,6 +583,16 @@ type AioUnlistedTagAttributes = {
   shadowRootDelegatesFocus?: boolean;
   shadowRootClonable?: boolean;
   shadowRootSerializable?: boolean;
+  /** Electron's `<webview>` (`src` above; `preload` is a script path). Its
+   *  boolean attributes are presence-only: `allowpopups` turns it on. Every
+   *  type here is wide enough that an app's own `webview` declaration (made
+   *  before these existed, e.g. `allowpopups?: string`) still type-checks. */
+  partition?: string;
+  httpreferrer?: string;
+  useragent?: string;
+  allowpopups?: boolean | string;
+  preload?: string;
+  webpreferences?: string;
 };
 
 /** Media elements — the attributes that decide playback behaviour. */
@@ -652,6 +662,16 @@ export type JsxNode =
   | null
   | undefined
   | JsxNode[];
+/** What may stand as a JSX tag (TS ≥ 5.1 reads `JSX.ElementType`): an
+ *  intrinsic tag name, or a component returning anything renderable — so
+ *  `function Row(): JSX.Node { return null }` is a valid component (without
+ *  it, TS checked a component's return against `JSX.Element` alone: TS2786). */
+export type JsxElementType =
+  | keyof JsxIntrinsicElements
+  // A second required parameter (a legacy `(props, ref)` component) compiled
+  // before this type existed, so it still does.
+  // deno-lint-ignore no-explicit-any -- a component's props are its own
+  | ((props: any, ...rest: any[]) => JsxNode);
 /** Attributes valid on every JSX element, including function components.
  *  `key` is extracted by `jsx()` before props reach the component. */
 export interface JsxIntrinsicAttributes {
@@ -752,6 +772,7 @@ export namespace JSX {
   export type Element = JsxElement;
   export type Node = JsxNode;
   export type Children = JsxNode;
+  export type ElementType = JsxElementType;
   export interface IntrinsicAttributes extends JsxIntrinsicAttributes {}
   export interface IntrinsicElements extends JsxIntrinsicElements {}
 }

@@ -403,7 +403,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "8565db972a9f1eaf",
+          "sig": "57dbfeaf19f8b5d3",
           "members": {
             "appId": "opt:2fb40568533c1a6d",
             "cells": "opt:58dbae2820cab862",
@@ -441,6 +441,8 @@
             "users": "opt:b9481918a0e71c7d",
             "key": "opt:2cb46dfffc218cf2",
             "resolveUser": "opt:d955cf9950ae24e5",
+            "resolvePeer": "opt:575c0615f7db27b1",
+            "peerTypes": "opt:2fb40568533c1a6d",
             "sessions": "opt:object",
             "sessions.ttlMs": "opt:f6522636230fa080",
             "auth": "opt:f82e07e2d44e8628",
@@ -465,6 +467,8 @@
             "redactActions": "opt:1a1f5c423a7cdab2",
             "childWindows": "opt:0ecca0fe3beba89b",
             "electron": "opt:e2fce43e3ac71e0d",
+            "splash": "opt:object",
+            "splash.show": "opt:ff7fd14e059d183a",
             "libraryMode": "opt:0ecca0fe3beba89b",
             "_workerEntry": "opt:2fb40568533c1a6d",
             "_harnessShapeGuard": "opt:0ecca0fe3beba89b",
@@ -499,7 +503,7 @@
             "onCheckpointRestore": "opt:bc30aaf8d4dd00e2"
           },
           "sigs": [
-            "8565db972a9f1eaf"
+            "57dbfeaf19f8b5d3"
           ]
         },
         "CellState": {
@@ -917,9 +921,17 @@
         },
         "JSX": {
           "kind": "namespace",
-          "sig": "db229a2ed409f674",
+          "sig": "51496afdc9b7f16a",
+          "members": {
+            "Element": "opt:7f0fe7298f9030fb",
+            "Node": "opt:1a4d025870bf1f1c",
+            "Children": "opt:1a4d025870bf1f1c",
+            "ElementType": "opt:fa597b7461304468",
+            "IntrinsicAttributes": "opt:4c570b09722cfdc9",
+            "IntrinsicElements": "opt:e9434873f70c1994"
+          },
           "sigs": [
-            "db229a2ed409f674"
+            "51496afdc9b7f16a"
           ]
         },
         "JsxElement": {
@@ -1438,6 +1450,14 @@
           },
           "sigs": [
             "a3f8408538f9d0b7"
+          ]
+        },
+        "ResolvePeerFn": {
+          "kind": "typeAlias",
+          "sig": "69dc71018527f520",
+          "experimental": true,
+          "sigs": [
+            "69dc71018527f520"
           ]
         },
         "ResolveUserFn": {
@@ -5225,9 +5245,17 @@
         },
         "JSX": {
           "kind": "namespace",
-          "sig": "db229a2ed409f674",
+          "sig": "51496afdc9b7f16a",
+          "members": {
+            "Element": "opt:7f0fe7298f9030fb",
+            "Node": "opt:1a4d025870bf1f1c",
+            "Children": "opt:1a4d025870bf1f1c",
+            "ElementType": "opt:fa597b7461304468",
+            "IntrinsicAttributes": "opt:4c570b09722cfdc9",
+            "IntrinsicElements": "opt:e9434873f70c1994"
+          },
           "sigs": [
-            "db229a2ed409f674"
+            "51496afdc9b7f16a"
           ]
         },
         "JsxElement": {
@@ -5235,6 +5263,13 @@
           "sig": "c4b91168d09f8262",
           "sigs": [
             "c4b91168d09f8262"
+          ]
+        },
+        "JsxElementType": {
+          "kind": "typeAlias",
+          "sig": "02ceb61f7c0050a4",
+          "sigs": [
+            "02ceb61f7c0050a4"
           ]
         },
         "JsxIntrinsicAttributes": {
@@ -5515,17 +5550,18 @@
         },
         "AppMeta": {
           "kind": "typeAlias",
-          "sig": "a28080ec755b24f5",
+          "sig": "ca446c83136c8017",
           "members": {
             "appId": "req:2fb40568533c1a6d",
             "profile": "opt:2fb40568533c1a6d",
             "aio": "req:2fb40568533c1a6d",
             "app": "opt:2fb40568533c1a6d",
             "createdAt": "req:2fb40568533c1a6d",
-            "updatedAt": "req:2fb40568533c1a6d"
+            "updatedAt": "req:2fb40568533c1a6d",
+            "dbPath": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "a28080ec755b24f5"
+            "ca446c83136c8017"
           ]
         },
         "appVersion": {
@@ -5656,6 +5692,18 @@
             "68b3405a06dc5203"
           ]
         },
+        "emitChunk": {
+          "kind": "function",
+          "sig": "e9d5694319a6eb9f",
+          "experimental": true,
+          "members": {
+            "param0": "req:8a0195ffd96928c3|e2e9e83e047a6f75~unknown",
+            "return": "req:0ecca0fe3beba89b"
+          },
+          "sigs": [
+            "df2e774de85e623d"
+          ]
+        },
         "homeWasRequested": {
           "kind": "function",
           "sig": "c066c3898d4e2998",
@@ -5725,6 +5773,80 @@
             "32e81b9835e732f4"
           ]
         },
+        "peer": {
+          "kind": "function",
+          "sig": "89135bbba3202e8c",
+          "experimental": true,
+          "members": {
+            "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "param1": "req:4b2610a1a4ac10ea|",
+            "return": "req:91e2195d46b94853",
+            "typeParams": "req:b4703fac1525d195"
+          },
+          "sigs": [
+            "74fc1aa0afb1fbe4"
+          ]
+        },
+        "Peer": {
+          "kind": "typeAlias",
+          "sig": "53f9b40aebb881c7",
+          "experimental": true,
+          "members": {
+            "typeParams": "req:b4703fac1525d195",
+            "target": "req:9081d68fba9c8c8c",
+            "state": "req:068574efdd5e876e",
+            "connected": "req:b0d796a0bdd3e6b1",
+            "call": "req:85b3c1f1055c0c3e",
+            "cell": "req:cdf36c8c35b6206f",
+            "stream": "req:a82ac3152bc9d154",
+            "blob": "req:f4928d4166be2834",
+            "upload": "req:4782f0892c4539e0",
+            "describe": "req:0ff0c291f0641811",
+            "onStatus": "req:a5e9913e41fd98fe",
+            "subscribe": "req:7a3330e760dc0118",
+            "close": "req:d831502f3c16c146",
+            "[Symbol.dispose]": "req:f05ae2c283690f69"
+          },
+          "sigs": [
+            "53f9b40aebb881c7"
+          ]
+        },
+        "PeerBlob": {
+          "kind": "typeAlias",
+          "sig": "6bf65597d79be13c",
+          "experimental": true,
+          "members": {
+            "id": "req:2fb40568533c1a6d",
+            "size": "req:f6522636230fa080",
+            "name": "opt:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "6bf65597d79be13c"
+          ]
+        },
+        "PeerCell": {
+          "kind": "typeAlias",
+          "sig": "2dd34ca62dcc3891",
+          "experimental": true,
+          "sigs": [
+            "2dd34ca62dcc3891"
+          ]
+        },
+        "PeerDescription": {
+          "kind": "typeAlias",
+          "sig": "098c837ccef422ef",
+          "experimental": true,
+          "members": {
+            "app": "req:2fb40568533c1a6d",
+            "version": "req:2fb40568533c1a6d",
+            "aio": "req:2fb40568533c1a6d",
+            "cells": "req:5bf2b92e6163198c",
+            "types": "opt:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "098c837ccef422ef"
+          ]
+        },
         "peerHello": {
           "kind": "function",
           "sig": "e9135d16f114bed7",
@@ -5733,6 +5855,45 @@
           },
           "sigs": [
             "f7652db6d1c9613a"
+          ]
+        },
+        "PeerMethod": {
+          "kind": "typeAlias",
+          "sig": "9148084774f1a547",
+          "experimental": true,
+          "members": {
+            "args": "opt:f6522636230fa080",
+            "async": "req:0ecca0fe3beba89b"
+          },
+          "sigs": [
+            "9148084774f1a547"
+          ]
+        },
+        "PeerOptions": {
+          "kind": "typeAlias",
+          "sig": "d387fb9d5a7af312",
+          "experimental": true,
+          "members": {
+            "token": "opt:edfbf1925d9c26f3",
+            "offline": "opt:34ee1ba0601a3022",
+            "readyTimeoutMs": "opt:f6522636230fa080",
+            "ackTimeoutMs": "opt:f6522636230fa080",
+            "as": "opt:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "d387fb9d5a7af312"
+          ]
+        },
+        "PeerStream": {
+          "kind": "typeAlias",
+          "sig": "f5dc11b414e6a6e3",
+          "experimental": true,
+          "members": {
+            "typeParams": "req:5e89e34a5a617ad1",
+            "result": "req:c63ba63adb710595"
+          },
+          "sigs": [
+            "f5dc11b414e6a6e3"
           ]
         },
         "pickDirectory": {
@@ -6661,15 +6822,16 @@
         },
         "BootHandle": {
           "kind": "interface",
-          "sig": "922612f74bd17778",
+          "sig": "63540ca115b40ab6",
           "members": {
             "advance": "req:8cd8a60e3dca0431",
             "settle": "req:ea8fb37f7482dd65",
             "dispose": "req:d831502f3c16c146",
-            "[Symbol.dispose]": "req:f05ae2c283690f69"
+            "[Symbol.dispose]": "req:f05ae2c283690f69",
+            "serverState": "opt:9df2cf7dfdc9dc45"
           },
           "sigs": [
-            "922612f74bd17778"
+            "63540ca115b40ab6"
           ]
         },
         "Cassette": {
@@ -7431,12 +7593,13 @@
         },
         "BrowserProps": {
           "kind": "interface",
-          "sig": "8fb462763ca02d7d",
+          "sig": "712a60a0c0fc1c96",
           "members": {
             "src": "req:2fb40568533c1a6d",
             "keepAlive": "opt:2fb40568533c1a6d",
             "partition": "opt:2fb40568533c1a6d",
             "preload": "opt:2fb40568533c1a6d",
+            "httpReferrer": "opt:2fb40568533c1a6d",
             "onNavigate": "opt:db1e2795ea17ab9d",
             "class": "opt:2fb40568533c1a6d",
             "style": "opt:13f82d5fa6ff79be",
@@ -7445,7 +7608,7 @@
             "onHostKey": "opt:8795c442147c672a"
           },
           "sigs": [
-            "8fb462763ca02d7d"
+            "712a60a0c0fc1c96"
           ]
         },
         "Button": {
@@ -8707,6 +8870,10 @@
           "sig": "verb"
         },
         "am pair": {
+          "kind": "verb",
+          "sig": "verb"
+        },
+        "am peer": {
           "kind": "verb",
           "sig": "verb"
         },

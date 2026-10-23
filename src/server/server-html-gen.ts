@@ -4,6 +4,7 @@ import { UI_ENTRY } from "./app-files.ts";
 import type { CallTimeouts } from "../protocol/protocol-types.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { UiConfig, UiTheme } from "./aio-types.ts";
+import type { HueKey } from "../build/app-icon.ts";
 import {
   appThemeBaseCss,
   appThemeCss,
@@ -175,7 +176,7 @@ function headContent(
   assetBase = "/",
   chrome?: UiChrome,
   theme?: UiTheme,
-  themeName?: string,
+  themeName?: HueKey,
   /** `<html lang>` is written by {@linkcode htmlOpen}, not here — the shells
    *  pass it positionally so this stays one argument list. */
   _lang?: string,
@@ -273,13 +274,14 @@ function headContent(
   // boxes" are separate questions and this one composes with each answer to
   // the other. `"tokens"` and `"none"` emit no visual rules, so there is
   // nothing for it to drop.
-  const visual = (name: string) =>
+  const visual = (name: HueKey) =>
     layout === false ? appThemeBaseCss(name) : appThemeCss(name);
+  const key = themeName === undefined || themeName === "" ? title : themeName;
   const themeCss = theme === "none"
     ? null
     : theme === "full" || (theme === "auto" && !hasCSS)
-    ? visual(themeName || title)
-    : appThemeTokensCss(themeName || title);
+    ? visual(key)
+    : appThemeTokensCss(key);
   // MARKED, so the standalone runtime can take it away again. A packaged
   // shell is written before `aio.run()` exists, so it cannot know the app
   // asked for `theme: "none"` — and this sheet is always-on, carrying
@@ -308,9 +310,9 @@ function headContent(
       // The deferred sheet must be the one the runtime would have emitted, or
       // an APK enables a page shell the app declined at config time.
       appThemeCss(
-        themeName || title,
+        key,
       )}</style>\n  <style media="not all" data-aio-theme-deferred-nolayout>${
-      appThemeBaseCss(themeName || title)
+      appThemeBaseCss(key)
     }</style>`
     : "";
   const cssLink = hasCSS
@@ -417,8 +419,9 @@ export interface HtmlShellOptions {
   /** A per-response CSP nonce. Every `<script>` in the shell is stamped with
    *  it — see {@linkcode withScriptNonce}. */
   nonce?: string;
-  /** The identity the accent hue is derived from (the appId). */
-  themeName?: string;
+  /** The identity the accent hue is derived from: the appId, or deno.json
+   *  `hue` itself. */
+  themeName?: HueKey;
   /** ui.lang — the document language (default: "en"). */
   lang?: string;
   /** ui.dir — `<html dir>`. See `UiConfig.dir`. */
@@ -541,7 +544,7 @@ export function androidLocalHTML(
     head?: string;
     theme?: UiTheme;
     layout?: boolean;
-    themeName?: string;
+    themeName?: HueKey;
     lang?: string;
     dir?: UiDir;
     /** The web target's app id — its standalone store is `aio:<appId>`. The

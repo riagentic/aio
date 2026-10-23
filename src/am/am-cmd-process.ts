@@ -45,6 +45,7 @@ import {
   WATCH_DEBOUNCE_MS,
 } from "./am-launch.ts";
 import {
+  appFlagRefusal,
   cmdStart,
   componentProgress,
   effectiveClient,
@@ -524,7 +525,7 @@ async function restartApp(
   }
   if (re.entry !== undefined) flags = { ...flags, entry: re.entry };
   {
-    const cannot = entryRefusal(flags.entry) ??
+    const cannot = entryRefusal(flags.entry) ?? appFlagRefusal(flags) ??
       headlessRefusal(await effectiveClient(launchArgs));
     if (cannot) {
       outError(

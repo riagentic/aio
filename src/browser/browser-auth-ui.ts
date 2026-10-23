@@ -160,8 +160,13 @@ async function submitCredentials(form: HTMLFormElement): Promise<void> {
     if (_mode.value === "signup") {
       const r = await authClient.signup(id, password, email || undefined);
       if ("verificationSent" in r) {
+        // `false` when the server's send failed. The frozen client type
+        // still spells it `true`, so the value is read as a plain boolean.
         _notice.set(
-          "Account created — check your inbox to verify, then sign in.",
+          (r.verificationSent as boolean)
+            ? "Account created — check your inbox to verify, then sign in."
+            : "Account created, but the verification email could not be " +
+              "sent — try again later.",
         );
         _mode.set("login");
         return;

@@ -102,6 +102,30 @@ export function unmountedAssetUrls(opts: {
   return out;
 }
 
+/** A URL the page asks for: a `src`/`href`/`poster`/`srcset` prop, a
+ *  `fetch(…)`, `new URL(…)`, `new Audio(…)`/`Image`, a CSS `url(…)` — never
+ *  text (`<code>/media/a.txt</code>` is a string too). */
+const ROOTED_URL_RE =
+  /(?:\b(?:src|href|poster|srcset)\s*:\s*|\b(?:fetch|URL|Audio|Image|url)\s*\(\s*)(["'`]?)(\/[^"'`\s)]+)\1/g;
+
+/** The URLs under a deno.json `assets` mount (`prefixes`, as `/media`) that
+ *  the bundle or its stylesheet `code` asks for from the host's ROOT. A
+ *  server answers them at the root; a standalone page does not sit there —
+ *  an APK's is `/assets/index.html`, a web build's under a sub-path is
+ *  `/repo/` — so there each is a 404, with every build and gate green. Pure. */
+export function rootedMountUrls(
+  code: string,
+  prefixes: readonly string[],
+): string[] {
+  const out = new Set<string>();
+  for (const m of code.matchAll(ROOTED_URL_RE)) {
+    const u = m[2]!;
+    // aio-ok: path-split — a URL path and URL prefixes
+    if (prefixes.some((p) => u.startsWith(p + "/"))) out.add(u);
+  }
+  return [...out].sort();
+}
+
 /** The finding as one sentence and its fix. */
 export function unmountedAssetUrlMessage(
   module: string,

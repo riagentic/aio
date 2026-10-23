@@ -257,3 +257,37 @@ Deno.test("android: a mount that contains the build output is refused, naming th
     await dropTempDir(root);
   }
 });
+
+Deno.test("android/web: a page URL naming a mount from the host's root is said — it 404s beside the page", async () => {
+  const { rootedMountUrls } = await import("../src/build/asset-urls.ts");
+  // Asked for by URL — a prop, a fetch, a CSS url() — never text.
+  const js = `h("img",{src:"/text/a.png"}),fetch("/text/top.txt"),` +
+    `new URL('/text/b.md',document.baseURI),h("code",{children:"/text/c.md"}),` +
+    `h("a",{href:"text/rel.md"}),h("a",{href:"/other/x.md"})`;
+  const css = `body{background:url(/text/bg.png)}`;
+  assertEquals(rootedMountUrls(js + css, ["/text"]), [
+    "/text/a.png",
+    "/text/b.md",
+    "/text/bg.png",
+    "/text/top.txt",
+  ]);
+  const root = await project({ "/text": "./content" });
+  const warned: string[] = [];
+  const was = console.warn;
+  console.warn = (...a: unknown[]) => warned.push(a.join(" "));
+  try {
+    await Deno.writeTextFile(join(root, "out", "app.js"), js);
+    await _packAssetMounts(root, join(root, "out"), "the web build");
+    const w = warned.join("\n");
+    assertStringIncludes(w, `the web build: the page asks for "/text/a.png"`);
+    assertStringIncludes(w, `Fix: name it relative to the page — "text/a.png"`);
+    // A relative page: nothing to say.
+    warned.length = 0;
+    await Deno.writeTextFile(join(root, "out", "app.js"), `fetch("text/a.md")`);
+    await _packAssetMounts(root, join(root, "out"));
+    assertEquals(warned.filter((l) => l.includes("host's root")), []);
+  } finally {
+    console.warn = was;
+    await dropTempDir(root);
+  }
+});

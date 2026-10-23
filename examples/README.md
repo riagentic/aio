@@ -53,9 +53,10 @@ transport, no polling, no version comparison, no dialog framework. See
 [problem reports](../docs/debugging/feedback.md).
 
 `cli-tool/` is the one to read when the product is a command line. One entry,
-two roles: `todo serve` runs the aio server that owns the list (headless,
-persisted), and `todo add|done|list [--watch|--json]` connect to it. Flags with
-generated `--help` and refused typos, a table, a live `--watch` view that
+two roles: `<app> serve` runs the aio server that owns the list (headless,
+persisted), and `<app> add|done|list [--watch|--json]` connect to it — `<app>`
+is the program's own name (`ex-cli-tool` here, the binary a build makes). Flags
+with generated `--help` and refused typos, a table, a live `--watch` view that
 degrades to plain lines on a pipe, `--json` for scripts, and exit codes a shell
 can trust — all from [`aio/cli`](../docs/clients/cli-toolkit.md). Tested from
 source and as a compiled `cli` binary in `tests/cli-toolkit-build.test.ts`.

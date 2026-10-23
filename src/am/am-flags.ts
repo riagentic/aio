@@ -116,9 +116,19 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // Inspect
   clients: [],
   client: [],
-  surface: ["--full", "--component", "--path", "--depth", "--names", "--rects"],
-  trigger: [],
+  surface: [
+    "--full",
+    "--component",
+    "--path",
+    "--depth",
+    "--names",
+    "--rects",
+    "--wait-client",
+  ],
+  // `--wait-client[=ms]`: wait for a UI client (a page mid-reload has none).
+  trigger: ["--wait-client"],
   where: [],
+  peer: ["--types"],
   // `--pose` is NOT here: cmdShot refuses it by name with a better message,
   // and this list is what "shot takes:" prints. See RECOGNISED_NOT_OFFERED.
   shot: [

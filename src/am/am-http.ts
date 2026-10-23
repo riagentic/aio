@@ -31,6 +31,7 @@ import {
   readControlKey,
 } from "../server/app-key.ts";
 import { udsRequest } from "./am-uds.ts";
+import { waitingMessage, waitingOf, waitingSaid } from "./am-cmd-start.ts";
 
 /** `am`'s transport timeout. Strictly LONGER than the server's own wait for a
  *  client reply, so that when a client stalls the server's NAMED reason (which
@@ -812,6 +813,17 @@ export function fetchError(e: unknown, port: number, appId?: string): Result {
     // the trojan does not exist on any wire by design.
     if (appId) {
       const pf = liveLock(appId);
+      // A dev session WAITING for a fix (the saved file does not load) holds
+      // its lock with no server behind it. "app not running" sent the agent
+      // to `am start`, which only then told it what was wrong — every verb
+      // that asks the app (state, dispatch, surface, timeline …) says it now.
+      const w = pf && isLockOwnerAlive(pf) ? waitingOf(pf) : null;
+      if (w) {
+        return {
+          ok: false,
+          error: waitingMessage(appId, pf!.pid, w, waitingSaid(appId, w.since)),
+        };
+      }
       if (pf?.socketPath && isLockOwnerAlive(pf)) {
         return {
           ok: false,

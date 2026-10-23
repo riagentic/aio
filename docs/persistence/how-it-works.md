@@ -119,9 +119,11 @@ On `aio.run()`, state restores in this order:
    on first boot
 2. **Snapshot restore** — load persisted state from `aio_kv`, merge with
    `initialState`
-3. **`onRestore` hook** — your transform runs on the restored snapshot, before
-   any table rows are loaded
-4. **Table load** — `SELECT * FROM` each table, merge into state
+3. **Table read** — `SELECT * FROM` each bound table, so the hooks below see the
+   rows the app will hold
+4. **`onMigrate` / `onRestore` hooks** — your transforms run on the restored
+   snapshot, then the table rows are put back over the bound fields (SQLite owns
+   them: a hook's change to a bound array is replaced, and named)
 5. **CRDT restore** — for each `sync: true` cell, the committed op-log is
    replayed through the reducer (HLC-ordered) so sync cells recover their state
    on a headless restart, **before any client connects** (logged as

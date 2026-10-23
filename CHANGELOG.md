@@ -1,5 +1,116 @@
 # Changelog
 
+## v1.0.24-beta — one aio app calls another by appId, an app picks its own colour, and 186 bugs fixed (2026-10-23)
+
+> **Nothing is removed or renamed, and no option changes meaning.** Everything
+> new is added: `peer()` (another running aio app by appId — calls, streamed
+> results, bytes, a proven caller identity), deno.json `hue`, a run-time splash
+> switch, and more for tests. A few behaviours change because they were wrong —
+> most visibly in tests: `ui.advance()` runs the queued actions first, an async
+> predicate is refused, and `testComponent` fails on a throwing handler as
+> `testUI` does. An app upgrades with `am pin` and `am fix` and no edit by hand.
+> See [the upgrade guide](docs/upgrade/from-1.0.23-beta-to-1.0.24-beta.md).
+
+### Cross-app — `peer()` (`@experimental`)
+
+- **`peer(appIdOrUrl)`** in `aio/server`: finds the running app from its lock
+  (bound host, TLS or local socket) and calls its methods by name — no import of
+  its source. `cell<T>()` for a typed handle; `describe()` lists what THIS
+  caller may call, filtered by that app's `access` rules. Offline defaults to
+  `"fail"`: a call made while the other app is down rejects at once and is never
+  sent later.
+- **`peer().stream()` + `emitChunk()`**: a result in pieces (chat tokens,
+  progress). Each piece reaches only the call that asked for it; at most 1 MiB
+  per piece; dropped (`emitChunk` answers `false`) when the caller stops reading
+  — the result never is.
+- **`peer().upload()` / `peer().blob(id, range)`**: bytes through the other
+  app's blob store, the call carries the id.
+- **`aio.run({ resolvePeer })`**: admit a local aio app by its PROVEN appId (an
+  HMAC under the caller's per-boot, owner-only credential, bound to both apps'
+  pids; loopback only; a wrong proof is 401/429, never anonymous). Absent:
+  nothing changes.
+- **`aio.run({ peerTypes })`** + **`am peer <appId> [--types[=<file>]]`**: an
+  app publishes its call types as text; a caller saves them for typed calls.
+- `onStatus(up)` on a peer. Docs: [Cross-app](docs/basics/cross-app.md).
+
+### Theme and UI
+
+- **deno.json `hue`** (integer 0–359, beside `appId`) picks the app's colour
+  everywhere the appId hash did: theme, every generated icon, favicon, window
+  background, splash, download window. Apps that do not set it keep their
+  colour; anything else is refused.
+- `aio/ui` components with no `<UiStyles/>` mounted: one dev warning naming the
+  fix. `data-aio-contrast="skip"` opts a subtree out of the dev contrast check.
+- `<Browser httpReferrer>` (YouTube error 153 in the Electron client);
+  `<webview>` attributes are typed without a `declare module`.
+- Field labels focus their control; Field errors/hints are announced
+  (`aria-describedby`, `aria-invalid`); a Modal with a JSX title is named.
+- A component annotated `: JSX.Node`, returning null, or with a second parameter
+  is accepted as a JSX tag.
+- Dev names a `<Route path="/">` with children that renders on every page.
+
+### Desktop
+
+- **`aio.run({ splash: { show } })`**: the person's "no splash at start"
+  setting, read just before the splash opens (`"always"` / `"firstStart"`).
+- `am start` on its own nested display draws WebGL (SwiftShader) instead of
+  black. `print()` works in an electron-client window; `alt+/` and `alt+=` fire
+  on macOS. A window quit while fullscreen saves its normal size.
+- Electron 44.9.0 → **44.9.3**.
+
+### Tests
+
+- `testUI` answers a relative fetch under a deno.json `assets` mount by the
+  server's own rules; `bootCells(...).serverState(cell?)` reads the
+  server-authoritative state.
+- `ui.X.click(); await ui.advance(ms)` runs the click first (the schedule it
+  armed used to never come due); an async predicate in `waitFor`, `expectCell`,
+  `t.expect.*`, `waitForPatch` is refused (a Promise is always truthy);
+  `testComponent` fails on a throwing handler or re-render.
+- ErrorBoundary/Suspense fallbacks are on the surface (a Retry button in one is
+  addressable) and named after the rest; Field/Modal no longer renumber the
+  app's ids.
+
+### Data and server
+
+- `persist.exclude` takes a `*` segment (`"feeds.*.busy"`); a literal `"*"` key
+  in the data keeps its old meaning.
+- A server stop or restart no longer resets every connected page to the initial
+  state.
+- A slow client of a big cell gets one queued patch when it drains, not the
+  whole state every ~6 s.
+- A cell's `onMigrate` / `onRestore` see its `db:` rows (they saw `[]`).
+- `app.cells.disable`'s reset survives a crash; a page booted offline shows its
+  queued changes at once.
+- A streamed gzip body flushes when the source pauses; a paused stream goes out
+  ungzipped.
+- `resolveUser` returning a malformed user (no usable id): logged in prod and
+  dev; refused in dev only. A numeric id is a user.
+- Signup with a failing mail transport answers 201 + session
+  (`verificationSent: false` under `requireVerified`).
+- `blocking.cancel(id)` on synchronous code warns: a thread cannot be
+  interrupted mid-loop.
+
+### App manager
+
+- `am trigger` / `am surface --wait-client[=ms]`; `am shot` waits for the
+  mounted UI; `am logs -f` follows a restart; `am instances --app=X`; `am stop`
+  names the instance. `am create` refuses a name that would never compile.
+- aiol: a state key named like a method or selector is an error; destructuring
+  writes after an await are writes.
+
+### Docs
+
+- Cookbook recipes 21 (an external data source) and 22 (a subprocess with a
+  timeout that keeps partial output); `useLocal` in closures; the iOS client
+  target is marked experimental.
+
+### Inside
+
+- Seven hunt rounds and their fix reviews: 186 bugs fixed across the renderer,
+  sync, auth, persistence, the kit, the harness, build and `am`. AIR's gzip
+  ceiling 84 → 85 KB, the counter app's 86 → 89 KB, every byte a bug fix.
+
 ## v1.0.23-beta — the splash on every desktop the same and never in the way, a native Save dialog, private instances, files served with Range (2026-10-21)
 
 > **Nothing is removed or renamed, and no option changes meaning.** The splash

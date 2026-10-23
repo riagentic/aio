@@ -868,6 +868,19 @@ export function closeLogger(l: AioLogger): void {
   clearInterval(l["heartbeatTimer"]);
 }
 
+/** A dev hot reload went out: a new code generation. The repeat memo is
+ *  closed off (its pending "repeated N times" written), so an error that
+ *  recurs under the new code is a LINE with its own timestamp — counted as a
+ *  repeat of the one before the reload, `am errors --since=reload` never saw
+ *  it. A function, not a member: the class is frozen public surface.
+ *  @internal */
+export function newLogGeneration(l: AioLogger): void {
+  if (_closedLoggers.has(l)) return;
+  queueRepeatSummaries(l["_lastLine"], l["_buffers"]);
+  l["_lastLine"].clear();
+  if (l["ready"]) l["_flushBuffers"]();
+}
+
 /** Write every line `l` holds NOW, synchronously — the process is exiting and
  *  no timer or promise will run again. Lines held before `init()` finished go
  *  to their files as they are (an exit mid-init never rotates). Reaches the

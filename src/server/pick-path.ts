@@ -250,6 +250,13 @@ export function interpretDialogReply(
   return kind === "files" ? paths : paths[0]!;
 }
 
+/** First in every PowerShell script: its stdout in UTF-8 (no BOM), as it is
+ *  read. Left alone, Windows PowerShell writes the OEM code page (437, 852,
+ *  …), and `C:\Users\José\Résumé.txt` came back `R�sum�.txt` — a pick
+ *  that names no file, a save that writes to the wrong one. */
+const PS_UTF8 =
+  `[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false;`;
+
 async function _pickDialog(
   os: typeof Deno.build.os,
   kind: PickKind,
@@ -323,9 +330,9 @@ export function _interpret(
   cmd: string,
   out: Deno.CommandOutput,
 ): string | string[] | null {
-  const stdout = new TextDecoder().decode(out.stdout).trim();
+  const stdout = new TextDecoder().decode(out.stdout);
   const stderr = new TextDecoder().decode(out.stderr).trim();
-  if (stdout.length === 0) {
+  if (stdout.trim().length === 0) {
     if (_isCancel(cmd, out.code, stderr)) return null; // cancelled
     throw new Error(
       `${_who(kind)}: ${cmd} failed (exit ${out.code})${
@@ -341,9 +348,12 @@ export function _interpret(
   // and handed that back as the user's choice: a path that does not exist,
   // silently, on every provider and every kind. The window path
   // (`interpretDialogReply`) never split, so the two disagreed as well.
-  const paths = stdout.split(/\r?\n/).map((p) => p.trim()).filter((p) =>
-    p.length > 0
-  );
+  //
+  // Only the line ends are cut, never spaces: ` report ` is a name the user
+  // typed and the dialog confirmed an overwrite against — trimmed, it named
+  // another file, which was then overwritten unasked. The window path keeps
+  // them too.
+  const paths = stdout.split(/\r?\n/).filter((p) => p.trim().length > 0);
   if (paths.length === 0) return null;
   return kind === "files" ? paths : paths[0]!;
 }
@@ -462,12 +472,12 @@ export function pickSpec(
     const owner =
       `$o = New-Object System.Windows.Forms.Form -Property @{TopMost=$true;ShowInTaskbar=$false};`;
     const ps = kind === "directory"
-      ? `Add-Type -AssemblyName System.Windows.Forms;` + owner +
+      ? PS_UTF8 + `Add-Type -AssemblyName System.Windows.Forms;` + owner +
         `$d = New-Object System.Windows.Forms.FolderBrowserDialog;` +
         `$d.Description = ${_psEscape(title)};` +
         (dir ? `$d.SelectedPath = ${_psEscape(dir)};` : "") +
         `if ($d.ShowDialog($o) -eq 'OK') { Write-Output $d.SelectedPath }`
-      : `Add-Type -AssemblyName System.Windows.Forms;` + owner +
+      : PS_UTF8 + `Add-Type -AssemblyName System.Windows.Forms;` + owner +
         `$d = New-Object System.Windows.Forms.OpenFileDialog;` +
         `$d.Title = ${_psEscape(title)};` +
         `$d.Multiselect = $${kind === "files"};` +
@@ -544,7 +554,7 @@ function _saveSpec(
     };
   }
   if (provider === "powershell") {
-    const ps = `Add-Type -AssemblyName System.Windows.Forms;` +
+    const ps = PS_UTF8 + `Add-Type -AssemblyName System.Windows.Forms;` +
       `$o = New-Object System.Windows.Forms.Form -Property @{TopMost=$true;ShowInTaskbar=$false};` +
       `$d = New-Object System.Windows.Forms.SaveFileDialog;` +
       `$d.Title = ${_psEscape(title)};` +

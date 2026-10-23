@@ -22,12 +22,22 @@
 const _counts = new Map<string, number>();
 const _listeners = new Set<(key: string, n: number) => void>();
 /** Calls ever STARTED here — monotone, never reset, so a caller can ask "did a
- *  call start between these two moments?" (air's control-restore.ts). */
+ *  call start between these two moments?" (air's control-drift.ts). */
 let _started = 0;
+/** Per key, the start numbers (`_started` at each start) of the calls still in
+ *  flight, oldest first. A finish retires the oldest: calls to one method can
+ *  answer out of order, so a number is an estimate — good enough to tell
+ *  "started since T" from "running since before T". */
+const _inflight = new Map<string, number[]>();
 
 /** Adjust the in-flight count for `cell:method`. Returns the new count. */
 export function bumpPending(key: string, delta: number): number {
   if (delta > 0) _started++;
+  const q = _inflight.get(key) ?? [];
+  for (let i = 0; i < delta; i++) q.push(_started);
+  if (delta < 0) q.splice(0, -delta);
+  if (q.length) _inflight.set(key, q);
+  else _inflight.delete(key);
   const next = Math.max(0, (_counts.get(key) ?? 0) + delta);
   if (next === 0) _counts.delete(key);
   else _counts.set(key, next);
@@ -43,6 +53,16 @@ export function pendingStarted(): number {
 /** How many calls to `cell:method` are in flight. */
 export function pendingCount(key: string): number {
   return _counts.get(key) ?? 0;
+}
+
+/** True while one of the calls numbered `starts` (`pendingStarted()`
+ *  readings taken as they began) is still in flight. */
+export function pendingAmong(starts: readonly number[]): boolean {
+  if (!starts.length) return false;
+  for (const q of _inflight.values()) {
+    for (const n of q) if (starts.includes(n)) return true;
+  }
+  return false;
 }
 
 /** Every in-flight count for one cell, summed — `cell.$pending()` with no
@@ -65,5 +85,6 @@ export function onPendingChange(
 /** Clear everything — teardown, and between tests. */
 export function resetPendingCalls(): void {
   _counts.clear();
+  _inflight.clear();
   _listeners.clear();
 }

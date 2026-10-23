@@ -443,17 +443,32 @@ Deno.test("integration: CSS-only change sends __css signal, not __reload", async
     await new Promise<void>((r) => {
       ws.onopen = () => r();
     });
-    await new Promise((r) => setTimeout(r, 100));
+    // The marker is not enough on its own: the Mac suite (2026-10-23) saw a
+    // stale fixture event arrive AFTER it, as its own burst, and that reload
+    // reached the socket as frame 0. So the watcher must also have been quiet
+    // for a while — then the next burst is the edit below and nothing else.
+    const quiet = async () => {
+      for (let i = 0; i < 20; i++) {
+        const n = watched.length;
+        await new Promise((r) => setTimeout(r, 300));
+        if (watched.length === n) return;
+      }
+      throw new Error(`the watcher never went quiet: ${watched.join("\n")}`);
+    };
+    await quiet();
 
     // Modify CSS only → should get a "css" frame
+    let from = received.length;
     await Deno.writeTextFile(join(dir, "style.css"), "body { color: blue }");
-    await waitFor(() => received.length >= 1, 3000);
-    assertEquals(received[0], "css");
+    await waitFor(() => received.length > from, 3000);
+    assertEquals(received.slice(from), ["css"]);
 
     // Modify TS file → should get a "reload" frame
+    await quiet();
+    from = received.length;
     await Deno.writeTextFile(join(dir, "app.ts"), 'console.log("changed")');
-    await waitFor(() => received.length >= 2, 3000);
-    assertEquals(received[1], "reload");
+    await waitFor(() => received.length > from, 3000);
+    assertEquals(received.slice(from), ["reload"]);
 
     ws.close();
   } finally {

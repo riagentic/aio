@@ -158,8 +158,12 @@ crosses the thread boundary.
 - do FFI setup (`Deno.dlopen`) **inside** the function
 - the pool is sized to `hardwareConcurrency - 1` and queues beyond that, so a
   burst backpressures instead of spawning unbounded threads
-- `blocking.cancel(id)` drops a queued task or terminates a running one — the
-  only way to stop a busy thread; `dispose()` tears the pool down
+- `blocking.cancel(id)` drops a queued task or terminates a running one; its
+  caller is rejected at once. Deno cannot interrupt **synchronous** code: a task
+  cancelled mid-loop (or inside a `*Sync`/FFI call) keeps its thread and a CPU
+  core until that call returns, and aio warns when that happens. A long task
+  that yields between chunks (`await new Promise((r) => setTimeout(r))`) stops
+  at its next yield. `dispose()` tears the pool down
 
 ### In the browser
 

@@ -275,6 +275,27 @@ export function _removeDomCleanup(
   }
 }
 
+/** Portal vnodes a completed diff has handed their region to a NEW vnode.
+ *  A boundary that catches later in the same pass retires the old tree before
+ *  it sweeps the half-diffed new one, and the old portal's children describe
+ *  nodes the diff replaced: walked by those stale positions it removed the
+ *  NEW content's nodes and the anchor, and the new vnode's bare text was then
+ *  left in the target for good. The old vnode only releases what it held; the
+ *  new one removes the region. @internal */
+export const _supersededPortals = new WeakSet<VNode>();
+
+/** Did a build that threw stop at or before `v`? An element or fragment gets
+ *  its `_dom` once its subtree is built, a component its `_rendered` once its
+ *  body returned; a Portal and a boundary occupy no node of the region. */
+function _neverBuilt(v: VNode | string | number): boolean {
+  if (typeof v !== "object" || v.tag === Portal) return false;
+  if (typeof v.tag === "function") {
+    return v._rendered === undefined || _neverBuilt(v._rendered as VNode);
+  }
+  if (v.tag === ErrorBoundary || v.tag === Suspense) return false;
+  return v._dom === undefined;
+}
+
 /** Remove a vnode's DOM.
  *
  *  `posDom` is the node this vnode POSITIONALLY occupies — the caller's cursor.
@@ -317,18 +338,31 @@ export function removeDom(
       //
       // For both, nothing is left to remove and everything is left to
       // release.
+      if (_supersededPortals.has(vnode)) {
+        for (const child of vnode.children) {
+          if (typeof child === "object") _removeDomCleanup(child, ctx);
+        }
+        return;
+      }
       const anchor = vnode._anchor;
       const region = anchor !== undefined && isChildOf(anchor, target);
       // Walk from the portal's own region anchor, not `target.firstChild` —
       // that is the OTHER portal's content when two share a target, and
       // removing this portal by it deleted their nodes instead of its own.
       let cursor: Node | null = region ? _advance(anchor, 1) : null;
+      // A build that threw part way (a boundary discarding this portal) put
+      // nothing in the target from the child that threw onwards — and the
+      // positions those children would have held belong to whatever FOLLOWS
+      // the region: a second portal into the same target lost its first node
+      // to a never-built bare text of this one.
+      let built = true;
       for (const child of vnode.children) {
         const live = _liveFirstDom(child);
+        built &&= !_neverBuilt(child);
         // No region — unless only the ANCHOR left (foreign code stripping
         // comments): a child whose live node is still under the target is
         // still on the page, and is removed as ever.
-        if (!region && !isChildOf(live, target)) {
+        if (!built || (!region && !isChildOf(live, target))) {
           if (typeof child === "object") _removeDomCleanup(child, ctx);
           continue;
         }
@@ -483,16 +517,20 @@ export function removeDom(
     // longer this parent's child throws — which failed the whole re-render of
     // the component that unmounted it.
     if (isChildOf(dom, parent)) parent.removeChild(dom);
-  } else if (
-    typeof vnode === "object" && typeof vnode.tag === "string" && vnode._dom
-  ) {
+  } else if (typeof vnode === "object" && typeof vnode.tag === "string") {
     // Not in `parent` any more — something outside the renderer took it out
     // (an action that moved or replaced its element). There is nothing to
     // REMOVE, but the vnode is still leaving
     // the tree, so it is still UNMOUNTED: skipping this left its actions'
     // teardown unrun and its signal bindings live, for good.
-    cleanupSignalBindings(vnode._dom as Element);
-    _cleanupActions(vnode._dom as HTMLElement);
+    // …or it was never placed: a child of it threw while it was being built,
+    // so it has no `_dom` while the children built before the throw do. In a
+    // portal a boundary discarded, their refs were attached to detached nodes
+    // at the end of the commit — this walk is what drops those attaches.
+    if (vnode._dom) {
+      cleanupSignalBindings(vnode._dom as Element);
+      _cleanupActions(vnode._dom as HTMLElement);
+    }
     for (const child of _cleanupChildren(vnode)) {
       if (typeof child === "object") _removeDomCleanup(child, ctx);
     }

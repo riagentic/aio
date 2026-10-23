@@ -264,3 +264,64 @@ export const UI_CSS: string = `
 export function UiStyles(): VNode {
   return h("style", { "data-aio-ui": "" }, UI_CSS);
 }
+
+let _kitChecked = false;
+
+/** @internal Forget that the check below ran (tests). */
+export function _resetKitStylesCheck(): void { // aio-ok: test seam
+  _kitChecked = false;
+}
+
+/** Does anything on `doc` style the kit — `<UiStyles/>`, or any rule of the
+ *  app's own that names `.${cls}`? A sheet whose rules cannot be read (another
+ *  origin's) might, so it counts as yes: the check only ever says what it
+ *  knows. Pure over `doc`. */
+export function _kitStyled(doc: Document, cls: string): boolean {
+  if (doc.querySelector("style[data-aio-ui]")) return true;
+  const sel = `.${cls}`;
+  const names = (rules: CSSRuleList): boolean => {
+    for (const r of Array.from(rules)) {
+      if ((r as CSSStyleRule).selectorText?.includes(sel)) return true;
+      const inner = (r as CSSGroupingRule).cssRules; // @media, @layer, …
+      if (inner && names(inner)) return true;
+    }
+    return false;
+  };
+  for (const sheet of Array.from(doc.styleSheets)) {
+    try {
+      if (names(sheet.cssRules)) return true;
+    } catch {
+      return true; // aio-ok: unreadable (cross-origin) sheet — it may style it
+    }
+  }
+  return false;
+}
+
+/** @internal Called by every kit component's class helper. Dev only, once per
+ *  page, observe-only: a kit component on a page where nothing styles the kit
+ *  renders as bare HTML (a `<Menu>` drew its items inline), and nothing said
+ *  why. Checked once the page has loaded, so a `<UiStyles/>` later in the same
+ *  tree, or the app's `style.css`, is seen. No document (SSR) → nothing. */
+export function _noteKitRender(cls: string): void {
+  if (_kitChecked) return;
+  if ((globalThis as Record<string, unknown>).__aioDev !== true) return;
+  if (typeof document === "undefined") return;
+  _kitChecked = true;
+  const doc = document;
+  const check = () => {
+    try {
+      if (_kitStyled(doc, cls)) return;
+    } catch {
+      return; // aio-ok: observe-only — a closed or hostile document says nothing
+    }
+    console.warn(
+      `[aio-dev] an aio/ui component (class "${cls}") rendered, but nothing ` +
+        `on this page styles the kit — it shows as bare HTML. Mount ` +
+        `<UiStyles/> once near the app root (docs/ui/kit.md). Styling the ` +
+        `kit classes in your own CSS? Any rule naming .${cls} counts, and ` +
+        `this line goes quiet.`,
+    );
+  };
+  if (doc.readyState === "complete") queueMicrotask(check);
+  else doc.defaultView?.addEventListener("load", check, { once: true });
+}

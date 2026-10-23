@@ -790,8 +790,12 @@ export function _prepareLockDir(
   const lstat = ops.lstat ?? _lockDeps.lstat;
   const since = _lockDeps.now();
   const until = ops.until ?? since + MUTEX_WAIT_MS;
+  /** Why the last make failed, when it did — the reason a dir that is not
+   *  there is reported with (a read-only base), not the look's "not found". */
+  let makeError: unknown = null;
   /** Make it; false when it could not be made. */
   const make = (): boolean => {
+    makeError = null;
     try {
       // Made 0700, not made and THEN narrowed: a sibling that looks between
       // the two saw a dir of ours at the umask's 0755 and refused it as
@@ -806,7 +810,9 @@ export function _prepareLockDir(
       // good as made and gone. (A FILE of that name is "exists" too, and so
       // is a link to nothing; the look below finds either.) Anything else
       // could not be made.
-      return pruned(e) || e instanceof Deno.errors.AlreadyExists;
+      if (pruned(e) || e instanceof Deno.errors.AlreadyExists) return true;
+      makeError = e;
+      return false;
     }
   };
   // Windows answers ACCESS_DENIED for a directory that is BEING removed —
@@ -841,8 +847,9 @@ export function _prepareLockDir(
         made = make();
         continue;
       }
-      return `${dir} cannot be created or read (${
-        e instanceof Error ? e.message : e
+      const why = !made && makeError !== null ? makeError : e;
+      return `${dir} ${CANNOT_CREATE} (${
+        why instanceof Error ? why.message : why
       })`;
     }
     if (_lockDeps.windows()) {
@@ -938,6 +945,9 @@ function judgeLockDir(
   return privateDirRefusal(dir, at.mode, at.uid);
 }
 
+/** How {@linkcode _prepareLockDir} words a dir it could not make or read. */
+const CANNOT_CREATE = "cannot be created or read";
+
 /** The lock/socket directory this process may actually use.
  *
  *  Shared `<base>/aio` first — one directory per machine keeps `am` able to
@@ -984,6 +994,16 @@ export function _chooseLockDir(
         `instead. Other users' aio apps are not visible to \`am\` from here.`,
     );
     return chosen(scoped);
+  }
+  if ([first, second].every((why) => why.includes(` ${CANNOT_CREATE} (`))) {
+    // Neither could be made at all (a read-only `/tmp`, no XDG_RUNTIME_DIR):
+    // nobody else's directory is in the way, so the refusal below — "another
+    // user can reach it, chmod 700 it" — would name the wrong problem.
+    throw new Error(
+      `aio: no lock directory for this app's lock and control socket. ` +
+        `${first}; ${second}. Fix: make ${base} writable, or set ` +
+        `XDG_RUNTIME_DIR to a directory you own.`,
+    );
   }
   throw new Error(
     `aio: refusing to place a control socket where another local user can ` +

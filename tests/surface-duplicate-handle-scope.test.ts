@@ -127,3 +127,33 @@ Deno.test("surface: a duplicate t= WITHIN one component keeps its own wording", 
   assertEquals(warns.length, 1, warns.join("\n"));
   assert(warns[0]!.includes('addressable as "save2"'), warns[0]!);
 });
+
+Deno.test("surface: a numbered duplicate never takes a t= the author wrote", async () => {
+  // Two `t="row"` numbered the second `row2` — and the element whose author
+  // WROTE `t="row2"` became `row22`, so `ui.row2` drove the wrong element.
+  const hits: string[] = [];
+  const btn = (t: string, id: string) =>
+    h("button", { t, onClick: () => hits.push(id) }, "r");
+  const generated = (id: string) =>
+    h("button", { onClick: () => hits.push(id) }, "Step");
+  const App = () =>
+    h(
+      "div",
+      null,
+      btn("row", "a"),
+      btn("row", "b"),
+      btn("row2", "literal"),
+      generated("s1"),
+      generated("s2"),
+      btn("StepButton2", "literal-step"),
+    );
+  const warns = await duplicateWarnings(App as ComponentFn, async (ui) => {
+    const u = ui as unknown as Record<string, { click(): void }>;
+    u.row2!.click();
+    u.StepButton2!.click();
+    await ui.settle();
+  });
+  assertEquals(hits, ["literal", "literal-step"]);
+  assertEquals(warns.length, 1, warns.join("\n")); // the real duplicate only
+  assert(warns[0]!.includes('"row3"'), warns[0]);
+});

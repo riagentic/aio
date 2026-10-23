@@ -36,6 +36,11 @@ export type RegistryBundle = {
   /** Hand the lifecycle of cells another isolate owns to that isolate — see
    *  `RemoteLifecycle`. */
   setRemote: (remote: RemoteLifecycle) => void;
+  /** The breaker's disable: everything `disable` does but the state reset. */
+  disableKeepingState: (
+    name: string,
+    app: { dispatch: (a: Msg) => void; getState: () => unknown },
+  ) => void;
 };
 
 /** The lifecycle of cells ANOTHER isolate runs (`worker: true`).
@@ -51,7 +56,12 @@ export type RemoteLifecycle = {
   owns: (cell: string) => boolean;
   /** Run the cell's disable in its isolate; `done(false)` = its `onDestroy`
    *  threw and it rolled back (already reported and counted there). */
-  disable: (cell: string, done: (ok: boolean) => void) => void;
+  disable: (
+    cell: string,
+    done: (ok: boolean) => void,
+    /** The breaker's trip: keep the state (see `disableCell`). */
+    keep?: boolean,
+  ) => void;
   enable: (cell: string) => void;
 };
 
@@ -113,12 +123,13 @@ export function buildRegistry(
         // Reported once the disable SETTLED: a worker cell's answers by
         // reply, and until then it looks disabled here even when its
         // `onDestroy` threw and the worker rolled it back.
+        // `keep`: the trip keeps the cell's data — see `disableCell`.
         disableCell(name, cbApp, (ok) => {
           // Rolled back (its `onDestroy` threw, reported as DESTROY_ERROR):
           // the cell is still enabled, so the breaker did NOT trip — saying
           // it did would be the lie.
           if (ok) reportTrip(name, count);
-        });
+        }, true);
       } finally {
         tripping.delete(name);
       }
@@ -179,7 +190,15 @@ export function buildRegistry(
     app: { dispatch: (a: Msg) => void; getState: () => unknown },
     /** Called once the disable settled: `false` = rolled back. */
     settled?: (ok: boolean) => void,
+    /** The circuit breaker's trip: everything a disable does EXCEPT the
+     *  state reset. The reset is persisted like any write, so a trip — an
+     *  upstream outage failing a method N times — erased the cell's saved
+     *  data for good: empty after `enable`, empty after a restart. */
+    keep = false,
   ): void {
+    // `reset`: what the server journals as a write (aio.ts) — the shutdown's
+    // `destroyAll` resets too, and that one must never be replayed.
+    const destroyPayload = keep ? { keep: true } : { reset: true };
     const f = cells.find((f) => f.__aio.id === name);
     disabledCells.add(name);
     disableEpoch.set(name, (disableEpoch.get(name) ?? 0) + 1);
@@ -197,11 +216,13 @@ export function buildRegistry(
         // disable: the owner reset its copy and cancels nothing it re-arms
         // until it re-inits, which it does AFTER this reply (FIFO) — so the
         // reset and the cancel both belong before that.
-        app.dispatch(tagSource({ type: destroyType, payload: {} }, "System"));
+        app.dispatch(
+          tagSource({ type: destroyType, payload: destroyPayload }, "System"),
+        );
         cellLastAction.delete(name);
         if (onCellDisable) onCellDisable(name);
         settled?.(true);
-      });
+      }, keep);
       return;
     }
     try {
@@ -224,7 +245,10 @@ export function buildRegistry(
           });
         }
         app.dispatch(
-          tagSource({ type: f.__aio.destroyType, payload: {} }, "System"),
+          tagSource(
+            { type: f.__aio.destroyType, payload: destroyPayload },
+            "System",
+          ),
         );
       }
     } catch (e) {
@@ -341,6 +365,7 @@ export function buildRegistry(
     setRemote: (r) => {
       remote = r;
     },
+    disableKeepingState: (name, app) => disableCell(name, app, undefined, true),
   };
 }
 

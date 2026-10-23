@@ -1746,8 +1746,8 @@ Deno.test("dialog: the third answer on every backend — Windows Yes/No/Cancel w
 Deno.test('dialog: the download window\'s words — "Getting <title> ready", what comes down, that later starts skip it, how far', () => {
   assertEquals(readyHeading("Notes"), "Getting Notes ready");
   assertEquals(
-    downloadDetail("44.9.0", 22e6, 123e6),
-    "Downloading Electron 44.9.0 — first start only · 22 / 123 MB",
+    downloadDetail("44.9.3", 22e6, 123e6),
+    "Downloading Electron 44.9.3 — first start only · 22 / 123 MB",
   );
 });
 

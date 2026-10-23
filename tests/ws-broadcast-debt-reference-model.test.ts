@@ -138,7 +138,8 @@ for (const seed of [1, 2, 3, 4, 5, 6]) {
       }
       const t0 = Date.now();
       while (
-        clients.some((c) => c.meta.needsFull) && Date.now() - t0 < 5000
+        clients.some((c) => c.meta.needsFull || c.meta.skipped) &&
+        Date.now() - t0 < 5000
       ) await wait(20);
       await wait(30);
       for (const c of clients) {
@@ -198,7 +199,10 @@ Deno.test("ws broadcast debt: the retry drains a buffered round before it pays",
     await wait(400);
     assertEquals(a.broken(), false);
     assertEquals(a.held(), state, "the buffered round was applied twice");
-    assertEquals(a.meta.needsFull, false);
+    // A round skipped for a backlog is queued, not owed (see
+    // tests/ws-slow-client-queues-patches.test.ts) — and paid all the same.
+    assertEquals(a.meta.needsFull ?? false, false);
+    assertEquals(a.meta.skipped, undefined);
   } finally {
     broadcaster.shutdown();
   }

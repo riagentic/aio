@@ -38,6 +38,7 @@ async function install(sw: string, fail: Set<string> = new Set()) {
     addEventListener: (t: string, h: (e: Install) => void) =>
       handlers.set(t, h),
     skipWaiting: () => Promise.resolve(),
+    registration: { scope: "https://host/app/" },
   };
   class Request {
     url: string;

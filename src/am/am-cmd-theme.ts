@@ -18,6 +18,7 @@
 import { readDenoJson } from "../server/deno-json.ts";
 import { basename, join } from "@std/path";
 import { appThemeCss } from "../build/app-theme.ts";
+import { hueKey } from "../build/app-icon.ts";
 import { resolveAppDir } from "../build/build-config.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import type { GlobalFlags } from "./am-types.ts";
@@ -130,7 +131,10 @@ export async function cmdTheme(
   } catch { /* not there — the normal path */ }
 
   const appId = identityOf(cfg, root);
-  await Deno.writeTextFile(themePath, header(appId) + appThemeCss(appId));
+  await Deno.writeTextFile(
+    themePath,
+    header(appId) + appThemeCss(hueKey(cfg, appId)),
+  );
 
   // The file has to be REACHED, or adopting quietly changes nothing. style.css
   // is the one stylesheet aio links, so the import goes at its top (`@import`

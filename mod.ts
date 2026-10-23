@@ -52,6 +52,7 @@ export type {
   AioUser,
   CellsConfig,
   PerfBudget,
+  ResolvePeerFn,
   ResolveUserFn,
   UiConfig,
 } from "./src/server/aio.ts";

@@ -194,6 +194,7 @@ const UNRESOLVABLE_OK = new Set([
   "react-dom/client",
   "zod",
   "valibot",
+  "@local/billing", // cross-app.md: the OTHER app's cell, by example name
 ]);
 
 type Snippet = {

@@ -20,6 +20,15 @@ function App() {
   onGlobalKey("alt+f", () => push("file"));
   onGlobalKey("ctrl+m", () => push("m"));
   onGlobalKey("g", () => push("obj-g"), { alt: true }); // object form
+  onGlobalKey("ctrl+shift+/", () => push("help"));
+  onGlobalKey("shift+=", () => push("zoom"));
+  onGlobalKey("alt+/", () => push("alt-slash"));
+  onGlobalKey("alt+-", () => push("alt-minus"));
+  return <button type="button" t="btn">focus me</button>;
+}
+
+function Comment() {
+  onGlobalKey("ctrl+/", () => push("comment"));
   return <button type="button" t="btn">focus me</button>;
 }
 
@@ -94,6 +103,47 @@ testUI(App, "testUI press and am trigger drive ctrl+shift+1", async (ui) => {
   assertEquals(hits(), ["heading1", "heading1", "heading1"]);
 });
 
+testUI(
+  App,
+  "a shifted US symbol: ctrl+shift+/ and shift+= fire on the real keydown (key '?' / '+') AND on testUI press — the two agree",
+  async (ui) => {
+    hits.set([]);
+    down(ui, "?", "Slash", { ctrlKey: true, shiftKey: true }); // US Shift+/
+    await ui.window.press("ctrl+shift+/"); // key "/" + Shift
+    down(ui, "+", "Equal", { shiftKey: true }); // US Shift+=
+    await ui.window.press("shift+=");
+    await ui.settle();
+    assertEquals(hits(), ["help", "help", "zoom", "zoom"]);
+  },
+);
+
+testUI(
+  Comment,
+  "ctrl+/ names no shift: US Ctrl+? is not it, AZERTY's Slash key ('!', '§') never is",
+  async (ui) => {
+    hits.set([]);
+    down(ui, "?", "Slash", { ctrlKey: true, shiftKey: true });
+    down(ui, "!", "Slash", { ctrlKey: true });
+    down(ui, "§", "Slash", { ctrlKey: true, shiftKey: true });
+    down(ui, "/", "Slash", { ctrlKey: true });
+    await ui.settle();
+    assertEquals(hits(), ["comment"]);
+  },
+);
+
+testUI(
+  App,
+  "macOS Alt+/ types '÷', Alt+- '–' — alt+/ and alt+- still fire; no Alt, no fallback",
+  async (ui) => {
+    hits.set([]);
+    down(ui, "÷", "Slash", { altKey: true });
+    down(ui, "–", "Minus", { altKey: true });
+    down(ui, "÷", "Slash", {}); // not Alt: not alt+/
+    await ui.settle();
+    assertEquals(hits(), ["alt-slash", "alt-minus"]);
+  },
+);
+
 Deno.test("keycapMatch: rule table", () => {
   const t = (b: string, k: string, c: string) => keycapMatch(b, k, c);
   assert(t("1", "!", "Digit1"));
@@ -110,4 +160,20 @@ Deno.test("keycapMatch: rule table", () => {
   assert(!t("q", "a", "KeyQ"));
   assert(t("Escape", "escape", ""));
   assert(!t("+", "=", "Equal"));
+  const s = (b: string, k: string, c: string) => keycapMatch(b, k, c, true);
+  assert(s("/", "?", "Slash"));
+  assert(s("=", "+", "Equal"));
+  assert(s("[", "{", "BracketLeft"));
+  assert(s("\\", "|", "Backslash"));
+  assert(!t("/", "?", "Slash")); // shift not named
+  assert(!s("/", "§", "Slash")); // AZERTY Shift+! key
+  assert(!s("/", "?", "Minus"));
+  const a = (b: string, k: string, c: string) =>
+    keycapMatch(b, k, c, false, true);
+  assert(a("/", "÷", "Slash")); // macOS Alt+/
+  assert(a("=", "≠", "Equal"));
+  assert(a("`", "Dead", "Backquote"));
+  assert(!a("/", "!", "Slash")); // ASCII: never re-read
+  assert(!t("/", "÷", "Slash")); // no Alt
+  assert(!t("/", "§", "Slash"));
 });

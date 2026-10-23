@@ -211,7 +211,11 @@ Deno.test("static: an impossible file name is a 404, not a 500", async () => {
   );
   assert(cannotExist("/a/" + "x".repeat(256) + ".txt"));
   assert(!cannotExist("/a/" + "x".repeat(250) + ".txt"));
-  assert(cannotExist("/" + ("a".repeat(200) + "/").repeat(25) + "f.txt"));
+  // A 5000-byte path is past POSIX's PATH_MAX; Windows long paths take it.
+  assertEquals(
+    cannotExist("/" + ("a".repeat(200) + "/").repeat(25) + "f.txt"),
+    Deno.build.os !== "windows",
+  );
   // Multi-byte: 255 is a BYTE limit, not a character count.
   assert(cannotExist("/" + "é".repeat(130) + ".txt"));
   assert(isNotServable(new Deno.errors.NotADirectory("x")));

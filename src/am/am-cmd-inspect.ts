@@ -3,7 +3,7 @@
  * Inspection commands for am — clients, click, sql, log, errors, metrics, health, etc.
  */
 
-import { join } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
 import type { ReloadLog } from "../server/server-static.ts";
 import { collectElementPaths, type UISurfaceNode } from "../air/ui-surface.ts";
@@ -42,6 +42,8 @@ import {
   trojanPost,
 } from "./am-http.ts";
 import { bytesOrUnserializable, HEY } from "../diagnostics/fmt.ts";
+import { isLockOwnerAlive } from "../server/single-instance-lock.ts";
+import { waitingMessage, waitingOf, waitingSaid } from "./am-cmd-start.ts";
 
 // ── Constants ───────────────────────────────────────────────
 
@@ -135,13 +137,49 @@ export async function resolveUiClient(
   appId: string | undefined,
   explicit: number | undefined,
   mode: OutputMode,
+  waitMs = 0,
 ): Promise<number | null> {
-  return (await pickUiClient(port, appId, explicit, mode))?.index ?? null;
+  return (await pickUiClient(port, appId, explicit, mode, waitMs))?.index ??
+    null;
+}
+
+/** Pure: `--wait-client[=ms]` — how long to wait for a UI client to connect
+ *  (a page mid-reload has none for a moment). Absent = 0, the old answer-now
+ *  behaviour; bare = 10 s.
+ *  @internal exported for tests. */
+export function waitClientMs(
+  args: readonly string[],
+): { ok: true; value: number } | { ok: false; error: string } {
+  const a = args.find((x) =>
+    x === "--wait-client" || x.startsWith("--wait-client=")
+  );
+  if (a === undefined) return { ok: true, value: 0 };
+  if (a === "--wait-client") return { ok: true, value: 10_000 };
+  return parseNumArg(a.slice("--wait-client=".length), "--wait-client", {
+    min: 0,
+    integer: true,
+  });
 }
 
 /** {@linkcode resolveUiClient}, with the chosen client's roster row — `mac`
  *  is what `mod` in a pressed chord resolves against. */
 async function pickUiClient(
+  port: number,
+  appId: string | undefined,
+  explicit: number | undefined,
+  mode: OutputMode,
+  waitMs = 0,
+): Promise<ClientRow | null> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const row = await pickUiClientOnce(port, appId, explicit, mode);
+    // Only "none yet" is waited out; a refusal already exited.
+    if (row !== null || Date.now() >= deadline) return row;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+async function pickUiClientOnce(
   port: number,
   appId: string | undefined,
   explicit: number | undefined,
@@ -647,7 +685,8 @@ export async function cmdLog(
         lines: clean,
       }, mode);
     } else sayData(tail.join("\n"));
-    offset = Deno.statSync(LOG_FILE).size;
+    // The bytes READ, not a later stat: a line written in between was skipped.
+    offset = new TextEncoder().encode(content).length;
   } catch {
     // Nothing to read. Without --follow that is a FAILURE, and it names the
     // path — "no log file found" named none, so an app whose data dir moved
@@ -671,14 +710,25 @@ export async function cmdLog(
       await new Promise((r) => setTimeout(r, 500));
     }
   }
-  const watcher = Deno.watchFs(LOG_FILE);
+  // The FOLDER is watched, not the file: a restart rotates app.log by
+  // RENAME (→ app.log.1) and the boot writes a new one. A watch on the file
+  // followed the old inode, so `am logs -f` went silent at every restart.
+  const watcher = Deno.watchFs(dirname(LOG_FILE));
+  const name = basename(LOG_FILE);
+  let ino = Deno.statSync(LOG_FILE).ino;
   let buf = "";
   for await (const event of watcher) {
-    if (event.kind !== "modify" && event.kind !== "create") continue;
+    if (event.kind === "access" || event.kind === "remove") continue;
+    if (!event.paths.some((p) => basename(p) === name)) continue;
     try {
-      // AIO-214: detect log rotation — reset offset if file shrunk
+      // AIO-214: detect log rotation — reset offset if file shrunk, or is a
+      // new file (rotated by rename)
       const stat = await Deno.stat(LOG_FILE);
-      if (stat.size < offset) offset = 0;
+      if (stat.ino !== ino || stat.size < offset) {
+        ino = stat.ino;
+        offset = 0;
+        buf = "";
+      }
       // AIO-213: use try/finally to ensure file handle is always closed
       const file = await Deno.open(LOG_FILE, { read: true });
       try {
@@ -746,6 +796,21 @@ export async function cmdErrors(
     explicit: flags.app !== undefined,
   });
   const result = await httpGet(port, "/__aio/error", appId);
+  // A dev session WAITING for a fix (the saved file does not load) has no
+  // server to ask — and that is exactly when somebody types `am errors`. It
+  // used to answer "app not running", the one reply that hides the error.
+  const waiting = result.ok ? null : waitingLock(appId);
+  if (waiting) {
+    fail(
+      waitingMessage(
+        appId,
+        waiting.pid,
+        waiting.w,
+        waitingSaid(appId, waiting.w.since),
+      ),
+      mode,
+    );
+  }
   if (!result.ok) {
     // `/__aio/error` is dev-only (server-static.ts gates it on `!prod`), and a
     // production app therefore answers a bare "404 Not Found" — a status with
@@ -856,6 +921,19 @@ async function errorLogEvents(
       : all.filter((e) => logEventMatches(e, { sinceMs }));
   } catch {
     return [];
+  }
+}
+
+/** The live lock of a dev session waiting for a fix, or null. */
+function waitingLock(
+  appId: string,
+): { pid: number; w: { reason: string; since: number } } | null {
+  try {
+    const pf = liveLock(appId);
+    const w = pf && isLockOwnerAlive(pf) ? waitingOf(pf) : null;
+    return w ? { pid: pf!.pid, w } : null;
+  } catch {
+    return null; // aio-ok: no readable lock — the HTTP error below says why
   }
 }
 
@@ -1187,7 +1265,7 @@ export async function cmdProfile(
     fail(noDoorMessage(appId, booting), mode);
   }
   const { buildLocalProfile } = await import("../server/profile.ts");
-  const profile = buildLocalProfile(appId);
+  const profile = buildLocalProfile(appId, undefined, booting);
   if (!profile) {
     outError(
       `no running app "${appId}" found — start it (with --expose) first, ` +
@@ -1371,6 +1449,29 @@ export const NO_UI_CLIENT_HINT: string =
   `or --client=browser — \`am surface\` can still show you a server-side ` +
   `render of the UI in the meantime.`;
 
+/** The UI entry a failed server-side render names, when that file does not
+ *  EXIST — the app has no UI (a cli or server-only app), so neither a client
+ *  nor a render can help. Null for every other failure: an App.tsx whose own
+ *  import is missing stats fine and keeps its real error. */
+export function missingUiEntry(error: string): string | null {
+  const m = error.match(
+    /failed to import UI entry (.+?): TypeError: Module not found/,
+  );
+  if (!m) return null;
+  try {
+    Deno.statSync(m[1]!);
+    return null;
+  } catch (e) {
+    return e instanceof Deno.errors.NotFound ? m[1]! : null;
+  }
+}
+
+/** What `am surface` / `am trigger` say for an app with no UI. */
+export const noUiMessage = (entry: string): string =>
+  `this app has no UI — ${entry} does not exist (a cli or server-only app), ` +
+  `so there is nothing to render or drive. Read its cells with am state; ` +
+  `call a method with am dispatch <cell:method> [args…].`;
+
 /** `am surface --names`: every addressable path, in surface order — THE
  *  walker (`collectElementPaths`, src/air/ui-surface.ts), the same one
  *  `ui.names()` and the test harness use. A hand-kept copy here had already
@@ -1491,7 +1592,12 @@ export async function cmdSurface(
       }
       want = idx.value;
     }
-    const picked = await resolveUiClient(port, appId, want, mode);
+    const wait = waitClientMs(args);
+    if (!wait.ok) {
+      outError(wait.error, mode);
+      Deno.exit(1);
+    }
+    const picked = await resolveUiClient(port, appId, want, mode, wait.value);
     if (picked === null) noUiClient = true;
     else target = picked;
   }
@@ -1576,7 +1682,8 @@ export async function cmdSurface(
     }
   }
   if (!result.ok) {
-    outError(result.error, mode);
+    const noUi = missingUiEntry(result.error);
+    outError(noUi ? noUiMessage(noUi) : result.error, mode);
     Deno.exit(1);
   }
   // With `--rects` the client replies with an OBJECT — the roots plus what it
@@ -1795,9 +1902,17 @@ export async function cmdTrigger(
   // Resolved from the roster BEFORE the first action: a stale index or the dev
   // server's reload socket is refused here, instantly and by name, instead of
   // being sent an action nothing will ever answer.
-  const picked = await pickUiClient(port, appId, wantIdx, mode);
+  const wait = waitClientMs(args);
+  if (!wait.ok) {
+    outError(wait.error, mode);
+    Deno.exit(1);
+  }
+  const picked = await pickUiClient(port, appId, wantIdx, mode, wait.value);
   if (picked === null) {
-    outError(NO_UI_CLIENT_HINT, mode);
+    // "start a client" cannot help an app with no UI: ask the render why.
+    const headless = await trojanGet(port, "surface/server", appId, 10_000);
+    const noUi = headless.ok ? null : missingUiEntry(headless.error);
+    outError(noUi ? noUiMessage(noUi) : NO_UI_CLIENT_HINT, mode);
     Deno.exit(1);
   }
   const idx = picked.index;

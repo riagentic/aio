@@ -1105,14 +1105,56 @@ export type AppMeta = {
   app?: string;
   createdAt: string;
   updatedAt: string;
+  /** The state database's absolute path when `dbPath` put it OUTSIDE
+   *  `<data>/` — the one record `am backup` / `am restore` have of where the
+   *  database and its journal live. Absent = the database is in `<data>/`. */
+  dbPath?: string;
 };
+
+/** The suffixes of the files beside a state database that belong to it: the
+ *  WAL/SHM, the integrity snapshot, and — with `dbPath` — the action journal
+ *  (`<dbPath>.journal`) and its sidecars. What `am backup` copies from an
+ *  {@linkcode AppMeta.dbPath} and `am restore` puts back. */
+export const DB_FILE_SUFFIXES = [
+  "",
+  "-wal",
+  "-shm",
+  ".snapshot",
+  ".journal",
+  ".journal.base",
+  ".journal.wm",
+  ".journal.replayed",
+] as const;
+
+/** `dbPath` resolved, when it names an on-disk database outside `<data>/`;
+ *  else undefined (unset, in-memory, or inside `<data>/` — which a backup of
+ *  `<data>/` already covers). Pure. */
+export function externalDbPath(
+  dirs: Pick<AppDirs, "data">,
+  dbPath: string | undefined,
+): string | undefined {
+  if (!dbPath || dbPath.startsWith(":memory:") || dbPath.startsWith("file:")) {
+    return undefined;
+  }
+  const abs = resolve(dbPath);
+  const rel = relative(resolve(dirs.data), abs);
+  return rel === ".." || rel.startsWith(".." + SEPARATOR) || isAbsolute(rel)
+    ? abs
+    : undefined;
+}
 
 /** Write/refresh `meta.json`. Best-effort: a read-only home must never fail a
  *  boot — the app runs fine without it, only `am restore` loses a safety check.
  *  A write that did not land is said once, as a warning. */
 export function writeAppMeta(
   dirs: AppDirs,
-  info: { appId: string; aio: string; app?: string; profile?: string },
+  info: {
+    appId: string;
+    aio: string;
+    app?: string;
+    profile?: string;
+    dbPath?: string;
+  },
 ): void {
   try {
     const now = new Date().toISOString();

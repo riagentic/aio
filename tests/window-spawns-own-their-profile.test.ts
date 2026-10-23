@@ -58,6 +58,11 @@ const SAFE: Record<string, { why: string; has?: RegExp[]; never?: RegExp[] }> =
       ],
       never: [LAUNCH[1]!, LAUNCH[2]!],
     },
+    "am-surface-no-ui-app.test.ts": {
+      why: "the flag is text the reply must NOT contain, never run",
+      has: [/assert\(!r\.text\.includes\("--client=electron"\), r\.text\)/],
+      never: [LAUNCH[1]!, LAUNCH[2]!],
+    },
     "one-vocabulary.test.ts": {
       why: "the flag is read out of a scaffolded deno.json, never run",
       has: [

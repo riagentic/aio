@@ -8,7 +8,7 @@
 // path that is not a directory, which reaches the same branch); and a loud
 // refusal when neither can, because a control socket placed hopefully is a
 // socket another local user can dispatch through.
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { _chooseLockDir } from "../src/server/single-instance-lock.ts";
 import { selfUid } from "../src/server/dir-permissions.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -55,6 +55,23 @@ Deno.test({
           Error,
           "refusing to place a control socket",
         );
+
+        // 4. A base nothing can be made in (a read-only `/tmp`, no
+        // XDG_RUNTIME_DIR): the mkdir's own reason and "make it writable" —
+        // not the look's "not found" under "another local user can reach
+        // it … chmod 700 the directory named above", a directory that is
+        // not there and no other user.
+        const ro = `${base}/ro`;
+        await Deno.mkdir(ro);
+        await Deno.chmod(ro, 0o555);
+        try {
+          const e = assertThrows(() => _chooseLockDir(ro, "-d"), Error);
+          assertStringIncludes(e.message, "Permission denied");
+          assertStringIncludes(e.message, `make ${ro} writable`);
+          assertEquals(/control socket where another/.test(e.message), false);
+        } finally {
+          await Deno.chmod(ro, 0o755);
+        }
       } finally {
         await dropTempDir(base);
       }

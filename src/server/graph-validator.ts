@@ -3,6 +3,7 @@ import { fromFileUrl, join, resolve, toFileUrl } from "@std/path";
 import * as hostPath from "@std/path";
 import { locateDenoJsonAbove } from "./deno-json.ts";
 import { resolveShare, type ShareRoot } from "./app-dirs.ts";
+import { APP_STYLE } from "./app-files.ts";
 import { esbuildWork, loadEsbuild } from "./server-transpile.ts";
 import {
   isBrowserEntry,
@@ -1107,6 +1108,32 @@ async function prodGraphErrors(opts: {
         `add \`default\`: \`export default function App() { … }\` — or, if ` +
           `the component is already declared, \`export default App;\` at the ` +
           `end of ${uiEntry}.`,
+      );
+    }
+    // `import "./Button.css"` — a reflex from every bundler. esbuild's own
+    // line ("…into a JavaScript file without an output path configured")
+    // names a bundler setting, and the generic fix blamed resolution; the
+    // edit is to move the rules into the one stylesheet aio links.
+    const cssErr = bundle.errors.find((e) =>
+      /Cannot import "[^"]+\.css" into a JavaScript file/.test(e)
+    );
+    if (cssErr) {
+      // Importing the linked stylesheet ITSELF: its rules already reach the
+      // page — "move the rules into style.css" would name the same file.
+      const itself = new RegExp(
+        `Cannot import "(?:[^"]*/)?${
+          APP_STYLE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        }"`,
+      ).test(cssErr);
+      return refusal(
+        `a module imports a stylesheet — aio does not load CSS through ` +
+          `imports: the only stylesheet the page links is ${APP_STYLE} next ` +
+          `to your entry. (esbuild: ${cssErr.trim()})`,
+        itself
+          ? `delete the import line — ${APP_STYLE} is already linked by the ` +
+            `page, so its rules apply without it.`
+          : `delete the import line and move the rules into ${APP_STYLE}, ` +
+            `or \`@import\` that file from ${APP_STYLE}.`,
       );
     }
     // The claim "`deno task build` would fail" is only true when this bundle

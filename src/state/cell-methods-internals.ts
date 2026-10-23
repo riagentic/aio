@@ -1111,6 +1111,15 @@ export function buildMethodsExecutor(
       // Run the method once. For serialize, this is deferred until the previous
       // transactional call has committed (so its snapshot is fresh); otherwise
       // it runs now, concurrently, exactly as before.
+      // The caller is answered here — and `$pending` drops in the same
+      // breath. Left to `untrack()` (last, below, for cancellation) it was
+      // still counted when the caller's \`await\` resumed: \`await c.save();
+      // c.$pending("save")\` read 1 in an app, while a worker cell (its count
+      // drops before the reply crosses back) and bootCells read 0.
+      const answer = (value: unknown, error?: Error): void => {
+        untrack.settle();
+        resolveCall(_callId, value, error);
+      };
       const runBody = (): Promise<unknown> => {
         const batcher = createBatcher(prefix, (a) => app.dispatch(a), {
           deferred: transactional,
@@ -1451,7 +1460,7 @@ export function buildMethodsExecutor(
               // a cancelled call must not do. Resolving `undefined` matches
               // the cancellation path the docs tell methods to take.
               settlePolicy({ value: undefined });
-              resolveCall(_callId, undefined);
+              answer(undefined);
               return;
             }
             // Transactional commit: apply the whole method's buffered
@@ -1474,7 +1483,7 @@ export function buildMethodsExecutor(
               dropTxEffects();
               await batcher.settled(); // same reason as the branch above
               settlePolicy({ value: undefined });
-              resolveCall(_callId, undefined);
+              answer(undefined);
               return;
             }
             guardCommit();
@@ -1550,7 +1559,7 @@ export function buildMethodsExecutor(
                 `[${name}] cell disabled while ${_method}() was running`,
               );
               settlePolicy({ error: disabledErr });
-              resolveCall(_callId, undefined, disabledErr);
+              answer(undefined, disabledErr);
             } else {
               // An effect return is a SCHEDULING instruction, not a value —
               // documented as resolving `undefined`, which is what the sync
@@ -1568,7 +1577,7 @@ export function buildMethodsExecutor(
                 ? undefined
                 : materializeValue(value);
               settlePolicy({ value: settled });
-              resolveCall(_callId, settled);
+              answer(settled);
             }
           })
           .catch((e: Error) => {
@@ -1589,7 +1598,7 @@ export function buildMethodsExecutor(
             // view is sealed before its caller hears about it.
             batcher.close();
             settlePolicy({ error: e });
-            resolveCall(_callId, undefined, e);
+            answer(undefined, e);
             const _onError = (app as Record<string, unknown>)._onError as
               | ((err: AioError) => void)
               | undefined;

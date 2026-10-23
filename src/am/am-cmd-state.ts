@@ -34,6 +34,7 @@ import {
 import { FETCH_TIMEOUT, httpGet, trojanGet, trojanPost } from "./am-http.ts";
 import { appDirs } from "../server/app-dirs.ts";
 import { readStoredState } from "../server/stored-state.ts";
+import { clientScopedNote } from "../server/server-trojan.ts";
 
 // ── am expect: e2e assertion over server state ──────────────────
 
@@ -409,6 +410,21 @@ export async function cmdState(
   });
   const path = _pathOfArgs(args);
 
+  /** A miss on a cell the server holds no state for because it is
+   *  `scope: "client"` says so — the server's own list, the one `am
+   *  dispatch` is refused by. Otherwise: the keys where the path stopped. */
+  const stateMiss = async (data: unknown, path: string): Promise<string> => {
+    const head = path.split(/[.[]/)[0]!;
+    if (data && typeof data === "object" && !Object.hasOwn(data, head)) {
+      const cc = await trojanGet(port, "client-cells", appId);
+      if (cc.ok && Array.isArray(cc.data) && cc.data.includes(head)) {
+        return clientScopedNote(head, "read") +
+          " Read it through the UI: `am surface` shows its live text and values.";
+      }
+    }
+    return `path "${path}" not found in state${_missHint(data, path)}`;
+  };
+
   const fetchAndResolve = async (
     silent = false,
   ): Promise<{ ok: true; data: unknown } | { ok: false }> => {
@@ -420,10 +436,7 @@ export async function cmdState(
     if (!path) return { ok: true, data: result.data };
     const r = resolvePath(result.data, path);
     if (!r.found) {
-      if (!silent) {
-        const hint = _missHint(result.data, path);
-        outError(`path "${path}" not found in state${hint}`, mode);
-      }
+      if (!silent) outError(await stateMiss(result.data, path), mode);
       return { ok: false };
     }
     return { ok: true, data: r.value };
@@ -508,7 +521,13 @@ async function offlineState(args: string[], flags: GlobalFlags): Promise<void> {
   }
   let state: Record<string, unknown> | null;
   try {
-    state = await readStoredState(dbPath, appId);
+    state = await readStoredState(
+      dbPath,
+      appId,
+      (m) => {
+        if (mode !== "quiet") sayErr(`offline: ${m}`);
+      },
+    );
   } catch (e) {
     fail(
       e instanceof Deno.errors.NotFound
@@ -1021,6 +1040,7 @@ export async function cmdDispatch(
     resultDropped?: boolean;
     unsaved?: string | null;
     short?: string;
+    extra?: string;
   };
   // `ok: true` means APPLIED — the method ran, the commit is broadcast — and
   // says nothing about the disk: the write reaches SQLite with the next
@@ -1044,7 +1064,9 @@ export async function cmdDispatch(
   // An agent driving a live app never reads that log. Measured shape:
   // `am dispatch todo:add` for `add(s, text)` wrote a row whose declared field
   // was simply gone, under `{"ok":true}`.
-  const short = typeof data?.short === "string" ? `\n  ⚠ ${data.short}` : "";
+  const short = (typeof data?.short === "string" ? `\n  ⚠ ${data.short}` : "") +
+    // More args than required: maybe dropped (`todo:add hello world`).
+    (typeof data?.extra === "string" ? `\n  ⚠ ${data.extra}` : "");
   if (mode === "pretty") {
     const label = flags.asServer ? "dispatched (as server)" : "dispatched";
     if (data?.resultDropped) {

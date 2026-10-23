@@ -21,7 +21,9 @@ import { REDACTED } from "../diagnostics/redact.ts";
 import {
   isDeliberateRejection,
   reduceThrowCode,
+  RefusedWrite,
   rejectionLine,
+  throwerOf,
 } from "./method-rejection.ts";
 export type { AioError } from "../diagnostics/error.ts";
 
@@ -652,13 +654,15 @@ export function createDispatch<S, A, E>(
         pausedWarnedTypes.add(t);
         log.warn(
           `time travel is PAUSED — '${t}' was not applied (further drops of ` +
-            `this type suppressed). Resume time travel to dispatch again.`,
+            `this type suppressed). Resume time travel (am timetravel resume, ` +
+            `or the debug panel) to dispatch again.`,
         );
       }
       return rejectDropped(_tagTTPaused(createAioError(
         "DISPATCH_CLOSED",
         "time travel is paused — action dropped, not applied. Resume time " +
-          "travel (or close the debug panel) to dispatch again.",
+          "travel (`am timetravel resume`, or close the debug panel) to " +
+          "dispatch again.",
         { actionType: (action as Record<string, unknown>)?.type as string },
       )));
     }
@@ -850,9 +854,13 @@ export function createDispatch<S, A, E>(
           } catch (e) {
             // A refusal (`throw new Error("insufficient")`) is reported as one
             // info line, a bug as the error box — method-rejection.ts.
-            const refusal = isDeliberateRejection(e);
+            // A `listensTo` handler's throw is that cell's bug, not the
+            // source's refusal — named for it, and never the info line.
+            const thrower = throwerOf(e);
+            const refusal = isDeliberateRejection(e) &&
+              (thrower === undefined || e instanceof RefusedWrite);
             const err = createAioError(reduceThrowCode(e), e, {
-              cellName: actionType?.split(":")[0],
+              cellName: thrower ?? actionType?.split(":")[0],
               actionType,
               ...(refusal
                 ? { rejected: rejectionLine(actionType ?? "?", e) }
@@ -885,7 +893,10 @@ export function createDispatch<S, A, E>(
                 message: `Reduce threw for action '${actionType ?? "?"}': ${
                   e instanceof Error ? e.message : String(e)
                 }`,
-                detail: { actionType, cellName: actionType?.split(":")[0] },
+                detail: {
+                  actionType,
+                  cellName: thrower ?? actionType?.split(":")[0],
+                },
                 hint:
                   "Check the cell method body — the reducer threw before producing a new state.",
               });

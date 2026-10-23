@@ -103,6 +103,7 @@ function runTray() {
     close: () => calls.push("close"),
     show: () => calls.push("show"),
     focus: () => calls.push("focus"),
+    webContents: { print: () => calls.push("print") },
   };
   new Function(
     "win",
@@ -155,6 +156,54 @@ Deno.test("window close: both window shells carry the handler exactly once and t
     assert(s.includes("executeInMainWorld"), `${name}: preload not routed`);
     new Function(s); // throws on a syntax error
   }
+});
+
+Deno.test("print(): BOTH shells' windows print through the main process — the WebSocket window had no print path, so print() fell to window.print(), a silent no-op on Linux", () => {
+  for (
+    const [name, code] of [
+      ["ws", shellBridgePreload({ standalone: true })],
+      ["uds", udsPreloadScript()],
+    ] as const
+  ) {
+    const { win, sent } = runPreload(code);
+    win.__aioShell.print();
+    assertEquals(sent, [["__aio:print"]], name);
+  }
+  const { calls, ipc } = runTray();
+  ipc["__aio:print"]!({});
+  assertEquals(calls, ["print"]);
+  const ws = electronMainScript("http://127.0.0.1:1/", { title: "t" });
+  const uds = electronMainScriptUDS("http://127.0.0.1:1/", "/tmp/x.sock", {
+    title: "t",
+  });
+  for (const [name, s] of [["ws", ws], ["uds", uds]] as const) {
+    assertEquals(
+      s.split("ipcMain.on('__aio:print'").length - 1,
+      1,
+      `${name}: one handler — two would open two dialogs`,
+    );
+  }
+});
+
+Deno.test("print(): the aio client's window prints through its main process too — it had no preload, so an app's print() was window.print(), a silent no-op on Linux; the key stays the app's", () => {
+  const s = electronClientScript(null);
+  const m = /fs\.writeFileSync\(preloadFile, ("(?:[^"\\]|\\.)*"), /.exec(s);
+  assert(m, "the client writes a preload");
+  const { win, sent } = runPreload(JSON.parse(m[1]!));
+  win.__aioShell.print();
+  assertEquals(sent, [["__aio:print"]]);
+  assert(
+    s.includes("preload: __aioPreloadFile"),
+    "its window loads that preload",
+  );
+  assertEquals(s.split("ipcMain.on('__aio:print'").length - 1, 1);
+  // …but the KEY stays the page's: the client cannot read the remote app's
+  // `electron.shortcuts.print`, and taking Ctrl/⌘+P broke an app's own mod+p.
+  assertEquals(
+    /before-input-event[\s\S]{0,300}=== 'p'/.test(s),
+    false,
+    "the client must not take Ctrl/⌘+P",
+  );
 });
 
 /** Run the menu template on a given platform; returns what was set. */

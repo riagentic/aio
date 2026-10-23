@@ -1309,6 +1309,7 @@ export async function swapArtifact(opts: {
       dir: layout.dir,
       keep: Math.max(2, opts.keepVersions ?? 3),
       current: nextDir,
+      previous: dirname(previousPath),
     }).catch(() => []);
     return { previous: previousPath, installed: opts.current, notes: [] };
   }

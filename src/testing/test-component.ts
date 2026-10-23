@@ -10,6 +10,14 @@ import {
 import { _setContrastCascadeProbe } from "../air/contrast-audit.ts";
 import { contrastCascadeNotice } from "../air/contrast-cascade.ts";
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
+import {
+  _containedErrorSink,
+  _setContainedErrorSink,
+} from "../air/hook-error.ts";
+import {
+  _renderErrorSinkInPlace,
+  _setRenderErrorSink,
+} from "../air/renderer-rerender.ts";
 import { _armTestStrict } from "./test-strict.ts";
 import type { ComponentFn } from "../air/vdom-types.ts";
 
@@ -88,10 +96,69 @@ export function testComponent(
   setDocument(doc);
   const root = opts.root ?? doc.createElement("div");
   if (!root.parentNode && doc.body) doc.body.appendChild(root);
-  const handle = mount(root, App);
+  // An event handler that throws and a RE-render that throws are contained
+  // (production keeps the last good output and carries on), so both reached
+  // only `console.error` and the test passed on stale content. `testUI` turns
+  // them into failures; so does this harness, at its observation points
+  // (`html()` and `unmount()`). Chained, so an enclosing harness hears them too.
+  const failures: Error[] = [];
+  const prevContained = _containedErrorSink();
+  const prevRender = _renderErrorSinkInPlace();
+  _setContainedErrorSink((kind, e, component) => {
+    failures.push(
+      new Error(
+        `[aio:testComponent] ${kind}${
+          component ? ` in <${component}>` : ""
+        } threw. The framework CONTAINS this so production keeps rendering; ` +
+          `a test must not pass on it: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        { cause: e },
+      ),
+    );
+    prevContained?.(kind, e, component);
+  });
+  _setRenderErrorSink((err, component) => {
+    failures.push(
+      new Error(
+        `[aio:testComponent] <${component}> threw while re-rendering, so the ` +
+          `UI is showing STALE content: ${err.message}`,
+        { cause: err },
+      ),
+    );
+    prevRender?.(err, component);
+  });
+  const restore = () => {
+    _setContainedErrorSink(prevContained);
+    _setRenderErrorSink(prevRender);
+  };
+  const raise = () => {
+    if (failures.length === 0) return;
+    const errs = failures.splice(0);
+    throw errs.length === 1
+      ? errs[0]
+      : new AggregateError(errs, errs.map((e) => e.message).join("\n"));
+  };
+  let handle: ReturnType<typeof mount>;
+  try {
+    handle = mount(root, App);
+  } catch (e) {
+    restore();
+    throw e;
+  }
   return {
     root,
-    html: () => root.innerHTML,
-    unmount: () => _unmount(handle),
+    html: () => {
+      raise();
+      return root.innerHTML;
+    },
+    unmount: () => {
+      try {
+        _unmount(handle);
+      } finally {
+        restore();
+      }
+      raise();
+    },
   };
 }

@@ -7,6 +7,7 @@ import {
   tmplCrashGuard,
   tmplIpcGuard,
   tmplPermissionGuard,
+  tmplPreloadWrite,
   tmplShowWhenPainted,
   tmplWebGuard,
 } from "./electron-shared.ts";
@@ -55,6 +56,26 @@ ${tmplCrashGuard()}
 ${tmplPermissionGuard()}
 ${tmplWebGuard()}
 ${tmplIpcGuard()}
+// print() (aio/browser): window.print() is a silent no-op in Electron on
+// Linux (measured, Electron 44) — the app shells print from the main
+// process (__aioShell.print, Ctrl+P); so does this window. A profile that
+// cannot hold the file costs print() alone, said here — not the client.
+const __aioPreloadFile = (() => {
+  try {
+${
+    tmplPreloadWrite(
+      JSON.stringify(
+        "const { contextBridge, ipcRenderer } = require('electron');\n" +
+          "contextBridge.exposeInMainWorld('__aioShell', { print: () => ipcRenderer.send('__aio:print') });\n",
+      ),
+    )
+  }
+    return preloadFile;
+  } catch (e) {
+    console.error('[aio-client] print() falls back to window.print() (a no-op on Linux): its preload could not be written (' + ((e && e.message) || e) + ')');
+    return undefined;
+  }
+})();
 
 // ── Window state persistence ──
 ${tmplBounds()}
@@ -939,8 +960,13 @@ app.on('ready', () => {
     width: 480, height: 300,
     resizable: false,
     show: false,
-    webPreferences: { nodeIntegration: false, contextIsolation: true },
+    webPreferences: { nodeIntegration: false, contextIsolation: true, preload: __aioPreloadFile },
   });
+  const __aioPrint = () => { if (!win.isDestroyed()) win.webContents.print({ silent: false, printBackground: true }); };
+  ipcMain.on('__aio:print', __aioPrint); // the app's origin only (tmplIpcGuard)
+  // No Ctrl/⌘+P here: the client cannot read the remote app's
+  // electron.shortcuts.print, and taking the key broke an app's own mod+p
+  // (a command palette). print() reaches __aio:print above.
   {
     const __aioRestoreMax = false, __aioBgNow = () => null;
 ${tmplShowWhenPainted()}

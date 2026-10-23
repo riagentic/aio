@@ -70,12 +70,14 @@ import { appIconLabel, appIconSvg } from "../build/app-icon.ts";
 import { etagMatches, etagOf, MAX_BUFFER_BYTES } from "./http-encoding.ts";
 import {
   blobContentType,
+  cannotExist,
   fileWindow,
+  isNotServable,
   parseByteRange,
   unsatisfiable,
 } from "./serve-file.ts";
 
-export { blobContentType, parseByteRange };
+export { blobContentType, cannotExist, isNotServable, parseByteRange };
 
 // Framework module URLs — this file lives in src/server/, so entry files at the
 // src/ root and folderized modules are one level up. The /__aio/ namespace
@@ -93,6 +95,31 @@ function withUtf8(ct: string): string {
   return ct.startsWith("text/") && !ct.includes("charset")
     ? `${ct}; charset=utf-8`
     : ct;
+}
+
+/** How much of a file served from disk is checked before it is labelled
+ *  `charset=utf-8` — the label is a claim about bytes nobody decoded. */
+const CHARSET_PROBE_BYTES = 64 * 1024;
+
+/** Whether the first `CHARSET_PROBE_BYTES` of `file` are valid UTF-8 (a
+ *  multi-byte sequence the probe cuts in half counts as valid: the decode is
+ *  streamed unless the probe is the whole file). Moves the cursor; the caller
+ *  seeks. */
+async function probesUtf8(file: Deno.FsFile, size: number): Promise<boolean> {
+  const buf = new Uint8Array(Math.min(size, CHARSET_PROBE_BYTES));
+  let got = 0;
+  while (got < buf.length) {
+    const n = await file.read(buf.subarray(got));
+    if (n === null) break;
+    got += n;
+  }
+  try {
+    new TextDecoder("utf-8", { fatal: true })
+      .decode(buf.subarray(0, got), { stream: got < size });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** DEV ONLY: where a module the app imports from OUTSIDE its app root is
@@ -610,35 +637,6 @@ export function _decodePathname(pathname: string): string | null {
   return out.join("/");
 }
 
-/** The longest file NAME any filesystem aio runs on accepts (ext4, APFS,
- *  NTFS: 255 bytes/units). A longer segment cannot name a file, so the
- *  answer is 404 — decided BEFORE the filesystem is asked, because asking
- *  threw ENAMETOOLONG, which the text branch answered with a 500 and an
- *  error line carrying the absolute path. */
-const MAX_SEGMENT_BYTES = 255;
-/** PATH_MAX on Linux; the same "cannot exist" reasoning as the segment cap. */
-const MAX_PATH_BYTES = 4096;
-const _utf8 = new TextEncoder();
-
-/** True when no filesystem could hold a file at `filepath` — a segment over
- *  255 bytes or a path over PATH_MAX. Pure; exported for tests. */
-export function cannotExist(filepath: string): boolean {
-  if (_utf8.encode(filepath).byteLength > MAX_PATH_BYTES) return true;
-  return filepath.split(/[\\/]/).some((seg) =>
-    _utf8.encode(seg).byteLength > MAX_SEGMENT_BYTES
-  );
-}
-
-/** A filesystem error that means "there is no such file to serve" — the
- *  request named something that does not exist, or names a path through a
- *  file (`/app.js/x.txt` → ENOTDIR), or a symlink cycle. Anything else (EACCES,
- *  EISDIR, EIO) is the server's problem and stays a 500. */
-export function isNotServable(e: unknown): boolean {
-  return e instanceof Deno.errors.NotFound ||
-    e instanceof Deno.errors.NotADirectory ||
-    e instanceof Deno.errors.FilesystemLoop;
-}
-
 /** THE method table for the framework's own HTTP endpoints. One place, so
  *  `TRACE /__aio/health` cannot answer 200 on one route and 405 on the next:
  *  every route here answered whatever method arrived (the handlers never
@@ -890,6 +888,8 @@ export interface StaticDeps {
   /** Identity the theme's accent hue is derived from — the appId, so the UI
    *  and the icon are the same colour. */
   themeName?: string;
+  /** deno.json `hue` — the hue chosen instead of hashed from `themeName`. */
+  hue?: number;
   /** The app's identity, injected into the page's `window.__aioConfig` — the
    *  browser's offline sync queue scopes its per-origin `localStorage` key by
    *  it. */
@@ -993,6 +993,135 @@ export function _stopRefusalLog(
           : "no control credential") +
         " — answered 404, the app keeps running",
     );
+  };
+}
+
+/** A file's bytes, straight from disk — never held whole in memory — with
+ *  byte ranges.
+ *
+ *  `docs/build/imports.md` promises `assets` mounts "range requests", and
+ *  the static path had none: every binary was `Deno.readFile`d whole on
+ *  every request and a `Range:` header was ignored. A video element seeks
+ *  with ranges, so a 300 MB mp4 cost 300 MB of heap PER request — measured,
+ *  four concurrent `Range: bytes=0-1023` requests took RSS to ~2.6 GB to
+ *  send 4 KB. Now: one open file per request, 64 KiB at a time, 206 for a
+ *  satisfiable range, 416 for one past the end — the blob route's contract
+ *  (`parseByteRange`), which already streamed.
+ *
+ *  `If-Range` is honoured by never letting it match: the validator here is
+ *  WEAK (mtime+size), and RFC 9110 §13.1.5 forbids a weak tag from
+ *  satisfying If-Range — so a client resuming against a changed file gets
+ *  the whole new file rather than a splice of two versions. A conditional
+ *  GET that matches serves the plain 200 path, which `encodeResponse` turns
+ *  into the 304. */
+async function serveFromDisk(
+  filepath: string,
+  st: Deno.FileInfo,
+  ext: string,
+  isText: boolean,
+  noCache: Record<string, string>,
+  req?: Request,
+): Promise<Response> {
+  const etag = `W/"${st.mtime?.getTime() ?? 0}-${st.size}"`;
+  const contentType = MIME[ext] ??
+    (isText ? "text/plain" : "application/octet-stream");
+  const headers: Record<string, string> = {
+    // `text/*` is labelled `charset=utf-8` only when its bytes ARE UTF-8
+    // (decided below, once the file is open): without a charset a browser
+    // may fall back to windows-1252 and garble a UTF-8 .txt / .md / .css,
+    // but the bytes are served verbatim, so on a Latin-1 / Shift_JIS file
+    // the label turned every non-ASCII byte into U+FFFD and overrode an
+    // .html file's own `<meta charset>`.
+    "Content-Type": contentType,
+    // A VALIDATOR. Prod sets `Cache-Control: no-cache` on every static
+    // file, and `no-cache` means "you may cache, but revalidate" —
+    // revalidation needs a validator, and images, fonts, wasm and video had
+    // none: `encodeResponse` returns early for incompressible types, ABOVE
+    // its conditional-request block, so every one of them was a full
+    // re-download on every page load.
+    //
+    // Weak, and from `stat` — no read, no hash: the bytes are identical
+    // whenever mtime and size are, which is exactly what a weak validator
+    // asserts.
+    ETag: etag,
+    "Accept-Ranges": "bytes",
+    ...noCache,
+  };
+  const method = req?.method.toUpperCase() ?? "GET";
+  // A conditional GET that will be answered 304 is not ranged — unless the
+  // response is `no-store` (dev), where `encodeResponse` never revalidates.
+  const revalidates = !(headers["Cache-Control"] ?? "").includes("no-store") &&
+    etagMatches(req?.headers.get("if-none-match") ?? null, etag);
+  const ranged = (method === "GET" || method === "HEAD") &&
+    !req?.headers.has("if-range") && !revalidates;
+  const range = ranged
+    ? parseByteRange(req?.headers.get("range") ?? null, st.size)
+    : null;
+  if (range === "unsatisfiable") return unsatisfiable(st.size);
+  let file: Deno.FsFile;
+  try {
+    file = await Deno.open(filepath, { read: true });
+  } catch (e) {
+    if (isNotServable(e)) return new Response("Not Found", { status: 404 });
+    log.error("server", `static: cannot open ${filepath} — ${e}`);
+    return new Response("Internal Server Error", { status: 500 });
+  }
+  const start = range ? range.start : 0;
+  const len = range ? range.end - range.start : st.size;
+  try {
+    if (withUtf8(contentType) !== contentType) {
+      if (await probesUtf8(file, st.size)) {
+        headers["Content-Type"] = withUtf8(contentType);
+      }
+      await file.seek(start, Deno.SeekMode.Start);
+    } else if (start > 0) await file.seek(start, Deno.SeekMode.Start);
+  } catch (e) {
+    file.close();
+    log.error("server", `static: cannot read ${filepath} — ${e}`);
+    return new Response("Internal Server Error", { status: 500 });
+  }
+  const body = fileWindow(file, len);
+  headers["Content-Length"] = String(len);
+  if (!range) return new Response(body, { status: 200, headers });
+  headers["Content-Range"] = `bytes ${range.start}-${range.end - 1}/${st.size}`;
+  return new Response(body, { status: 206, headers });
+}
+
+/** The app's server, for a request under one of `mounts` (prefix → absolute
+ *  dir, as `_servedAssets` answers) — `null` when no mount claims the path.
+ *  It is the server's OWN static handler (`createStaticHandler`, with
+ *  `assets` and `assetsFill` exactly as `server.ts` passes them), so the app
+ *  dir answers first and a deno.json-only mount only fills in; there is no
+ *  second implementation of mount serving to drift (`testUI`'s relative
+ *  fetch). @internal */
+export function mountFileServer(
+  absBaseDir: string,
+  mounts: Record<string, string>,
+  fill: readonly string[],
+): (rawPathname: string, req?: Request) => Promise<Response | null> {
+  const handler = createStaticHandler({
+    prod: true,
+    debug: () => {},
+    title: "",
+    absBaseDir,
+    absDistDir: null,
+    hasCSS: false,
+    importMap: "{}",
+    noCache: {},
+    getGraphResult: () => null,
+    getVitalsExtra: () => ({ payloadStats: new Map(), clientBackpressure: {} }),
+    getTrojanDeps: () => ({}),
+    assets: mounts,
+    assetsFill: fill,
+  } as unknown as StaticDeps);
+  return async (rawPathname, req) => {
+    const pathname = _decodePathname(rawPathname);
+    if (pathname === null) return null;
+    const claimed = Object.keys(mounts).some((prefix) =>
+      pathname === prefix ||
+      pathname.startsWith(prefix.endsWith("/") ? prefix : prefix + "/")
+    );
+    return claimed ? await handler.serveStatic(rawPathname, req) : null;
   };
 }
 
@@ -1281,7 +1410,7 @@ export function createStaticHandler(deps: StaticDeps): {
         chrome: deps.chrome,
         theme: deps.theme,
         layout: deps.layout,
-        themeName: deps.themeName,
+        themeName: deps.hue ?? deps.themeName,
         lang: deps.lang,
         dir: deps.dir,
         appId: deps.appId,
@@ -2000,7 +2129,7 @@ export function createStaticHandler(deps: StaticDeps): {
             deps.themeName || deps.title,
           ),
           512,
-          deps.themeName || deps.title,
+          deps.hue ?? (deps.themeName || deps.title),
         ),
         type: "image/svg+xml",
       };
@@ -2091,91 +2220,6 @@ export function createStaticHandler(deps: StaticDeps): {
         { status: 503, headers: { "Content-Type": "application/json" } },
       );
     }
-  }
-
-  /** A file's bytes, straight from disk — never held whole in memory — with
-   *  byte ranges.
-   *
-   *  `docs/build/imports.md` promises `assets` mounts "range requests", and
-   *  the static path had none: every binary was `Deno.readFile`d whole on
-   *  every request and a `Range:` header was ignored. A video element seeks
-   *  with ranges, so a 300 MB mp4 cost 300 MB of heap PER request — measured,
-   *  four concurrent `Range: bytes=0-1023` requests took RSS to ~2.6 GB to
-   *  send 4 KB. Now: one open file per request, 64 KiB at a time, 206 for a
-   *  satisfiable range, 416 for one past the end — the blob route's contract
-   *  (`parseByteRange`), which already streamed.
-   *
-   *  `If-Range` is honoured by never letting it match: the validator here is
-   *  WEAK (mtime+size), and RFC 9110 §13.1.5 forbids a weak tag from
-   *  satisfying If-Range — so a client resuming against a changed file gets
-   *  the whole new file rather than a splice of two versions. A conditional
-   *  GET that matches serves the plain 200 path, which `encodeResponse` turns
-   *  into the 304. */
-  async function serveFromDisk(
-    filepath: string,
-    st: Deno.FileInfo,
-    ext: string,
-    isText: boolean,
-    req?: Request,
-  ): Promise<Response> {
-    const etag = `W/"${st.mtime?.getTime() ?? 0}-${st.size}"`;
-    const headers: Record<string, string> = {
-      // Text is served as the UTF-8 the server decodes it as: without a
-      // charset a browser may fall back to windows-1252 and garble non-ASCII
-      // in a .txt / .md / .css file.
-      "Content-Type": withUtf8(
-        MIME[ext] ?? (isText ? "text/plain" : "application/octet-stream"),
-      ),
-      // A VALIDATOR. Prod sets `Cache-Control: no-cache` on every static
-      // file, and `no-cache` means "you may cache, but revalidate" —
-      // revalidation needs a validator, and images, fonts, wasm and video had
-      // none: `encodeResponse` returns early for incompressible types, ABOVE
-      // its conditional-request block, so every one of them was a full
-      // re-download on every page load.
-      //
-      // Weak, and from `stat` — no read, no hash: the bytes are identical
-      // whenever mtime and size are, which is exactly what a weak validator
-      // asserts.
-      ETag: etag,
-      "Accept-Ranges": "bytes",
-      ...deps.noCache,
-    };
-    const method = req?.method.toUpperCase() ?? "GET";
-    // A conditional GET that will be answered 304 is not ranged — unless the
-    // response is `no-store` (dev), where `encodeResponse` never revalidates.
-    const revalidates =
-      !(headers["Cache-Control"] ?? "").includes("no-store") &&
-      etagMatches(req?.headers.get("if-none-match") ?? null, etag);
-    const ranged = (method === "GET" || method === "HEAD") &&
-      !req?.headers.has("if-range") && !revalidates;
-    const range = ranged
-      ? parseByteRange(req?.headers.get("range") ?? null, st.size)
-      : null;
-    if (range === "unsatisfiable") return unsatisfiable(st.size);
-    let file: Deno.FsFile;
-    try {
-      file = await Deno.open(filepath, { read: true });
-    } catch (e) {
-      if (isNotServable(e)) return new Response("Not Found", { status: 404 });
-      log.error("server", `static: cannot open ${filepath} — ${e}`);
-      return new Response("Internal Server Error", { status: 500 });
-    }
-    const start = range ? range.start : 0;
-    const len = range ? range.end - range.start : st.size;
-    try {
-      if (start > 0) await file.seek(start, Deno.SeekMode.Start);
-    } catch (e) {
-      file.close();
-      log.error("server", `static: cannot seek ${filepath} — ${e}`);
-      return new Response("Internal Server Error", { status: 500 });
-    }
-    const body = fileWindow(file, len);
-    headers["Content-Length"] = String(len);
-    if (!range) return new Response(body, { status: 200, headers });
-    headers["Content-Range"] = `bytes ${range.start}-${
-      range.end - 1
-    }/${st.size}`;
-    return new Response(body, { status: 206, headers });
   }
 
   /** Serve a file from baseDir — handles SPA fallback, transpilation, binary/text */
@@ -2379,8 +2423,14 @@ export function createStaticHandler(deps: StaticDeps): {
     if (!isText && !st?.isFile) {
       return new Response("Not Found", { status: 404 });
     }
-    if (st?.isFile && (!isText || st.size > MAX_BUFFER_BYTES)) {
-      return await serveFromDisk(filepath, st, ext, isText, req);
+    // …and every text file that is not a module: nothing below rewrites it,
+    // and the decode/encode round trip did — a Latin-1 or Shift_JIS `.txt` /
+    // `.html` came out with every non-ASCII byte replaced by U+FFFD.
+    if (
+      st?.isFile &&
+      (!isText || st.size > MAX_BUFFER_BYTES || !DEV_MODULE.has(ext))
+    ) {
+      return await serveFromDisk(filepath, st, ext, isText, noCache, req);
     }
     let body: string;
     try {

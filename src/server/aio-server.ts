@@ -20,6 +20,8 @@ import { createAppPeerGate, createUDSListener, type UDSHandle } from "./uds.ts";
 import { hardenLocalPeer } from "./local-peer.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import { appDirs } from "./app-dirs.ts";
+import { declaredHue } from "../build/app-icon.ts";
+import { appDenoJson } from "./aio-run-helpers.ts";
 import type {
   CellPatchStrategy,
   PatchFilterFields,
@@ -41,6 +43,7 @@ import {
   degradedReport,
 } from "../diagnostics/degraded.ts";
 import { cellAccessAllowed } from "./server-auth.ts";
+import { DESCRIBE_TYPE, describeFor } from "./peer-describe.ts";
 import type { Access } from "../state/cell-types.ts";
 import { createAioError } from "../diagnostics/error.ts";
 import {
@@ -147,6 +150,10 @@ export interface ServerSetupDeps<S, A> {
     | undefined;
   /** AUTH-1: session-token resolver — consulted before users/resolveUser. */
   sessionResolver?: (tok: string) => AioUser | null;
+  /** `aio.run({ peerTypes })` — served by describe. */
+  peerTypes?: string;
+  /** `aio.run({ resolvePeer })`, state bound — see server-types. */
+  resolvePeer?: import("./server-types.ts").ServerConfig["resolvePeer"];
   /** AUTH-2: login-flow deps (users/sessions stores + policy) — the TLS-aware
    *  `secure` cookie flag is added here, where the cert is resolved. */
   authFlows?: Omit<import("./auth-flows.ts").AuthFlows, "secure">;
@@ -851,6 +858,20 @@ async function setupTransportInner<S, A>(
         ),
       );
     }
+    // `peer().describe()` — answered here, past the same auth and with the
+    // same user as a real call, so it lists only what this caller may call.
+    if (type === DESCRIBE_TYPE) {
+      return Promise.resolve(describeFor({
+        appId,
+        appVersion,
+        aio: VERSION,
+        methods: deps.cellMethods ?? {},
+        async: deps.cellAsyncMethods ?? {},
+        arity: deps.cellMethodArity ?? {},
+        access: config._cellAccess,
+        types: deps.peerTypes,
+      }, user));
+    }
     const cellAccess = config._cellAccess;
     if (cellAccess && cellAccess.size > 0 && type.includes(":")) {
       const cellName = type.slice(0, type.indexOf(":"));
@@ -1085,6 +1106,7 @@ async function setupTransportInner<S, A>(
       users,
       resolveUser,
       sessionResolver,
+      ...(deps.resolvePeer ? { resolvePeer: deps.resolvePeer } : {}),
       onIdentityChange,
       authFlows: authFlows
         ? { ...authFlows, secure: !!tlsCert?.cert }
@@ -1103,6 +1125,7 @@ async function setupTransportInner<S, A>(
       // The accent follows the app's IDENTITY, not its window title: a title
       // that changes with the route must not recolour the app mid-session.
       themeName: appId || title,
+      hue: declaredHue(appDenoJson()),
       renderBudget: config.renderBudget,
       wire: config.wire,
       syncCells: config._syncCellIds,

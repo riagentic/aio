@@ -103,6 +103,51 @@ Deno.test("readStoredState: a NEWER schema and two different layouts are refused
       "BOTH layouts",
     );
 
+    // Once the app has booted on one, the store says which: that copy is
+    // read, and the other is said to be ignored — as the boot says it.
+    for (const layout of ["single", "multi"] as const) {
+      const told = join(dir, `told-${layout}.db`);
+      await store(told, async (kv) => {
+        await kv.set("state", { a: 1 });
+        await kv.setMulti("state", { a: 2 });
+        await kv.set("app:__layout", layout);
+      });
+      const said: string[] = [];
+      assertEquals(
+        await readStoredState(told, "app", (m) => said.push(m)),
+        { a: layout === "single" ? 1 : 2 },
+      );
+      assertEquals(said.length, 1);
+      assertStringIncludes(said[0]!, `read the "${layout}" one`);
+      assertStringIncludes(said[0]!, "IGNORED");
+    }
+
+    const junk = join(dir, "junk.db");
+    await store(junk, (kv) => kv.set("state", 42));
+    await assertRejects(
+      () => readStoredState(junk, "app"),
+      Error,
+      "not an object of cells",
+    );
+
+    // A leftover single row that is no document, beside real rows: a
+    // multi-mode boot never reads it, so neither does the offline read —
+    // unless the boot recorded "single", which refuses it as the boot does.
+    for (const leftover of [0, "", false]) {
+      const beside = join(dir, `beside-${String(leftover)}.db`);
+      await store(beside, async (kv) => {
+        await kv.set("state", leftover);
+        await kv.setMulti("state", { a: 2 });
+      });
+      assertEquals(await readStoredState(beside, "app"), { a: 2 });
+      await store(beside, (kv) => kv.set("app:__layout", "single"));
+      await assertRejects(
+        () => readStoredState(beside, "app"),
+        Error,
+        "not an object of cells",
+      );
+    }
+
     // The same document twice (an interrupted layout migration) is not ambiguous.
     const twin = join(dir, "twin.db");
     await store(twin, async (kv) => {
@@ -112,6 +157,58 @@ Deno.test("readStoredState: a NEWER schema and two different layouts are refused
     assertEquals(await readStoredState(twin, "app"), { b: 2, a: 1 });
   } finally {
     await dropTempDir(dir);
+  }
+});
+
+Deno.test("readStoredState: a store in both layouts reads the copy the app booted on, after it ran", async () => {
+  const { aio } = await import("../src/server/aio.ts");
+  const { cell } = await import("../src/state/cell-create.ts");
+  const { _resetAioRuntime } = await import("../src/state/runtime-reset.ts");
+  const { freePort } = await import("../src/testing/server-test.ts");
+  for (const persistMode of ["single", "multi"] as const) {
+    const dir = await tempDir("am-offline-both-");
+    const db = join(dir, "state.db");
+    try {
+      await store(db, async (kv) => {
+        await kv.set("state", { ctr: { n: 1 } });
+        await kv.setMulti("state", { ctr: { n: 9 } });
+      });
+      _resetAioRuntime();
+      const ctr = cell("ctr", {
+        state: { n: 0 },
+        methods: {
+          add(s: { n: number }, by: number) {
+            s.n += by;
+          },
+        },
+      });
+      const app = await aio.run({
+        cells: [ctr],
+        appId: "app",
+        dbPath: db,
+        persistMode,
+        port: freePort(),
+        libraryMode: true,
+        client: "server-only",
+        baseDir: dir,
+        // deno-lint-ignore no-explicit-any
+      } as any);
+      try {
+        // deno-lint-ignore no-explicit-any
+        await (ctr as any).add(100);
+      } finally {
+        await app.close();
+      }
+      const said: string[] = [];
+      assertEquals(
+        await readStoredState(db, "app", (m) => said.push(m)),
+        { ctr: { n: persistMode === "single" ? 101 : 109 } },
+      );
+      assertStringIncludes(said.join("\n"), `read the "${persistMode}" one`);
+    } finally {
+      _resetAioRuntime();
+      await dropTempDir(dir);
+    }
   }
 });
 

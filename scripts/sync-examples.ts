@@ -11,6 +11,7 @@
 
 import { fromFileUrl, join } from "@std/path";
 import { count, mark, style } from "../src/diagnostics/fmt.ts";
+import { homeStoreEnv } from "../src/testing/test-strict.ts";
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const CASES = [
@@ -33,6 +34,9 @@ try {
         `--template=${template}`,
       ],
       cwd: tmp,
+      // `am create` provisions the pinned framework: into the throwaway dir,
+      // never the developer's real per-user stores (the test sandbox's layout).
+      env: homeStoreEnv(join(tmp, "stores")),
       stdout: "null",
       stderr: "inherit",
     }).output();
@@ -42,12 +46,12 @@ try {
     }
     for (const f of FILES) {
       const from = join(tmp, dir, "src", f);
-      const to = join(ROOT, "examples", dir, f);
+      const to = join(ROOT, "examples", dir, "src", f);
       const next = await Deno.readTextFile(from);
       const prev = await Deno.readTextFile(to).catch(() => null);
       if (prev === next) continue;
       await Deno.writeTextFile(to, next);
-      console.log(`${mark("ok")} examples/${dir}/${f}`);
+      console.log(`${mark("ok")} examples/${dir}/src/${f}`);
       changed++;
     }
   }

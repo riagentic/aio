@@ -4,6 +4,7 @@
 // (Immer draft) and the async (live proxy) path alike, dev == prod.
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { draftCloneError } from "../src/state/immutable.ts";
+import { createAioError, generateTip } from "../src/diagnostics/error.ts";
 import { cell } from "aio";
 import { testCell } from "aio/testing";
 
@@ -45,4 +46,21 @@ Deno.test("draftCloneError: only a clone refusal is rewrapped", () => {
   const w = draftCloneError(raw)!;
   assertEquals(w.name, "DataCloneError");
   assertEquals(w.cause, raw);
+});
+
+Deno.test("the clone refusal's fix is not contradicted by the generic proxy tip", () => {
+  // The wrapped message says "spread one level" and contains the word
+  // "proxy" — which put the generic proxy tip ("avoid .spread") beside it.
+  const e = draftCloneError(
+    Object.assign(new Error("#<Object> could not be cloned."), {
+      name: "DataCloneError",
+    }),
+  )!;
+  const tip = generateTip(
+    createAioError("REDUCE_ERROR", e, {
+      cellName: "cloneStory",
+      actionType: "cloneStory:syncCopy",
+    }),
+  );
+  assertEquals(/Proxy state error|\.spread/.test(tip ?? ""), false, tip);
 });

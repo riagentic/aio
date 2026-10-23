@@ -6,6 +6,7 @@ import type {
   CellVisibility,
   MachineConfig,
 } from "./cell-types.ts";
+import { segNames } from "./path-segments.ts";
 
 /** Does a method or selector already own this name on the cell object?
  *
@@ -419,6 +420,23 @@ export function validateFieldFilters(
         const head = nested ? key.split(".")[0]! : key;
         // Framework-internal fields (__aio_*) are always allowed.
         if (head.startsWith("__aio")) continue;
+        // `persist.exclude: ["*.busy"]` — a wildcard HEAD names every field,
+        // so the check moves to the whole declared shape: a path nothing
+        // declared can match is a typo, refused like a misspelled head.
+        if (kind === "persist" && nested && head === "*") {
+          if (excludePathCanMatch(state ?? {}, key.split("."), 0, true)) {
+            continue;
+          }
+          throw new Error(
+            `[cell:${name}] persist exclude names "${key}", but no field of ` +
+              `the declared state has "${
+                key.split(".").slice(1).join(".")
+              }" under it — so it excludes nothing — a field you meant to ` +
+              `keep out of the database is written to it. Declared state: ${
+                [...stateKeys].join(", ") || "(none)"
+              }. Check the spelling.`,
+          );
+        }
         if (!stateKeys.has(head)) {
           // The CONSEQUENCE, said correctly for the filter that was written.
           // One sentence used to cover all four combinations — "silently
@@ -556,7 +574,13 @@ export function warnUnmatchedSyncFields(
  *  array is walked element-wise. Anything that can hold fields the declaration
  *  does not show — `null`/`undefined`, an array, an EMPTY object (a record), a
  *  non-plain object — answers "yes": only a fully closed shape is judged. */
-function excludePathCanMatch(v: unknown, segs: string[], d: number): boolean {
+function excludePathCanMatch(
+  v: unknown,
+  segs: string[],
+  d: number,
+  /** A persist path's reading: `*` names any key (`segNames`). */
+  wildcard = false,
+): boolean {
   if (v === null || v === undefined || Array.isArray(v)) return true;
   if (typeof v !== "object") return false; // a primitive has no fields
   const proto = Object.getPrototypeOf(v);
@@ -564,12 +588,13 @@ function excludePathCanMatch(v: unknown, segs: string[], d: number): boolean {
   const keys = Object.keys(v);
   if (keys.length === 0) return true;
   const obj = v as Record<string, unknown>;
+  const star = Object.hasOwn(obj, "*");
   for (const k of keys) {
-    if (k === segs[d]) {
+    if (segNames(segs[d], k, wildcard, star)) {
       if (d === segs.length - 1) return true;
-      if (excludePathCanMatch(obj[k], segs, d + 1)) return true;
+      if (excludePathCanMatch(obj[k], segs, d + 1, wildcard)) return true;
     }
-    if (excludePathCanMatch(obj[k], segs, d)) return true;
+    if (excludePathCanMatch(obj[k], segs, d, wildcard)) return true;
   }
   return false;
 }
@@ -626,7 +651,8 @@ export function warnUnmatchedNestedExcludes(
       if (Object.hasOwn(decl, key)) continue;
       const segs = key.split(".");
       if (!Object.hasOwn(decl, segs[0]!)) continue; // the head check throws
-      if (excludePathCanMatch(decl[segs[0]!], segs, 1)) continue;
+      const wild = kind === "persist";
+      if (excludePathCanMatch(decl[segs[0]!], segs, 1, wild)) continue;
       // An unmatched segment is judged only when it is a NEAR-MISS of a key
       // the declared shape does hold (`encSeckey` vs `encSecKey`). A segment
       // that resembles nothing is, far more often, an optional field the
@@ -634,7 +660,9 @@ export function warnUnmatchedNestedExcludes(
       // method) — and the runtime filter excludes it correctly once written.
       const declared = declaredKeysUnder(decl[segs[0]!]);
       const near = segs.slice(1).map((s) =>
-        declared.has(s) ? null : nearestOf(s, declared, s.length <= 4 ? 2 : 3)
+        declared.has(s) || (wild && s === "*")
+          ? null
+          : nearestOf(s, declared, s.length <= 4 ? 2 : 3)
       ).find((n) => n !== null);
       if (!near) continue;
       const consequence = kind === "persist"

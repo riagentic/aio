@@ -214,8 +214,8 @@ one place reads as the decision it is.
 Advised, never changed for you: `deno.json` config (`jsx`/`jsxImportSource`/
 `nodeModulesDir`), a missing `appId` in `aio.run()`, a Deno version below the
 floor. For code-level issues (deprecated APIs, older-version patterns) `am fix`
-points you at the linter — `deno task lint:aio` (aiol) — it won't rewrite
-source.
+points you at the linter — `deno task lint` (deno lint + aiol, in a scaffolded
+app) — it won't rewrite source.
 
 It recognizes **how the app consumes aio** and acts accordingly: a `dep/aio`
 symlink is created/repaired; a **JSR/npm pin** needs no link (skipped); a **real
@@ -1232,6 +1232,21 @@ app.
 If it prints **`NOTHING CHECKED`**, it found no UI entry: correct for a
 `server-only` app, and otherwise a sign the entry is elsewhere — pass it, or set
 `entry` in deno.json, rather than leaving a green task that looked at nothing.
+
+### What does another running app let me call? (`am peer`)
+
+```sh
+am peer billing                                  # cells, methods, arg counts
+am peer billing --types=src/peers/billing.ts     # save the types it publishes
+am peer billing --types > src/peers/billing.ts   # raw to stdout, no header line
+```
+
+Asked live over the other app's own door (`peer().describe()`), as a plain local
+caller: the list is what such a caller may call under its `access` rules.
+`--types=<file>` makes missing folders, and overwrites only a file it wrote
+itself (its first line says so). `--types` needs the app to publish them
+(`aio.run({ peerTypes })`); see
+[cross-app](../basics/cross-app.md#peer--by-appid-no-source-needed).
 
 ### Which context does a file run in? (`am where`)
 

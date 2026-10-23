@@ -294,6 +294,10 @@ export function auditContrast(root: Element | null | undefined): number {
   let measuredAny = false;
   const walk = (el: Element): void => {
     if (scanned >= MAX_ELEMENTS || _findings >= MAX_FINDINGS) return;
+    // The app's opt-out for a subtree whose backdrop is not an ancestor — text
+    // on a positioned sheet BEHIND a transparent layer (an editor's paper),
+    // which this walk, reading ancestors only, measures against the page.
+    if (el.getAttribute?.("data-aio-contrast") === "skip") return;
     scanned++;
     if (hasOwnText(el) && !(moving && isMoving(el, moving.targets))) {
       let cs: { getPropertyValue(p: string): string };

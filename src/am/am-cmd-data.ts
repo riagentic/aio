@@ -27,6 +27,7 @@ import {
   resolve,
 } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
+import { moveFileSync } from "../diagnostics/rename-over.ts";
 import { detectMode, fail, out, outError, sayErr } from "./am-output.ts";
 import {
   liveLock,
@@ -39,6 +40,7 @@ import {
   type AppDirs,
   appDirs,
   appHome,
+  DB_FILE_SUFFIXES,
   ensureAppDirs,
   registeredProfile,
 } from "../server/app-dirs.ts";
@@ -211,6 +213,7 @@ export function cmdData(args: string[], flags: GlobalFlags): void {
     launch: d.launch,
     runtime: lockDir(),
     backup: d.data,
+    ...recordedDbPath(d.data),
     sizes: {
       data: dirSize(d.data),
       logs: dirSize(d.logs),
@@ -236,8 +239,20 @@ export type DataInfo = {
   launch: string;
   runtime: string;
   backup: string;
+  /** The database, when `dbPath` keeps it OUTSIDE `data` (as the boot
+   *  recorded it): part of ① too — `am backup` copies it, a hand copy of
+   *  `data` alone misses it. */
+  dbPath?: string;
   sizes: { data: number; logs: number; cache: number; app: number };
 };
+
+/** `{ dbPath }` when the app's meta.json records one, else nothing. */
+function recordedDbPath(data: string): { dbPath?: string } {
+  const meta = readArchiveMeta(data);
+  return meta && meta !== "corrupt" && typeof meta.dbPath === "string"
+    ? { dbPath: meta.dbPath }
+    : {};
+}
 
 /** The pretty rendering, pure so it is testable without a terminal (`am` falls
  *  back to JSON whenever stdout isn't a tty, which includes every test). */
@@ -245,6 +260,7 @@ export function renderData(info: DataInfo): string {
   const rows = [
     ["home", info.home, ""],
     ["data ①", info.data, human(info.sizes.data)],
+    ...(info.dbPath ? [["database ①", info.dbPath, ""]] : []),
     ["logs ②", info.logs, human(info.sizes.logs)],
     ["cache ②", info.cache, human(info.sizes.cache)],
     ["app ②b", info.app, human(info.sizes.app)],
@@ -371,9 +387,26 @@ export async function cmdBackup(
       if (!(e instanceof Deno.errors.NotFound)) throw e;
     }
     let files: number;
+    /** Where the database came from when `dbPath` keeps it outside data/
+     *  (the boot records it in meta.json); its files copied, by name. */
+    let dbPath: string | undefined;
+    let dbFiles: string[] = [];
     try {
       markIncomplete(partial, "am backup");
       files = await copyTree(d.data, partial, hold?.interrupted, hold?.abandon);
+      // The copied meta.json — the same bytes the archive carries — says
+      // whether the database lives outside data/. Same rules as data/: the
+      // app is stopped and held (or --force accepted a live writer).
+      const meta = readArchiveMeta(partial);
+      if (meta && meta !== "corrupt" && typeof meta.dbPath === "string") {
+        dbPath = meta.dbPath;
+        dbFiles = await copyDbFiles(
+          dbPath,
+          join(partial, DBPATH_DIR),
+          hold?.abandon,
+        );
+        files += dbFiles.length;
+      }
       // A signal during the LAST file is seen here, before the name is given:
       // an interrupted backup never leaves a `<dest>` (exit 130/143).
       const sig = hold?.interrupted() ?? null;
@@ -390,12 +423,49 @@ export async function cmdBackup(
       );
     }
     const bytes = dirSize(dest);
+    // A backup with no state database used to exit 0 silently: an app run
+    // with `dbPath` keeps it outside data/, and restored, it changed nothing.
+    // Now the boot records that path and it is copied above; what is left is
+    // an app booted by an older aio (no record) or one with persistence off.
+    let hasDb: boolean;
+    try {
+      hasDb = Deno.statSync(join(dest, "state.db")).isFile;
+    } catch {
+      hasDb = false; // aio-ok: absent is the answer
+    }
+    if (dbPath !== undefined && !dbFiles.includes(basename(dbPath))) {
+      sayErr(
+        `am: WARNING: this backup holds NO state database — the app's last ` +
+          `boot put it at ${dbPath} (its \`dbPath\`), and there is no file ` +
+          `there. (An app with persistence off has none to copy.)`,
+      );
+    } else if (dbPath === undefined && !hasDb) {
+      sayErr(
+        `am: WARNING: this backup holds NO state.db — ${d.data} has none. ` +
+          `An app run with \`dbPath\` keeps its state database at that path ` +
+          `(beside it: <dbPath>-wal and <dbPath>.journal), and this app's ` +
+          `meta.json does not record one (its last boot was an older aio): ` +
+          `boot it once with this aio and back up again, or stop it and copy ` +
+          `those files yourself. (An app with persistence off has none to ` +
+          `copy.)`,
+      );
+    }
     out(
       mode === "pretty"
-        ? `backed up ${appId}: ${files} files, ${human(bytes)} → ${dest}\n` +
-          `  restore with: am restore ${dest} --app=${appId}` +
+        ? `backed up ${appId}: ${files} files, ${human(bytes)} → ${dest}` +
+          (dbPath !== undefined && dbFiles.length > 0
+            ? `\n  database from ${dbPath}: ${dbFiles.join(", ")}`
+            : "") +
+          `\n  restore with: am restore ${dest} --app=${appId}` +
           (pid === null ? "" : `\n  NOTE: taken while the app was running`)
-        : { appId, dest, files, bytes, tornRisk: pid !== null },
+        : {
+          appId,
+          dest,
+          files,
+          bytes,
+          tornRisk: pid !== null,
+          ...(dbPath !== undefined ? { dbPath, dbFiles } : {}),
+        },
       mode,
     );
   }
@@ -539,6 +609,35 @@ function failCopy(
   fail(msg, mode);
 }
 
+/** Inside an archive: the files of a database `dbPath` kept outside data/,
+ *  by their own names. Never part of a restored data/. */
+export const DBPATH_DIR = ".am-dbpath";
+
+/** Copy the database at `dbPath` and the files beside it that belong to it
+ *  (`DB_FILE_SUFFIXES`) into `to`; the names copied (none: no database). */
+async function copyDbFiles(
+  dbPath: string,
+  to: string,
+  abandon?: Promise<never>,
+): Promise<string[]> {
+  const names: string[] = [];
+  for (const sfx of DB_FILE_SUFFIXES) {
+    const from = dbPath + sfx;
+    try {
+      if (!Deno.statSync(from).isFile) continue;
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) continue;
+      throw e; // there, but unreadable: never a quietly smaller backup
+    }
+    if (names.length === 0) await Deno.mkdir(to, { recursive: true });
+    const copy = Deno.copyFile(from, join(to, basename(from)));
+    if (abandon) await Promise.race([copy, abandon]);
+    else await copy;
+    names.push(basename(from));
+  }
+  return names;
+}
+
 // ── am restore ─────────────────────────────────────────────
 
 /** Read an archive's `meta.json`: the meta, `null` when the file is absent (a
@@ -680,6 +779,69 @@ export async function cmdRestore(
     }
   }
 
+  // The database a `dbPath` kept OUTSIDE data/ (see cmdBackup): restoring
+  // data/ alone used to say "restored" while the app went on booting on the
+  // database it had — so where it goes back is decided here, before anything
+  // moves: to the path it was backed up from, which the archive records.
+  // Absolute only: the path comes from a file, and a relative one would
+  // land wherever `am` happens to run.
+  const metaOf = (m: AppMeta | null | "corrupt") =>
+    m && m !== "corrupt" && typeof m.dbPath === "string" &&
+      isAbsolute(m.dbPath)
+      ? m.dbPath
+      : undefined;
+  const archDb = metaOf(meta);
+  const liveMeta = readArchiveMeta(d.data);
+  const liveDb = metaOf(liveMeta);
+  let hasDbFiles = false;
+  try {
+    hasDbFiles = Deno.statSync(join(src, DBPATH_DIR)).isDirectory;
+  } catch { /* aio-ok: absent — the archive holds no outside database */ }
+  if (hasDbFiles && archDb === undefined) {
+    outError(
+      `${src} holds a database from outside data/ (${DBPATH_DIR}/), but its ` +
+        `meta.json does not say where it came from — where it goes back is ` +
+        `not known. Nothing was touched.` +
+        (force ? `\n  (--force does not apply: there is no path to use)` : ""),
+      mode,
+    );
+    Deno.exit(1);
+  }
+  if (
+    archDb !== undefined && liveDb !== undefined &&
+    resolve(archDb) !== resolve(liveDb)
+  ) {
+    outError(
+      `${basename(src)} holds the database of \`dbPath\` ${archDb}, but ` +
+        `"${appId}" last booted on ${liveDb} — restored, the app would go on ` +
+        `reading ${liveDb} and the restore would change nothing it sees. ` +
+        `Nothing was touched.\n  fix: boot it with dbPath ${archDb} (once is ` +
+        `enough to record it), stop it, and restore again` +
+        (force
+          ? `\n  (--force does not apply: the app would not read it)`
+          : ""),
+      mode,
+    );
+    Deno.exit(1);
+  }
+  if (!hasDbFiles && liveDb !== undefined) {
+    sayErr(
+      `am: WARNING: ${basename(src)} holds no database from outside data/, ` +
+        `and "${appId}" keeps its state database at ${liveDb} (its \`dbPath\`) ` +
+        `— this restore replaces ${d.data} only; the app's state stays ` +
+        `whatever ${liveDb} holds.`,
+    );
+  }
+  const dbTarget = hasDbFiles ? archDb : undefined;
+  if (dbTarget !== undefined && liveMeta !== null && liveDb === undefined) {
+    sayErr(
+      `am: WARNING: the database goes back to ${dbTarget} (the \`dbPath\` ` +
+        `it was backed up from), but "${appId}" last booted without one ` +
+        `recorded — run without that \`dbPath\`, it reads ${d.data} and ` +
+        `not the restored database.`,
+    );
+  }
+
   // HOLD the app's lock from the copy to the swap: "stopped" was checked
   // once above, and an app started mid-restore wrote into the data that was
   // then moved aside — the restore reported success and those writes were
@@ -736,6 +898,10 @@ export async function cmdRestore(
       const sig = hold.interrupted();
       if (sig) throw new Interrupted(sig);
       Deno.removeSync(join(staging, INCOMPLETE_MARK));
+      // Never part of data/ — its files go back to their own place below.
+      if (hasDbFiles) {
+        Deno.removeSync(join(staging, DBPATH_DIR), { recursive: true });
+      }
     } catch (e) {
       removeTracked(staging);
       failCopy(
@@ -744,6 +910,40 @@ export async function cmdRestore(
           `touched: ${e instanceof Error ? e.message : String(e)}`,
         mode,
       );
+    }
+    // The outside database, staged BESIDE its place (one filesystem, so the
+    // swap is renames): a directory that cannot take it refuses here, while
+    // nothing has moved yet.
+    let dbStage: string | null = null;
+    if (dbTarget !== undefined) {
+      try {
+        Deno.mkdirSync(dirname(dbTarget), { recursive: true });
+        dbStage = freeSibling(`${dbTarget}.am-restore-${at}`);
+        const got = await copyDbFiles(
+          join(src, DBPATH_DIR, basename(dbTarget)),
+          dbStage,
+          hold.abandon,
+        );
+        if (got.length === 0) {
+          throw new Error(
+            `${join(src, DBPATH_DIR)} holds no ${basename(dbTarget)} files`,
+          );
+        }
+        const sig = hold.interrupted();
+        if (sig) throw new Interrupted(sig);
+      } catch (e) {
+        removeTracked(staging);
+        if (dbStage !== null) removeTracked(dbStage);
+        failCopy(
+          e,
+          `restore of ${appId} refused — the backup's database goes back to ` +
+            `${dbTarget} (the \`dbPath\` it was backed up from), and ` +
+            `${dirname(dbTarget)} cannot take it: ` +
+            `${e instanceof Error ? e.message : String(e)}. Nothing was ` +
+            `touched (${d.data} neither).`,
+          mode,
+        );
+      }
     }
     // Move the current data aside rather than deleting: a restore is exactly when
     // the user is already having a bad day, and "wrong archive" must be recoverable.
@@ -782,6 +982,7 @@ export async function cmdRestore(
           // aio-ok: re-created by the app's next boot (ensureAppDirs)
         }
       }
+      if (dbStage !== null) removeTracked(dbStage);
       fail(
         `restore of ${appId} failed while swapping the copy into place: ` +
           `${e instanceof Error ? e.message : String(e)}\n` +
@@ -796,14 +997,62 @@ export async function cmdRestore(
         mode,
       );
     }
+    // data/ is in place; now the outside database: the files there now go
+    // aside (never deleted), the backup's take their names.
+    let dbAside: string | null = null;
+    if (dbTarget !== undefined && dbStage !== null) {
+      try {
+        for (const sfx of DB_FILE_SUFFIXES) {
+          const cur = dbTarget + sfx;
+          try {
+            Deno.lstatSync(cur);
+          } catch (e) {
+            if (e instanceof Deno.errors.NotFound) continue;
+            throw e;
+          }
+          if (dbAside === null) {
+            const to = freeSibling(`${dbTarget}.am-replaced-${at}`);
+            Deno.mkdirSync(to);
+            dbAside = to;
+          }
+          moveFileSync(cur, join(dbAside, basename(cur)));
+        }
+        for (const e of Deno.readDirSync(dbStage)) {
+          moveFileSync(join(dbStage, e.name), join(dirname(dbTarget), e.name));
+        }
+        Deno.removeSync(dbStage);
+      } catch (e) {
+        fail(
+          `restore of ${appId}: ${d.data} was restored, but putting the ` +
+            `database back at ${dbTarget} failed: ` +
+            `${e instanceof Error ? e.message : String(e)}\n` +
+            `  the backup's database files are in ${dbStage}\n` +
+            (dbAside !== null
+              ? `  the previous ones are in ${dbAside}\n`
+              : "") +
+            `  move them into place by hand before starting the app` +
+            (aside ? `\n  previous data kept at ${aside}` : ""),
+          mode,
+        );
+      }
+    }
     out(
       mode === "pretty"
         ? `restored ${appId}: ${files} files → ${d.data}` +
+          (dbTarget !== undefined ? `\n  database → ${dbTarget}` : "") +
+          (dbAside ? `\n  previous database kept at ${dbAside}` : "") +
           (meta && meta !== "corrupt"
             ? `\n  archive: aio ${meta.aio}, saved ${meta.updatedAt}`
             : "") +
           (aside ? `\n  previous data kept at ${aside}` : "")
-        : { appId, src, files, replaced: aside ?? undefined },
+        : {
+          appId,
+          src,
+          files,
+          replaced: aside ?? undefined,
+          dbPath: dbTarget,
+          dbReplaced: dbAside ?? undefined,
+        },
       mode,
     );
   }

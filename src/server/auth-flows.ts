@@ -486,21 +486,39 @@ async function authRoute(
         }
         return refusalOf(e);
       }
+      // The account EXISTS now, so the reply must say so. A mail transport
+      // that threw turned a committed signup into `503`, and the retry met
+      // `409 user_exists`. The failure is logged and answered honestly
+      // (`verificationSent: false`); verify/resend is the way back to a token.
+      // Only `requireVerified` reports `verificationSent`, so only it waits
+      // for the transport; otherwise a hanging `sendMail` would hold every
+      // signup's response, so the mail goes off the response path.
+      let sent = true;
       if (email && cfg.sendMail) {
         const token = cfg.users.issueToken("verify", id, VERIFY_TTL_MS);
-        await cfg.sendMail({
-          to: email,
-          subject: `Verify your ${cfg.appTitle} account`,
-          text:
-            `Your verification token: ${token}\n\nPOST it to /__aio/auth/verify to activate the account.`,
-        });
+        const sendMail = cfg.sendMail;
+        const mailed = (async () =>
+          await sendMail({
+            to: email,
+            subject: `Verify your ${cfg.appTitle} account`,
+            text:
+              `Your verification token: ${token}\n\nPOST it to /__aio/auth/verify to activate the account.`,
+          }))().then(() => true, (e) => {
+            log.error(
+              "auth",
+              `signup verification mail for id=${id} failed — ${e}; the ` +
+                `account exists, POST /__aio/auth/verify/resend sends a new one`,
+            );
+            return false;
+          });
+        if (cfg.requireVerified) sent = await mailed;
       }
       // With verification REQUIRED there is no session until the email is
       // proven — otherwise signup logs straight in.
       if (cfg.requireVerified) {
         return json(201, {
           user: { id: user.id, role: user.role },
-          verificationSent: true,
+          verificationSent: sent,
         });
       }
       return issueSession(user, 201);

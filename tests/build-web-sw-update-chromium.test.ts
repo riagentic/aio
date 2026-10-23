@@ -175,6 +175,27 @@ Deno.test({
           ),
       );
       assertEquals(await cached("./app.js"), "A");
+      // CacheStorage is per ORIGIN: another app whose id starts with this
+      // one's ("t-pro"), and this app deployed at another path, keep their
+      // offline caches through this one's update (a bare `aio-t-` prefix
+      // match deleted both: offline, that app was dead). A name from before
+      // the scope was in it ("aio-t-0ld") is this app's own: dropped.
+      const scope = `http://127.0.0.1:${port}/`;
+      const others = [
+        "aio-t-pro-a@http://127.0.0.1:1/pro/",
+        "aio-t-pro-a",
+        "aio-t-a@http://127.0.0.1:1/staging/",
+      ];
+      for (const k of [...others, "aio-t-0ld"]) {
+        await js(`caches.open(${JSON.stringify(k)}).then(() => 1)`);
+      }
+      // A pre-scope name is judged by what it HOLDS: one holding another
+      // deployment's files is that one's, kept for its own worker's update.
+      others.push("aio-t-0th3r");
+      await js(
+        `caches.open("aio-t-0th3r").then((c) => c.put(` +
+          `"http://127.0.0.1:1/staging/app.js", new Response("x"))).then(() => 1)`,
+      );
 
       const update = () =>
         js(`navigator.serviceWorker.getRegistration().then((r) => r.update())`);
@@ -195,7 +216,9 @@ Deno.test({
       );
       assertEquals(
         await js<string | null>(
-          `caches.open("aio-t-b").then((c) => c.match("./app.js")).then((r) => r ? r.text() : null)`,
+          `caches.open(${
+            JSON.stringify(`aio-t-b@${scope}`)
+          }).then((c) => c.match("./app.js")).then((r) => r ? r.text() : null)`,
         ),
         null,
         "the edge's OLD bundle was precached as build B",
@@ -208,10 +231,10 @@ Deno.test({
       stale.clear();
       await update();
       await waitFor(
-        "build B's cache to be the only one",
+        "build B's cache to be this app's only one, the others' kept",
         async () =>
-          JSON.stringify(await js<string[]>(`caches.keys()`)) ===
-            `["aio-t-b"]`,
+          JSON.stringify((await js<string[]>(`caches.keys()`)).sort()) ===
+            JSON.stringify([...others, `aio-t-b@${scope}`].sort()),
       );
       assertEquals(await cached("./app.js"), "B", "the new build's bytes");
       assertEquals(await cached("./gone.js"), null, "a removed file is gone");

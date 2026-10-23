@@ -4,6 +4,7 @@
  */
 import { dirname, join, resolve } from "@std/path";
 import { assetMounts } from "./build-compile.ts";
+import { rootedMountUrls } from "./asset-urls.ts";
 import {
   isProtectedPath,
   isServerOnlySource,
@@ -349,10 +350,10 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     await Deno.copyFile(iconPath, join(mipmapDir, "ic_launcher.png"));
     console.log(`${OK} icon from ${iconPath}`);
   } else {
-    const label = appIconLabel(appTitle, binaryName);
+    const label = appIconLabel(appTitle, cfg.appId ?? binaryName);
     await Deno.writeFile(
       join(mipmapDir, "ic_launcher.png"),
-      await appIconPng(label, 192, binaryName),
+      await appIconPng(label, 192, cfg.hue ?? cfg.appId ?? binaryName),
     );
     console.log(`${OK} default icon for "${label}"`);
   }
@@ -1068,7 +1069,7 @@ export async function _writeLocalAssets(
   // BOTH the inert tokens (active) and the full look (disabled).
   const run = await _readRunOptions(cfg);
   const androidHtml = androidLocalHTML(appTitle ?? binaryName, hasCSS, {
-    themeName: binaryName,
+    themeName: cfg.hue ?? cfg.appId ?? binaryName,
     appVersion: cfg.version?.version,
     ...run.ui,
     head: (run.ui.head ?? "") + run.script + oldEngineNotice("apk"),
@@ -1103,7 +1104,40 @@ export async function _packAssetMounts(
   into = "the APK",
 ): Promise<void> {
   const taken = new Set(["index.html", BUNDLE_JS, APP_STYLE]);
-  for (const m of assetMounts((await readDenoJson(root))?.config, root)) {
+  const mounts = assetMounts((await readDenoJson(root))?.config, root);
+  // The page sits beside the mounts here, not at the host's root: a URL the
+  // bundle names as "/media/…" is a 404 in this artifact alone.
+  const page: string[] = [];
+  for (const f of [BUNDLE_JS, APP_STYLE]) {
+    try {
+      page.push(await Deno.readTextFile(join(assetsDir, f)));
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e; // no stylesheet
+    }
+  }
+  const rooted = rootedMountUrls(
+    page.join("\n"),
+    mounts.map((m) => "/" + m.prefix.replace(/^\/+|\/+$/g, "")),
+  );
+  if (rooted.length) {
+    const named = `${rooted.slice(0, 3).map((u) => `"${u}"`).join(", ")}${
+      rooted.length > 3 ? ` and ${rooted.length - 3} more` : ""
+    }`;
+    const fix = `name it relative to the page — "${rooted[0]!.slice(1)}"`;
+    // A web build at a domain's root DOES answer "/media/…": there it is a
+    // condition on where it is deployed, said as one — not a 404 claimed.
+    summaryNote(
+      into === "the APK"
+        ? `the APK: the page asks for ${named} from the host's root — a ` +
+          `server answers that, but an APK's page is /assets/index.html, so ` +
+          `there it is a 404. Fix: ${fix}`
+        : `${into}: the page asks for ${named} from the host's root — that ` +
+          `works only when it is deployed at a domain's root; under a ` +
+          `sub-path (user.github.io/repo/) it is a 404. To deploy anywhere — ` +
+          `Fix: ${fix}`,
+    );
+  }
+  for (const m of mounts) {
     const at = m.prefix.replace(/^\/+|\/+$/g, "");
     // aio-ok: path-split — a URL mount prefix, not an OS path
     const segs = at.split("/");

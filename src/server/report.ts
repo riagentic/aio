@@ -182,6 +182,11 @@ export type _ReportSourcesInternal = ReportSources & {
 /** Which declaration a screen reads — only the wording of its notes differs;
  *  the walker is the same. */
 type _Gate = "visible" | "persist";
+/** One declaration the timeline is screened through (`visible`, `persist`). */
+type _Screen = {
+  filters: Record<string, CellFieldFilter>;
+  wildcard: boolean;
+};
 
 /** The head of a dot path — the top-level state key it starts at. */
 const key0 = (path: string): string => path.split(".")[0]!;
@@ -254,6 +259,7 @@ function _applyDeclaredVisibility(
     const kept = applyCellFieldFilter(
       filter,
       slice as Record<string, unknown>,
+      { wildcard: gate === "persist" },
     );
     const keys = Object.keys(slice as object);
     if (kept === undefined || (Object.keys(kept).length === 0 && keys.length)) {
@@ -280,7 +286,11 @@ function _applyDeclaredVisibility(
     }
     if (typeof filter === "object" && "exclude" in filter) {
       for (const path of filter.exclude) {
-        if (path.includes(".") && Object.hasOwn(kept, key0(path))) {
+        const head = key0(path);
+        if (
+          path.includes(".") &&
+          (Object.hasOwn(kept, head) || (gate === "persist" && head === "*"))
+        ) {
           dropped.push(`${cell}.${path}`);
         }
       }
@@ -338,7 +348,7 @@ function _applyDeclaredVisibility(
  *  {@link _withholdAsyncCallPayloads}. */
 function _screenTimelineEntry(
   e: TimelineEntry,
-  screens: readonly Record<string, CellFieldFilter>[],
+  screens: readonly _Screen[],
   anyHidden: boolean,
 ): {
   entry: TimelineEntry;
@@ -358,8 +368,8 @@ function _screenTimelineEntry(
     // Every declaration in turn (`visible`, then `persist`): a value either
     // one keeps back is kept back.
     let cur = v;
-    for (const filters of screens) {
-      const seen = visibleValueAt(filters[cell], segs, cur);
+    for (const { filters, wildcard } of screens) {
+      const seen = visibleValueAt(filters[cell], segs, cur, { wildcard });
       if (seen.hidden) return REDACTED;
       cur = seen.value;
     }
@@ -436,12 +446,12 @@ function _callIdOf(e: TimelineEntry): string | undefined {
 function _withholdAsyncCallPayloads(
   entries: TimelineEntry[],
   touchedCalls: ReadonlySet<string>,
-  screens: readonly Record<string, CellFieldFilter>[],
+  screens: readonly _Screen[],
 ): { entries: TimelineEntry[]; payloads: number } {
   const hiddenCell = (type: string): boolean => {
     const at = type.indexOf(":");
     return at > 0 &&
-      screens.some((f) => _hidesAnything(f[type.slice(0, at)]));
+      screens.some((s) => _hidesAnything(s.filters[type.slice(0, at)]));
   };
   let payloads = 0;
   const out = entries.map((e) => {
@@ -522,9 +532,13 @@ export async function buildReport(
   const filters = _filtersOf(src);
   // The disk gate beside it — see `_ReportSourcesInternal`.
   const persistFilters = src._persistFilters;
-  const screens = [filters, persistFilters].filter(
-    (f): f is Record<string, CellFieldFilter> =>
-      f !== undefined && Object.keys(f).length > 0,
+  // A persist path's `*` segment names any key (`wildcard`), exactly as the
+  // store's own write reads it; a `visible` one is literal.
+  const screens: _Screen[] = [
+    { filters, wildcard: false },
+    { filters: persistFilters, wildcard: true },
+  ].filter((s): s is _Screen =>
+    s.filters !== undefined && Object.keys(s.filters).length > 0
   );
   const truncated: string[] = [];
 
@@ -618,8 +632,8 @@ export async function buildReport(
     // `_screenTimelineEntry`. Absent ⇒ the state note above already says
     // nothing was screened.
     if (screens.length && kept.length) {
-      const anyHidden = screens.some((f) =>
-        Object.values(f).some(_hidesAnything)
+      const anyHidden = screens.some((s) =>
+        Object.values(s.filters).some(_hidesAnything)
       );
       let leaves = 0, payloads = 0;
       const touchedCalls = new Set<string>();

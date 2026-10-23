@@ -22,13 +22,13 @@ import {
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out, sayErr } from "./am-output.ts";
 import { dirLinkType, reservedAppNameError } from "./am-utils.ts";
-import { resolve } from "@std/path";
+import { join, resolve } from "@std/path";
 import { colorEnabled } from "../diagnostics/color.ts";
 import { styleWith } from "../diagnostics/fmt.ts";
 import { PATH_PIN_PREFIX } from "../server/framework-pin.ts";
 import { LOCAL_PIN_FILE } from "../server/deno-json.ts";
 import { appHome, type AppMeta } from "../server/app-dirs.ts";
-import { resolveAppId } from "../server/single-instance-lock.ts";
+import { resolveAppId, slugify } from "../server/single-instance-lock.ts";
 import {
   ensureVersion,
   gitEnvFor,
@@ -40,6 +40,7 @@ import {
 import { type Template, TEMPLATES } from "./am-help-text.ts";
 import { agentsMdScaffold, CLAUDE_MD_SCAFFOLD } from "./am-agent-text.ts";
 import { DEFAULT_ELECTRON_VERSION } from "../build/electron-runtime.ts";
+import { PLATFORMS } from "../build/platforms.ts";
 
 /** The scaffold's `electron` import spec — the framework's ONE Electron
  *  version, pinned EXACTLY.
@@ -932,7 +933,7 @@ export default function App(): JSX.Element {
       <h1>Assets</h1>
       <div class="card stack">
         <p>
-          This text comes from <code>media/hello.txt</code>, served at
+          This text comes from <code>media/hello.txt</code>, served at{" "}
           <code>/media/hello.txt</code> by the <code>assets</code> mount in
           deno.json.
         </p>
@@ -1006,6 +1007,38 @@ function templateSources(
         test: COUNTER_TEST,
       };
   }
+}
+
+/** The scaffold directory a `<name>` app's compiled binary would land on,
+ *  or null. A browser/cli/server build compiles to
+ *  `<project>/<slug(title)><exe>` (build-compile.ts), so an app named like one
+ *  of its own top-level directories (`media` with --template=assets, `src`,
+ *  `tests`) scaffolds fine and then can never compile. Checked for EVERY
+ *  platform, not the host's: a project created on Windows (`media.exe`) is
+ *  built on Linux/macOS too (CI, a teammate), where the bare `media` lands on
+ *  the directory. Electron compiles into its staging dir, android builds an
+ *  APK — those never collide. */
+export function shadowedAppDir(
+  opts: Pick<CreateOpts, "template" | "target" | "jsr" | "css"> & {
+    name: string;
+  },
+): string | null {
+  if (!["browser", "cli", "server"].includes(opts.target)) return null;
+  const topDirs = new Set(["dep", "dist", "node_modules"]);
+  for (
+    const rel of Object.keys(
+      scaffold(opts.name, opts.template, !opts.jsr, opts.target, opts.css),
+    )
+  ) {
+    // aio-ok: path-split — scaffold keys are "/"-joined relative keys, never OS paths
+    if (rel.includes("/")) topDirs.add(rel.split("/")[0]!);
+  }
+  // A host build keeps the bare name (+ .exe on Windows): artifactName().
+  for (const p of Object.values(PLATFORMS)) {
+    const bin = slugify(opts.name) + p.exeExt;
+    if (topDirs.has(bin)) return bin;
+  }
+  return null;
 }
 
 /** Why `--css=tailwind` has no UI for `template`, or null when it is allowed.
@@ -1420,6 +1453,18 @@ export async function cmdCreate(
     );
   }
 
+  {
+    const shadowed = shadowedAppDir(opts as CreateOpts & { name: string });
+    if (shadowed) {
+      fail(
+        `'${opts.name}' names one of the app's own directories ` +
+          `(${shadowed}/) — its build would write the ` +
+          `"${shadowed}" binary over it.\n  fix: pick another name`,
+        mode,
+      );
+    }
+  }
+
   const dir = resolve(Deno.cwd(), opts.name);
   // Refuse a non-empty target — never clobber existing work silently. The
   // refusal is issued OUTSIDE the try: `fail()` does not return, and the
@@ -1449,8 +1494,25 @@ export async function cmdCreate(
     );
   }
   if (occupied) {
+    // `--force` REPLACES the template's files — an agent that copy-pasted the
+    // bare "or pass --force" scaffolded over its own src/cell.ts. Name what
+    // the flag would overwrite, so taking it is a decision, not a reflex.
+    const clobbered = Object.keys(
+      scaffold(opts.name, opts.template, !opts.jsr, opts.target, opts.css),
+    ).filter((rel) => {
+      try {
+        Deno.lstatSync(join(dir, rel));
+        return true;
+      } catch {
+        return false; // aio-ok: absent — nothing of the user's to overwrite
+      }
+    });
     fail(
-      `'${opts.name}' already exists and is not empty — pick another name or pass --force`,
+      `'${opts.name}' already exists and is not empty — pick another name` +
+        (clobbered.length
+          ? `, or pass --force to scaffold over it, which OVERWRITES ` +
+            `${clobbered.join(", ")}`
+          : ` or pass --force (it holds none of the template's files)`),
       mode,
     );
   }
@@ -2184,6 +2246,9 @@ const CLI_APP =
 // — so \`todo serve\` on a free port just works. \`--url\` overrides (a remote
 // server, or one behind a tunnel).
 //
+// \`todo\` above is THIS tool's name: its deno.json title — the name the help,
+// the refusals, and the compiled binary carry.
+//
 // Dev: deno task dev (= serve)   Build: deno task compile (a \`cli\` binary)
 import { aio } from "aio";
 import { connectCli } from "aio/server";
@@ -2214,21 +2279,21 @@ if (Deno.args[0] === "serve") {
   });
 } else {
   const a = args({
-    name: "todo",
+    name: APP_ID,
     help: "A todo list you can script: a server owns it, commands talk to it.",
     version: "0.1.0",
     commands: {
       serve: "run the server (takes aio's flags: --port, --expose, …)",
       list: "show the list",
-      add: "add a todo: todo add <text...>",
-      done: "mark one done: todo done <id>",
+      add: "add a todo: add <text...>",
+      done: "mark one done: done <id>",
       clear: "drop every done todo",
     },
     rest: "arg",
     flags: {
       url: {
         type: "string",
-        help: "the server to talk to (default: the running \`todo serve\`)",
+        help: "the server to talk to (default: the running \`serve\`)",
       },
       watch: { type: "boolean", short: "w", help: "list: redraw on change" },
       json: { type: "boolean", help: "machine-readable output" },
@@ -2240,11 +2305,11 @@ if (Deno.args[0] === "serve") {
   // \`--json\` like every other refusal (\`args()\` does the same for typos).
   const usage = (msg: string) => fail(msg, { code: EXIT.usage, json: a.json });
   if (a.command === "add" && !a.rest.join(" ").trim()) {
-    usage("todo add <text...>");
+    usage(\`\${APP_ID} add <text...>\`);
   }
   const doneId = Number(a.rest[0]);
   if (a.command === "done" && !Number.isInteger(doneId)) {
-    usage("todo done <id>");
+    usage(\`\${APP_ID} done <id>\`);
   }
 
   // WHERE the server is. \`serve\` binds a FREE port unless one is named, so a
@@ -2255,13 +2320,15 @@ if (Deno.args[0] === "serve") {
   const url = a.flags.url ??
     (live ? \`ws://localhost:\${live.port}/ws\` : undefined);
   if (!url) {
-    fail("no todo server running — start one: todo serve", { json: a.json });
+    fail(\`no \${APP_ID} server running — start one: \${APP_ID} serve\`, {
+      json: a.json,
+    });
   }
 
   const app = connectCli(url!, { readyTimeoutMs: 3000 });
   app.bind(todos);
   await app.ready.catch(() =>
-    fail(\`no server at \${url} — start one: todo serve\`, {
+    fail(\`no server at \${url} — start one: \${APP_ID} serve\`, {
       json: a.json,
     })
   );
@@ -2400,7 +2467,14 @@ export default function App(): JSX.Element {
             >
               {t.text}
             </span>
-            <button type="button" class="ghost" onClick={() => todo.remove(t.id)}>×</button>
+            <button
+              type="button"
+              class="ghost"
+              onClick={() => todo.remove(t.id)}
+              aria-label={"Remove " + t.text}
+            >
+              ×
+            </button>
           </li>
         ))}
       </ul>

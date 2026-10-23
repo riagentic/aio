@@ -130,6 +130,37 @@ function applyServerFrame<S>(
 /** Minimum gap between `resync` asks of a client that is out of sync. */
 const RESYNC_MIN_MS = 2_000;
 
+/** The `offline` option of the internal `_connectCli`/`_connectCliUDS`. */
+export type CliOffline = "queue" | "fail";
+
+/** What a call the server asked to re-send gets, said once per client. */
+const HELD = (failOffline: boolean): string =>
+  failOffline
+    ? `held and re-sent on this connection (offline: "fail" — it fails if ` +
+      `the connection drops first)`
+    : "held and re-sent, not failed";
+
+/** The rejection of a call made while disconnected under `offline: "fail"`. */
+function offlineRefusal(what: string): Error {
+  return new Error(
+    `not connected to ${what} — the call was NOT sent and will not be sent ` +
+      `later (offline: "fail")`,
+  );
+}
+
+/** The wire action of a call by name — the frame a bound method sends. */
+function callAction(cell: string, method: string, args: unknown[]): Msg {
+  if (
+    typeof cell !== "string" || !cell || typeof method !== "string" || !method
+  ) {
+    throw new TypeError(
+      `call(cell, method, ...args): cell and method must be non-empty ` +
+        `strings — got ${JSON.stringify(cell)}, ${JSON.stringify(method)}`,
+    );
+  }
+  return { type: `${cell}:${method}`, payload: { args } } as Msg;
+}
+
 /** Reactive WS client handle — subscribe to state, send actions, close when done */
 export type CliApp<S> = {
   /** Current state (null until first message from server) */
@@ -153,6 +184,82 @@ export type CliApp<S> = {
   /** Resolves when first state is received */
   readonly ready: Promise<S>;
 };
+
+/** The connection `peer()` drives: a `CliApp` plus a call BY NAME — no cell
+ *  definition, no source of the other app. `call("todo", "add", "milk")`
+ *  sends exactly the frame a bound `todo.add("milk")` sends (same ack, same
+ *  return value, same `access` gate on the server); an unknown cell or method
+ *  rejects with the server's reason. Internal: the public door is `peer()`. */
+export type CliLink<S> = CliApp<S> & {
+  call(cell: string, method: string, ...args: unknown[]): Promise<unknown>;
+  /** `call`, asking for the method's `emitChunk`s: each reaches `onChunk`,
+   *  in order, before the returned promise settles with the result. */
+  stream(
+    cell: string,
+    method: string,
+    args: unknown[],
+    onChunk: (value: unknown) => void,
+  ): Promise<unknown>;
+  /** Fires each time "this connection carries the app's state" changes: true
+   *  when a connection delivers state, false when it drops (never for the
+   *  caller's own `close()`). Returns unsubscribe. */
+  onStatus(fn: (connected: boolean) => void): () => void;
+};
+
+/** Where each streamed call's chunks go, by `cid` — until the call settles. */
+type ChunkRoutes = Map<string, (value: unknown) => void>;
+
+function _chunkTo(
+  routes: ChunkRoutes,
+  cid: string,
+  onChunk: (value: unknown) => void,
+  settled: Promise<unknown>,
+): void {
+  routes.set(cid, onChunk);
+  const off = () => void routes.delete(cid);
+  settled.then(off, off);
+}
+
+/** Deliver one `chunk` frame. A listener that throws is reported, and the
+ *  call goes on — its result still arrives. */
+function _routeChunk(routes: ChunkRoutes, d: unknown): void {
+  const { cid, value } = (d ?? {}) as { cid?: unknown; value?: unknown };
+  if (typeof cid !== "string") return;
+  try {
+    routes.get(cid)?.(value);
+  } catch (e) {
+    log.warn("cli", `a stream's onChunk threw: ${e}`);
+  }
+}
+
+/** "This connection carries the app's state": true when a socket delivers its
+ *  first state, false when that socket closes — told to listeners only when it
+ *  changes. A listener that throws is reported and does not stop the transport
+ *  or the others. The caller's own `close()` tells nobody (cleared first). */
+function statusEmitter() {
+  const fns = new Set<(up: boolean) => void>();
+  let last = false;
+  return {
+    on(fn: (up: boolean) => void): () => void {
+      fns.add(fn);
+      return () => void fns.delete(fn);
+    },
+    set(now: boolean): void {
+      if (now === last) return;
+      last = now;
+      for (const fn of [...fns]) {
+        try {
+          fn(now);
+        } catch (e) {
+          log.warn("cli", `an onStatus listener threw: ${e}`);
+        }
+      }
+    },
+    clear(): void {
+      fns.clear();
+    },
+  };
+}
 
 /** One call's ceiling, decided once per client: past the timer ceiling it
  *  would reject in ~1 ms, and NaN (`Number(env)` unset) did exactly that to
@@ -405,7 +512,25 @@ export function connectCli<S>(
     readyTimeoutMs?: number;
   },
 ): CliApp<S> {
+  return _connectCli<S>(url, opts);
+}
+
+/** `connectCli` with the options only `peer()` sets. @internal */
+export function _connectCli<S>(
+  url: string,
+  opts?: Parameters<typeof connectCli>[1] & {
+    /** Extra handshake headers (`peer()`'s identity proof), resolved fresh
+     *  before EVERY (re)connect — a proof is bound to the boot it is sent to. */
+    headers?: () => Promise<Record<string, string>>;
+    /** What a call made while disconnected does. `"queue"` (default): it
+     *  waits in the offline queue and is sent on reconnect — right for user
+     *  intent. `"fail"`: it rejects AT ONCE and is never sent later — right
+     *  for a service call whose answer is only worth having now. */
+    offline?: CliOffline;
+  },
+): CliLink<S> {
   assertCliUrl(url);
+  const _failOffline = opts?.offline === "fail";
   let state: S | null = null;
   let ws: WebSocket | null = null;
   let closed = false;
@@ -419,6 +544,8 @@ export function connectCli<S>(
    *  the copy it held is gone and no patch applies until a full state lands.
    *  See the `diag` case. */
   let _outOfSync = false;
+  const _status = statusEmitter();
+  const _chunks: ChunkRoutes = new Map();
   /** Last `resync` asked while out of sync, and the one queued behind it. */
   let _resyncAt = 0;
   let _resyncTimer: ReturnType<typeof setTimeout> | undefined;
@@ -585,6 +712,11 @@ export function connectCli<S>(
   function _requeuePaced(entries: CliOutFrame[]): number {
     const actions = entries.flatMap((e) => e.action ? [e.action] : []);
     if (actions.length === 0) return 0;
+    // `offline: "fail"`: never sent later — each caller is told now.
+    if (_failOffline) {
+      for (const a of actions) _refuseOffline(a, true);
+      return 0;
+    }
     // Ahead of everything queued after them, and OUTSIDE the cap: each was
     // already accepted (see `_pushDroppingOldest`'s `accepted`), and pushing
     // them back through the cap evicted the oldest of them.
@@ -632,8 +764,10 @@ export function connectCli<S>(
         // knob sends the reader to raise a limit that was never hit.
         `the server dropped a call and asked for a re-send in ${
           Math.round(retryAfterMs)
-        }ms (${d.error ?? "over a per-second budget"}) — held and re-sent, ` +
-          `not failed. If this repeats, raise the budget it names in ` +
+        }ms (${d.error ?? "over a per-second budget"}) — ${
+          HELD(_failOffline)
+        }` +
+          `. If this repeats, raise the budget it names in ` +
           `aio.run({ wsLimits: { messagesPerSec, bytesPerSec } }) or batch ` +
           `the calls. Further re-sends are not repeated here.`,
       );
@@ -680,10 +814,38 @@ export function connectCli<S>(
         // that matters to this action. Queue it like the no-socket path.
       }
     }
-    _pushDroppingOldest(queue, _pending, "offline", action, _accepted);
     // Waiting for `cfg` on an open socket is not "offline".
+    if (_failOffline && !(open && wireHeld)) {
+      _refuseOffline(action);
+      return { written: false, queued: false };
+    }
+    _pushDroppingOldest(queue, _pending, "offline", action, _accepted);
     if (!(open && wireHeld)) _noteQueued();
     return { written: false, queued: true };
+  }
+
+  /** Whether a call written now leaves on an open socket. */
+  function _isUp(): boolean {
+    return !!pacer && !!ws && ws.readyState === WebSocket.OPEN;
+  }
+
+  /** `offline: "fail"`: settle an unsent call now — its caller rejects, a
+   *  fire-and-forget `send` throws. Never queued, so never sent later. */
+  function _refuseOffline(
+    action: { type: string; payload?: unknown },
+    /** From a close/requeue path: a fire-and-forget action has no caller to
+     *  throw to there — throwing would abort the close handler. Dropped, said. */
+    inClose = false,
+  ): void {
+    const cid = (action as { cid?: string }).cid;
+    if (cid) return void _pending.reject(cid, offlineRefusal(url));
+    if (!inClose) throw offlineRefusal(url);
+    log.warn(
+      "cli",
+      `"${action.type}" (sent without awaiting) dropped — ${
+        offlineRefusal(url).message
+      }`,
+    );
   }
 
   /** Say — once per offline period — that actions are being held rather than
@@ -845,6 +1007,8 @@ export function connectCli<S>(
   function connect(): void {
     if (ws || closed || connecting) return;
     const t = opts?.token;
+    const h = opts?.headers;
+    const hdrs = async () => h ? await h() : {};
     // A reconnect to a KNOWN peer is verified first; a first connect is not
     // (there is nothing yet to compare, and nothing yet to protect).
     if (wasConnected && peerAppId !== undefined) {
@@ -853,43 +1017,55 @@ export function connectCli<S>(
         .then(() => typeof t === "function" ? t() : t)
         .then(async (tok) => {
           const ok = await _sameAppAsBefore(tok);
+          const extra = ok ? await hdrs() : {};
           connecting = false;
           if (ws || closed) return;
-          if (ok) return _openSocket(tok);
+          if (ok) return _openSocket(tok, extra);
           reconnectTimer = setTimeout(connect, backoffDelay(retry));
           retry++;
         })
         .catch((e) => {
           connecting = false;
           if (closed) return;
-          log.error("cli", `token() failed: ${e} — retrying`);
+          log.error(
+            "cli",
+            `token() / handshake headers failed: ${e} — retrying`,
+          );
           reconnectTimer = setTimeout(connect, backoffDelay(retry));
           retry++;
         });
       return;
     }
-    if (typeof t !== "function") return _openSocket(t);
+    if (typeof t !== "function" && !h) return _openSocket(t, {});
     // A function token is resolved fresh before EVERY (re)connect — this is
     // the whole point (an expiring assertion must not be frozen at connect
     // #1). A rejection is a failed attempt, not a dead client: same backoff.
     connecting = true;
-    Promise.resolve().then(t).then(
-      (tok) => {
+    Promise.resolve().then(async () =>
+      [typeof t === "function" ? await t() : t, await hdrs()] as const
+    ).then(
+      ([tok, extra]) => {
         connecting = false;
         if (ws || closed) return;
-        _openSocket(tok);
+        _openSocket(tok, extra);
       },
       (e) => {
         connecting = false;
         if (closed) return;
-        log.error("cli", `token() failed: ${e} — retrying`);
+        log.error(
+          "cli",
+          `token() / handshake headers failed: ${e} — retrying`,
+        );
         reconnectTimer = setTimeout(connect, backoffDelay(retry));
         retry++;
       },
     );
   }
 
-  function _openSocket(explicitToken: string | undefined): void {
+  function _openSocket(
+    explicitToken: string | undefined,
+    extra: Record<string, string>,
+  ): void {
     const parsed = new URL(url);
     // wss:/https: stay secure — a TLS server never answers plain ws:
     const proto = parsed.protocol === "https:" || parsed.protocol === "wss:"
@@ -903,14 +1079,19 @@ export function connectCli<S>(
     // which printed every token it retried with. Deno's WebSocket takes
     // headers; only a runtime that cannot set one falls back to `?token=`.
     const inHeader = !!token && typeof Deno !== "undefined";
+    const viaHeaders = inHeader ||
+      (Object.keys(extra).length > 0 && typeof Deno !== "undefined");
     const wsUrl = `${proto}//${parsed.host}/ws${
       token && !inHeader ? `?token=${encodeURIComponent(token)}` : ""
     }`;
     const shownUrl = redactUrlToken(wsUrl);
 
-    const socket = inHeader
+    const socket = viaHeaders
       ? new (WebSocket as unknown as DenoWebSocket)(wsUrl, {
-        headers: { authorization: `Bearer ${token}` },
+        headers: {
+          ...extra,
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
       })
       : new WebSocket(wsUrl);
 
@@ -1106,6 +1287,9 @@ export function connectCli<S>(
           );
           return;
         }
+        case "chunk":
+          _routeChunk(_chunks, frame.d);
+          return;
         case "ack": {
           const d = (frame.d ?? {}) as AckPayload;
           const { cid, ok, value } = d;
@@ -1168,6 +1352,7 @@ export function connectCli<S>(
           return;
         case "state":
         case "patches": {
+          _status.set(true);
           // STATE arrived: this connection really can carry the app's traffic,
           // so the oversized-frame streak (and the backoff it holds up) ends.
           // Deliberately not "any frame": an old server sends its small `proto`
@@ -1217,6 +1402,8 @@ export function connectCli<S>(
     };
 
     socket.onclose = (ev) => {
+      // A socket already replaced says nothing about the current one.
+      if (ws === socket || ws === null) _status.set(false);
       stopHeartbeat();
       // Frames still waiting on this socket's pacer were never written:
       // actions go back to the offline queue, at their place in line, and
@@ -1227,6 +1414,10 @@ export function connectCli<S>(
         const left = pacer.take();
         pacer = null;
         if (!closed) _requeuePaced(left);
+      }
+      // `offline: "fail"`: calls held for `cfg` on this socket die with it.
+      if (_failOffline) {
+        for (const a of queue.splice(0)) _refuseOffline(a, true);
       }
       _written.clear();
       // A dropped connection can never ack. These calls did NOT demonstrably
@@ -1320,6 +1511,61 @@ export function connectCli<S>(
 
   connect();
 
+  // The dispatcher SETTLES the call itself: its promise is the real outcome,
+  // carried back on the ack. Without this marker `bindCell`'s async branch
+  // returns a LOCAL pending-call promise that nothing in this process ever
+  // resolves, so every async bound method rejected at the call ceiling — 30
+  // seconds after the method had already succeeded (see SETTLES_CALLS in
+  // protocol/ack-registry.ts). ONE dispatcher for `bind` and `call`, so a call
+  // by name is the same frame, ack and ceiling as a bound method.
+  const _dispatch = (
+    action: Msg,
+    onChunk?: (value: unknown) => void,
+  ): Promise<unknown> => {
+    if (_failOffline && !_isUp()) return Promise.reject(offlineRefusal(url));
+    const cid = crypto.randomUUID();
+    // deferTimer: the clock belongs to the FRAME, not to the call. The
+    // pacer arms it when the frame actually leaves (now, a moment later
+    // at the advertised pace, or after the drain in `onopen`) — never
+    // while the action is still waiting.
+    const ackd = _pending.register(cid, {
+      methodKey: ackMethodKey(action),
+      deferTimer: true,
+    });
+    if (onChunk) _chunkTo(_chunks, cid, onChunk, ackd);
+    try {
+      _trySend(
+        { ...action, cid, ...(onChunk ? { stream: true } : {}) } as {
+          type: string;
+          payload?: unknown;
+        },
+      );
+    } catch (err) {
+      // The frame could not be built. Reject the call the same way the
+      // full-queue branch below does — leaving `cid` registered with no
+      // timer armed is a promise that never settles.
+      _pending.reject(
+        cid,
+        err instanceof Error ? err : new Error(String(err)),
+      );
+      return ackd;
+    }
+    // Paced or queued, the ack clock must not run against a call that
+    // has not been written yet, and if we close still holding it,
+    // close() rejects it rather than reporting a success that never
+    // happened.
+    //
+    // There is no third outcome to handle here any more. `_trySend`
+    // either writes or queues — a full queue evicts the OLDEST entry
+    // and rejects THAT caller inside `_pushDroppingOldest` (or, when
+    // every entry was accepted before a blip, rejects THIS one there),
+    // so the branch that used to reject this one here was unreachable
+    // dead code the moment the policy changed. The only other failure, a frame that cannot be
+    // built, is rejected in the `catch` above.
+    return ackd;
+  };
+  (_dispatch as unknown as Record<symbol, boolean>)[SETTLES_CALLS] = true;
+
   return {
     get state() {
       return state;
@@ -1340,59 +1586,29 @@ export function connectCli<S>(
 
     bind(...cells: import("../state/cell-types.ts").CellDef[]): void {
       for (const f of cells) {
-        // The dispatcher SETTLES the call itself: its promise is the real
-        // outcome, carried back on the ack. Without this marker `bindCell`'s
-        // async branch returns a LOCAL pending-call promise that nothing in
-        // this process ever resolves, so every async bound method rejected at
-        // the call ceiling — 30 seconds after the method had already
-        // succeeded (see SETTLES_CALLS in protocol/ack-registry.ts).
-        const dispatch = (action: Msg): Promise<unknown> => {
-          const cid = crypto.randomUUID();
-          // deferTimer: the clock belongs to the FRAME, not to the call. The
-          // pacer arms it when the frame actually leaves (now, a moment later
-          // at the advertised pace, or after the drain in `onopen`) — never
-          // while the action is still waiting.
-          const ackd = _pending.register(cid, {
-            methodKey: ackMethodKey(action),
-            deferTimer: true,
-          });
-          try {
-            _trySend(
-              { ...action, cid } as { type: string; payload?: unknown },
-            );
-          } catch (err) {
-            // The frame could not be built. Reject the call the same way the
-            // full-queue branch below does — leaving `cid` registered with no
-            // timer armed is a promise that never settles.
-            _pending.reject(
-              cid,
-              err instanceof Error ? err : new Error(String(err)),
-            );
-            return ackd;
-          }
-          // Paced or queued, the ack clock must not run against a call that
-          // has not been written yet, and if we close still holding it,
-          // close() rejects it rather than reporting a success that never
-          // happened.
-          //
-          // There is no third outcome to handle here any more. `_trySend`
-          // either writes or queues — a full queue evicts the OLDEST entry
-          // and rejects THAT caller inside `_pushDroppingOldest` (or, when
-          // every entry was accepted before a blip, rejects THIS one there),
-          // so the branch that used to reject this one here was unreachable
-          // dead code the moment the policy changed. The only other failure, a frame that cannot be
-          // built, is rejected in the `catch` above.
-          return ackd;
-        };
-        (dispatch as unknown as Record<symbol, boolean>)[SETTLES_CALLS] = true;
         bindCell(
           f,
-          dispatch,
+          _dispatch,
           () => (state ?? {}) as Record<string, unknown>,
         );
         _bound.push(f);
       }
     },
+
+    call(cell: string, method: string, ...args: unknown[]): Promise<unknown> {
+      return _dispatch(callAction(cell, method, args));
+    },
+
+    stream(
+      cell: string,
+      method: string,
+      args: unknown[],
+      onChunk: (value: unknown) => void,
+    ): Promise<unknown> {
+      return _dispatch(callAction(cell, method, args), onChunk);
+    },
+
+    onStatus: (fn: (connected: boolean) => void) => _status.on(fn),
 
     subscribe(fn: (state: S) => void): () => void {
       listeners.add(fn);
@@ -1428,6 +1644,8 @@ export function connectCli<S>(
       }
       ws?.close();
       ws = null;
+      _status.clear();
+      _status.set(false);
       peerAbort.abort();
       listeners.clear();
       // close() DISCARDS the queue — nothing will ever drain it — so here the
@@ -1468,6 +1686,21 @@ export function connectCliUDS<S>(
    *  depends on which transport you happened to pick. */
   opts?: { ackTimeoutMs?: number; readyTimeoutMs?: number },
 ): CliApp<S> {
+  return _connectCliUDS<S>(socketPath, opts);
+}
+
+/** `connectCliUDS` with the options only `peer()` sets. @internal */
+export function _connectCliUDS<S>(
+  socketPath: string,
+  opts?: Parameters<typeof connectCliUDS>[1] & {
+    /** What a call made while disconnected does. `"queue"` (default): it
+     *  waits in the offline queue and is sent on reconnect — right for user
+     *  intent. `"fail"`: it rejects AT ONCE and is never sent later — right
+     *  for a service call whose answer is only worth having now. */
+    offline?: CliOffline;
+  },
+): CliLink<S> {
+  const _failOffline = opts?.offline === "fail";
   // Same per-connection registry as the WS client — see connectCli.
   const _ack = _ackCeiling(opts?.ackTimeoutMs);
   const _udsPending = createAckRegistry(
@@ -1478,6 +1711,8 @@ export function connectCliUDS<S>(
   let state: S | null = null;
   let conn: LocalConn | null = null;
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
+  const _status = statusEmitter();
+  const _chunks: ChunkRoutes = new Map();
   let closed = false;
   let retry = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1527,8 +1762,7 @@ export function connectCliUDS<S>(
         `the server refused "${action.type}" before running it and asked ` +
           `for a re-send in ${Math.round(retryAfterMs)}ms (${
             d.error ?? "no reason given"
-          }) — held and re-sent, not failed. Further re-sends are not ` +
-          `repeated here.`,
+          }) — ${HELD(_failOffline)}. Further re-sends are not repeated here.`,
       );
     }
     queue.push(action);
@@ -1591,8 +1825,14 @@ export function connectCliUDS<S>(
       });
       return { written: true, queued: false };
     }
-    _pushDroppingOldest(queue, _udsPending, "UDS offline", action);
     // Waiting for `cfg` (or a re-send hold) on an open socket is not "offline".
+    if (_failOffline && !(writer && (wireHeld || held))) {
+      const cid = (action as { cid?: string }).cid;
+      if (!cid) throw offlineRefusal(socketPath);
+      _udsPending.reject(cid, offlineRefusal(socketPath));
+      return { written: false, queued: false };
+    }
+    _pushDroppingOldest(queue, _udsPending, "UDS offline", action);
     if (!_udsQueueNoted && !(writer && (wireHeld || held))) {
       _udsQueueNoted = true;
       log.warn(
@@ -1709,6 +1949,9 @@ export function connectCliUDS<S>(
                 }
                 switch (frame.t) {
                   // Per-action acks for bound-cell method calls
+                  case "chunk":
+                    _routeChunk(_chunks, frame.d);
+                    continue;
                   case "ack": {
                     // Branch on `ok` — parity with the WS client and the
                     // browser transports. Dropping it resolved a refused
@@ -1774,6 +2017,7 @@ export function connectCliUDS<S>(
                     continue;
                   case "state":
                   case "patches": {
+                    _status.set(true);
                     _wireSettled(); // no `cfg` came before it: none will
                     // onResync is NOT optional: without it a patch that fails
                     // to apply left this client frozen at its last good state
@@ -1824,9 +2068,24 @@ export function connectCliUDS<S>(
                 `UDS connection lost with ${lost} unacked action(s) — rejected; verify via state`,
               );
             }
+            // `offline: "fail"`: calls held on this connection die with it.
+            if (_failOffline) {
+              for (const a of queue.splice(0)) {
+                const cid = (a as { cid?: string }).cid;
+                const why = offlineRefusal(socketPath);
+                if (cid) _udsPending.reject(cid, why);
+                else {
+                  log.warn(
+                    "cli",
+                    `"${a.type}" (sent without awaiting) dropped — ${why.message}`,
+                  );
+                }
+              }
+            }
           }
           conn = null;
           writer = null;
+          _status.set(false);
           if (!closed) {
             reconnectTimer = setTimeout(connect, backoffDelay(retry));
             retry++;
@@ -1843,6 +2102,52 @@ export function connectCliUDS<S>(
       });
   }
 
+  // Marked SETTLES_CALLS for the same reason as the WS client: the ack is the
+  // call's real outcome, and without it every async bound method waited on a
+  // local promise nobody would ever settle. One dispatcher for bind and call.
+  const _dispatch = (
+    action: Msg,
+    onChunk?: (value: unknown) => void,
+  ): Promise<unknown> => {
+    if (_failOffline && !writer) {
+      return Promise.reject(offlineRefusal(socketPath));
+    }
+    const cid = crypto.randomUUID();
+    // deferTimer + arm-on-write: identical rule to connectCli — the
+    // clock belongs to the frame, never to a queued action.
+    const ackd = _udsPending.register(cid, {
+      methodKey: ackMethodKey(action),
+      deferTimer: true,
+    });
+    if (onChunk) _chunkTo(_chunks, cid, onChunk, ackd);
+    let sent: { written: boolean; queued: boolean };
+    try {
+      sent = _udsTrySend(
+        { ...action, cid, ...(onChunk ? { stream: true } : {}) } as {
+          type: string;
+          payload?: unknown;
+        },
+      );
+    } catch (err) {
+      _udsPending.reject(
+        cid,
+        err instanceof Error ? err : new Error(String(err)),
+      );
+      return ackd;
+    }
+    if (sent.written) _udsPending.armTimer(cid);
+    else if (!sent.queued) {
+      _udsPending.reject(
+        cid,
+        new Error(
+          "not connected and the offline queue is full — the action " +
+            "was NOT sent",
+        ),
+      );
+    }
+    return ackd;
+  };
+  (_dispatch as unknown as Record<symbol, boolean>)[SETTLES_CALLS] = true;
   connect();
 
   return {
@@ -1860,46 +2165,25 @@ export function connectCliUDS<S>(
 
     bind(...cells: CellDef[]): void {
       for (const f of cells) {
-        // Marked SETTLES_CALLS for the same reason as the WS client: the ack
-        // is the call's real outcome, and without it every async bound method
-        // waited on a local promise nobody would ever settle.
-        const dispatch = (action: Msg): Promise<unknown> => {
-          const cid = crypto.randomUUID();
-          // deferTimer + arm-on-write: identical rule to connectCli — the
-          // clock belongs to the frame, never to a queued action.
-          const ackd = _udsPending.register(cid, {
-            methodKey: ackMethodKey(action),
-            deferTimer: true,
-          });
-          let sent: { written: boolean; queued: boolean };
-          try {
-            sent = _udsTrySend(
-              { ...action, cid } as { type: string; payload?: unknown },
-            );
-          } catch (err) {
-            _udsPending.reject(
-              cid,
-              err instanceof Error ? err : new Error(String(err)),
-            );
-            return ackd;
-          }
-          if (sent.written) _udsPending.armTimer(cid);
-          else if (!sent.queued) {
-            _udsPending.reject(
-              cid,
-              new Error(
-                "not connected and the offline queue is full — the action " +
-                  "was NOT sent",
-              ),
-            );
-          }
-          return ackd;
-        };
-        (dispatch as unknown as Record<symbol, boolean>)[SETTLES_CALLS] = true;
-        bindCell(f, dispatch, () => (state ?? {}) as Record<string, unknown>);
+        bindCell(f, _dispatch, () => (state ?? {}) as Record<string, unknown>);
         _bound.push(f);
       }
     },
+
+    call(cell: string, method: string, ...args: unknown[]): Promise<unknown> {
+      return _dispatch(callAction(cell, method, args));
+    },
+
+    stream(
+      cell: string,
+      method: string,
+      args: unknown[],
+      onChunk: (value: unknown) => void,
+    ): Promise<unknown> {
+      return _dispatch(callAction(cell, method, args), onChunk);
+    },
+
+    onStatus: (fn: (connected: boolean) => void) => _status.on(fn),
 
     subscribe(fn: (state: S) => void): () => void {
       listeners.add(fn);
@@ -1924,6 +2208,8 @@ export function connectCliUDS<S>(
       } catch { /* already closed */ }
       conn = null;
       writer = null;
+      _status.clear();
+      _status.set(false);
       listeners.clear();
       // close() discards the queue — those frames are dead, so rejectAll is
       // the truthful settlement here (see connectCli.close).

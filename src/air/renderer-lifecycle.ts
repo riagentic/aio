@@ -410,7 +410,13 @@ export function onGlobalKey(
       // Alt+F → "ƒ" still fire it); the object form keeps `e.key` alone.
       if (
         stringRef.current
-          ? !keycapMatch(k, e.key ?? "", e.code ?? "")
+          ? !keycapMatch(
+            k,
+            e.key ?? "",
+            e.code ?? "",
+            chord.shift === true,
+            chord.alt === true,
+          )
           : (e.key ?? "").toLowerCase() !== k.toLowerCase()
       ) return;
       // exact: an omitted modifier means "up" — except Ctrl/⌘ under `mod`,
@@ -614,10 +620,18 @@ function _nextSsrId(): number {
   return render ? render.ids++ : _ssrIdCounter++;
 }
 
+let _ssrWireCounter = 0;
+let _clientWireCounter = 0;
+function _nextSsrWireId(): number {
+  const render = _ssrRenderCurrent();
+  return render ? render.wireIds++ : _ssrWireCounter++;
+}
+
 /** Reset the FALLBACK SSR ID counter — the one a `useId()` outside any server
  *  component call draws from. Called at the start of each renderToString. */
 export function _resetSsrIdCounter(): void {
   _ssrIdCounter = 0;
+  _ssrWireCounter = 0;
 }
 
 /**
@@ -628,8 +642,24 @@ export function _resetSsrIdCounter(): void {
  * Must be called inside a component function body during render.
  *  @tier Advanced */
 export function useId(): string {
+  return _hookId(false);
+}
+
+/** `useId()` for the ui kit's OWN wiring (Field's `for`/`aria-describedby`,
+ *  Modal's `aria-labelledby`): the same SSR/hydrate-stable mechanics on a
+ *  SEPARATE sequence (`:w{N}:` / `:wc{N}:`). Drawing from `useId()`'s
+ *  sequence renumbered every app id after the first Field — and with them the
+ *  frozen testUI/`am surface` names derived from them (an unlabeled
+ *  RadioGroup's `AioRadioRc0Radio` became `AioRadioRc1Radio`). */
+export function _useWireId(): string {
+  return _hookId(true);
+}
+
+function _hookId(wire: boolean): string {
+  const p = wire ? "w" : "r";
+  const nextSsr = wire ? _nextSsrWireId : _nextSsrId;
   if (!_currentCollector) {
-    return `:r${_nextSsrId()}:`;
+    return `:${p}${nextSsr()}:`;
   }
   const collector = _currentCollector;
   if (!collector.refs) collector.refs = [];
@@ -640,10 +670,14 @@ export function useId(): string {
     // Hydrating: continue the per-root sequence renderToString used (it
     // restarts at 0 too), so the id matches the server's markup.
     const id = !root
-      ? `:r${_nextSsrId()}:`
+      ? `:${p}${nextSsr()}:`
       : root._ssrIds
-      ? `:r${root._idCounter++}:`
-      : `:rc${_clientIdCounter++}:`;
+      ? `:${p}${
+        wire
+          ? (root._wireCounter = (root._wireCounter ?? 0) + 1) - 1
+          : root._idCounter++
+      }:`
+      : `:${p}c${wire ? _clientWireCounter++ : _clientIdCounter++}:`;
     const ref = { current: id };
     collector.refs.push(ref);
     return ref.current;

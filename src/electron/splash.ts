@@ -111,10 +111,15 @@ export function helperLook(
   const l = lookOf(spec);
   const iw = Math.round(spec.image.w / spec.image.scale);
   const ih = Math.round(spec.image.h / spec.image.scale);
+  // No `size`: the image's own, fitted into SPLASH_MAX_BOX (a 2560×1440
+  // image made a full-screen always-on-top window) — the sized path.
+  const k = l.size
+    ? 1
+    : Math.min(1, SPLASH_MAX_BOX.width / iw, SPLASH_MAX_BOX.height / ih);
   return {
-    sized: l.size !== null,
-    w: l.size?.width ?? iw,
-    h: l.size?.height ?? ih,
+    sized: l.size !== null || k < 1,
+    w: l.size?.width ?? Math.round(iw * k),
+    h: l.size?.height ?? Math.round(ih * k),
     iw,
     ih,
     fit: l.fit,
@@ -245,6 +250,56 @@ export function lookOf(spec: SplashSpec): SplashLook {
     followWindow: true,
   };
 }
+
+/** The app's run-time say over the start splash (`aio.run({ splash:
+ *  { show } })`): `spec` with its `show` replaced by what `show()` returns,
+ *  read just before the splash opens. It throws, takes over
+ *  {@linkcode RUN_TIME_SHOW_MS} or returns anything else: the build's `show`,
+ *  said once through `say`. `byApp`: the result's `show` is the app's. */
+export function withRunTimeShow(
+  spec: SplashSpec,
+  show: (() => unknown) | undefined,
+  say: (m: string) => void,
+  now: () => number = () => performance.now(),
+): { spec: SplashSpec; byApp: boolean } {
+  if (!show) return { spec, byApp: false };
+  const look = lookOf(spec);
+  const keep = (why: string) => {
+    say(
+      `electron: splash — the app's run-time show ${why}; the build's ` +
+        `show ("${look.show}") is used`,
+    );
+    return { spec, byApp: false };
+  };
+  const t = now();
+  let v: unknown;
+  try {
+    v = show();
+  } catch (e) {
+    return keep(`threw (${e instanceof Error ? e.message : String(e)})`);
+  }
+  const ms = now() - t;
+  if (ms > RUN_TIME_SHOW_MS) {
+    return keep(`took ${Math.round(ms)} ms (over ${RUN_TIME_SHOW_MS} ms)`);
+  }
+  if (v !== "always" && v !== "firstStart") {
+    return keep(
+      `returned ${
+        typeof v === "string" ? `"${v}"` : String(v)
+      }, not "always" or "firstStart"`,
+    );
+  }
+  return { spec: { ...spec, look: { ...look, show: v } }, byApp: true };
+}
+
+/** How long `aio.run({ splash: { show } })` may take: the splash does not
+ *  wait for it. */
+export const RUN_TIME_SHOW_MS = 50;
+
+/** The largest an image drawn at its own size (no `size`) is shown, in
+ *  logical px: 80 % of a 1366×768 screen, the smallest common one (the web
+ *  splash caps at 80vw × 80vh). Larger is scaled down, its aspect kept. */
+export const SPLASH_MAX_BOX = { width: 1092, height: 614 } as const;
 
 /** What a `build.splash` key left out means (1.0.23): the app's title; the
  *  download's own line while Electron downloads; the text centred, over the

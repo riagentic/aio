@@ -197,6 +197,52 @@ export interface SyncFoldWatermark {
  *  @internal */
 export const SYNC_SOCKET_HIGH_WATER = 4 * 1024 * 1024;
 
+/** How long a peer over the mark may go without its backlog reaching a new
+ *  low before {@link notDraining} says it is not draining: a floor, plus the
+ *  time its backlog takes at `DRAIN_MIN_RATE` bytes/s. The runtime lowers
+ *  `bufferedAmount` only when a WHOLE frame is written (measured on Deno 2.9:
+ *  12 → 6 → 0 MB, flat in between), so a peer reading a 6 MB frame at 1 MB/s
+ *  shows no progress for ~6 s — the window must cover the frame in flight,
+ *  which is at most the backlog itself. */
+const DRAIN_STALL_MS = 5000;
+const DRAIN_MIN_RATE = 256 * 1024;
+
+/** THE drain rule for a writer that cannot skip a frame — `sendTo` here and
+ *  the WS broadcaster's `broadcastRaw` (server-broadcast.ts), the two writers
+ *  to the same sockets. "Over the mark" alone is not "not draining": a
+ *  slow-but-reading peer whose handshake state is itself over the mark (a
+ *  6 MB cell at 1 MB/s) was closed on every frame while that drained. Over
+ *  the mark, a peer is not draining only when its backlog has grown a whole
+ *  mark above its lowest point (the memory bound), or has not reached a new
+ *  low for longer than a reader at `DRAIN_MIN_RATE` would need — a peer that
+ *  reads nothing hits one of the two within bounded bytes and time. `lows` is
+ *  the caller's per-socket memo; true → close the socket.
+ *  @internal */
+export function notDraining(
+  lows: WeakMap<object, { bytes: number; at: number }>,
+  socket: object,
+  held: number,
+  now: number,
+): boolean {
+  if (held <= SYNC_SOCKET_HIGH_WATER) {
+    lows.delete(socket);
+    return false;
+  }
+  const low = lows.get(socket);
+  if (!low || held < low.bytes) {
+    lows.set(socket, { bytes: held, at: now });
+    return false;
+  }
+  if (
+    held - low.bytes > SYNC_SOCKET_HIGH_WATER ||
+    now - low.at > DRAIN_STALL_MS + low.bytes / DRAIN_MIN_RATE * 1000
+  ) {
+    lows.delete(socket);
+    return true;
+  }
+  return false;
+}
+
 const FORBIDDEN = ["__proto__", "constructor", "prototype"];
 
 /** One cell's cursor in a `sync-req`. The twin of {@link isValidSyncOp} for
@@ -272,6 +318,12 @@ export function createServerSyncHandler(
   const clock: HLClock = createHLC("server");
   const syncCells = new Set(deps.syncCellIds);
 
+  /** Sockets that have sent a `sync-req` — and, among them, those whose FIRST
+   *  one is being answered right now (see `sendTo`). */
+  const _asked = new WeakSet<WebSocket>();
+  const _firstAnswer = new WeakSet<WebSocket>();
+  /** Per socket over the mark: its lowest backlog seen — see `notDraining`. */
+  const _lows = new WeakMap<object, { bytes: number; at: number }>();
   /** Send ONE already-encoded frame to ONE client, and never lose the reason
    *  it did not arrive.
    *
@@ -299,10 +351,25 @@ export function createServerSyncHandler(
     // it cannot be queued without limit either: the runtime holds it on the
     // server's heap for as long as the peer does not read. The repair a sync
     // client does have is the reconnect (catch-up resumes from its own
-    // cursor), so it is closed — the same rule, code and reason as
-    // `broadcastRaw` (server-broadcast.ts `_closeNotDraining`).
+    // cursor), so it is closed — the same rule (`notDraining`: not draining,
+    // not merely over the mark), code and reason as `broadcastRaw`
+    // (server-broadcast.ts `_closeNotDraining`). Pinned by
+    // tests/sync-send-slow-reader.test.ts.
+    //
+    // …except while the socket's FIRST `sync-req` is answered (`_firstAnswer`).
+    // A client sends it on open, while the handshake's whole-state frame is
+    // still draining — and on a slow link a state over the mark is itself
+    // over the mark. Closing then closed it before its catch-up was ever
+    // written: it reconnected, took the same state, sent the same request,
+    // and was closed again, forever (measured: a 6 MB sync cell at 1 MB/s,
+    // closed every 6 s, never one `sync-res`). That answer is bounded — one
+    // request per connection, a snapshot or an uncompacted log — so it is
+    // written; every frame after it obeys the drain rule.
     const held = (socket as { bufferedAmount?: number }).bufferedAmount ?? 0;
-    if (!gone && held > SYNC_SOCKET_HIGH_WATER) {
+    if (
+      !gone && !_firstAnswer.has(socket) &&
+      notDraining(_lows, socket, held, Date.now())
+    ) {
       deps.log.warn(
         `[sync:server] closing a sync client that is not draining its socket ` +
           `(${
@@ -1249,6 +1316,8 @@ export function createServerSyncHandler(
             [cell]: { ts, set: diffState(base, state), digest: sum.digest },
           },
         });
+        // sum.bytes is the state JSON's .length too: a ratio of two UTF-16 lengths
+        // aio-ok(utf16-bytes): both sides are .length, not a byte limit
         if (frame.length <= sum.bytes * PUSH_FULL_FRACTION) patchFrame = frame;
       } catch (e) {
         // Not patchable: the whole cell, which is what the push always was —
@@ -1719,6 +1788,11 @@ export function createServerSyncHandler(
           ? sessionPrefix(o.id) === ownPrefix && !_foreign.has(o.id)
           : o.hlc[2] === sync.clientId;
 
+      const first = !_asked.has(socket);
+      if (first) {
+        _asked.add(socket);
+        _firstAnswer.add(socket);
+      }
       (async () => {
         // The log's durable high-water mark BEFORE this request writes
         // anything — the reference for `foreign` below. Every cursor this log
@@ -2280,7 +2354,7 @@ export function createServerSyncHandler(
         deps.log.error(`[sync:server] handleSync failed: ${e}`);
         // Notify client so it can back off and retry instead of hanging in "syncing"
         sendTo(socket, enc("sync-err", { reason: String(e) }), "sync-err");
-      });
+      }).finally(() => first && _firstAnswer.delete(socket));
     },
   };
 }

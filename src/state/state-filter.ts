@@ -1,5 +1,7 @@
 // Pure state filtering — cell field filters + patch strategy filtering
 import { setOwn } from "./deep-merge.ts";
+import { segNames } from "./path-segments.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import type { CellFieldFilter } from "./cell-types.ts";
 import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 
@@ -76,7 +78,61 @@ export type DeepExcludeOptions = {
    *  (Immer autoFreeze), so same source ⇒ same view is exact. Pass a shared
    *  Map to keep view identity stable across reads (the client seam). */
   memos?: Map<string, WeakMap<object, unknown>>;
+  /** A `*` segment names ANY key — `persist.exclude` only (see
+   *  {@linkcode segNames}); every `visible` reader takes `*` literally. */
+  wildcard?: boolean;
+  /** The cell's DECLARED state, walked beside the value: where it shows a
+   *  declared `"*"` key, `"*"` is read literally there even when the data
+   *  lacks it (`starAt`). Not combined with `memos`. */
+  declared?: unknown;
 };
+
+export { segNames };
+
+/** How `"*"` reads at one object node of a persist walk. */
+type Star = { readonly literal: boolean; readonly guessed: boolean };
+
+/** Is `"*"` a LITERAL key at this node (`segNames`' `literalStar`)? A
+ *  literal `"*"` key IN THE DATA is always read literally — before wildcards
+ *  `"perms.*"` named that key only, and reading it as "every key" there would
+ *  drop data an upgrade used to store. The declared shape can only ADD the
+ *  literal reading (a declared `"*"` key keeps it on the writes whose data
+ *  lacks the key), never take it away. `guessed` — the data alone decided it,
+ *  warned (see `warnStarGuess`). */
+function starAt(decl: unknown, ...data: (object | undefined)[]): Star {
+  const declStar = decl !== null && typeof decl === "object" &&
+    !Array.isArray(decl) && Object.hasOwn(decl, "*");
+  const dataStar = data.some((o) => !!o && Object.hasOwn(o, "*"));
+  return { literal: declStar || dataStar, guessed: !declStar && dataStar };
+}
+
+/** The declared value under key `k` of a declared object, or undefined. */
+function declUnder(decl: unknown, k: string): unknown {
+  return decl !== null && typeof decl === "object" && !Array.isArray(decl) &&
+      Object.hasOwn(decl, k)
+    ? (decl as Record<string, unknown>)[k]
+    : undefined;
+}
+
+const STAR_WARN_EVERY_MS = 60_000;
+let starWarnedAt = -Infinity;
+/** A `*` persist segment met a literal `"*"` key in data whose declaration
+ *  cannot say whether `"*"` is a key: read literally (names that key only, as
+ *  before wildcards). Said on every such write, at most once a minute — the
+ *  reading depends on the data, so it can flip between writes. */
+function warnStarGuess(): void {
+  const now = Date.now();
+  if (now - starWarnedAt < STAR_WARN_EVERY_MS) return;
+  starWarnedAt = now;
+  log.warn(
+    "persist",
+    `persist.exclude: a "*" path segment met an object with a literal "*" ` +
+      `key that the declared state does not show — there it names that key ` +
+      `only (not every key), so what is saved depends on the data. Declare ` +
+      `the "*" key in the cell's state to keep that reading, or rename it if ` +
+      `"every key" was meant.`,
+  );
+}
 
 /** `obj[k] = v` — except for `__proto__`, where plain assignment would hit
  *  `Object.prototype`'s setter and set the PROTOTYPE instead of creating the
@@ -118,12 +174,12 @@ export function deepExcludePaths(
 ): unknown {
   const live = paths.filter((p) => p.length > 0);
   if (live.length === 0) return value;
-  const { tripwire, memos } = opts;
+  const { tripwire, memos, wildcard, declared } = opts;
   const cur = live.map((path) => ({ path, d: 0 }));
 
-  const walk = (v: unknown, act: Active): unknown => {
+  const walk = (v: unknown, act: Active, decl?: unknown): unknown => {
     if (v === null || typeof v !== "object") return v;
-    const memo = memos
+    const memo = memos && declared === undefined
       ? memos.get(act.key) ??
         (() => {
           const m = new WeakMap<object, unknown>();
@@ -135,12 +191,12 @@ export function deepExcludePaths(
     // a miss and a memoized `undefined` cannot be confused.
     const hit = memo?.get(v as object);
     if (hit !== undefined) return hit;
-    const out = build(v as object, act);
+    const out = build(v as object, act, decl);
     memo?.set(v as object, out);
     return out;
   };
 
-  const build = (v: object, act: Active): unknown => {
+  const build = (v: object, act: Active, decl: unknown): unknown => {
     if (Array.isArray(v)) {
       let changed = false;
       const out = v.map((el) => {
@@ -151,6 +207,11 @@ export function deepExcludePaths(
       return changed ? out : v;
     }
     const obj = v as Record<string, unknown>;
+    const st = starAt(decl, obj);
+    const star = st.literal;
+    if (
+      wildcard && st.guessed && star && act.cur.some((c) => c.path[c.d] === "*")
+    ) warnStarGuess();
     let changed = false;
     const out: Record<string, unknown> = {};
     // One derived cursor set per MATCHING key; every other key is a plain
@@ -160,7 +221,7 @@ export function deepExcludePaths(
       let matched = false;
       let drop = false;
       for (const c of act.cur) {
-        if (c.path[c.d] !== k) continue;
+        if (!segNames(c.path[c.d], k, wildcard, star)) continue;
         matched = true;
         // The literal path ends here: the field goes, whatever else any other
         // path would have done under it.
@@ -172,18 +233,20 @@ export function deepExcludePaths(
       }
       let next: unknown;
       if (!matched) {
-        next = walk(obj[k], act);
+        next = walk(obj[k], act, declUnder(decl, k));
       } else {
         derived ??= new Map();
         let child = derived.get(k);
         if (!child) {
           const cc = act.cur.map((c) =>
-            c.path[c.d] === k ? { path: c.path, d: c.d + 1 } : c
+            segNames(c.path[c.d], k, wildcard, star)
+              ? { path: c.path, d: c.d + 1 }
+              : c
           );
           child = { cur: cc, key: memos ? cursorKey(cc) : "" };
           derived.set(k, child);
         }
-        next = walk(obj[k], child);
+        next = walk(obj[k], child, declUnder(decl, k));
       }
       if (next !== obj[k]) changed = true;
       setKey(out, k, next);
@@ -210,7 +273,7 @@ export function deepExcludePaths(
     return out;
   };
 
-  return walk(value, { cur, key: memos ? cursorKey(cur) : "" });
+  return walk(value, { cur, key: memos ? cursorKey(cur) : "" }, declared);
 }
 
 /** One cell slice with what a dot-path exclude keeps OUT of the store put back
@@ -225,6 +288,10 @@ export function restoreExcluded(
   now: unknown,
   was: unknown,
   segs: readonly string[],
+  /** A persist filter's reading — see {@linkcode segNames}. */
+  wildcard = false,
+  /** The declared value at this point — see `DeepExcludeOptions.declared`. */
+  decl?: unknown,
 ): unknown {
   if (segs.length === 0 || now === null || typeof now !== "object") return now;
   if (Array.isArray(now)) {
@@ -234,6 +301,7 @@ export function restoreExcluded(
         el,
         Array.isArray(was) ? was[i] : undefined,
         segs,
+        wildcard,
       );
       if (next !== el) changed = true;
       return next;
@@ -246,29 +314,48 @@ export function restoreExcluded(
     : undefined;
   const head = segs[0]!;
   const leaf = segs.length === 1;
+  const st = starAt(decl, obj, base);
+  const star = st.literal;
+  if (wildcard && st.guessed && star && head === "*") warnStarGuess();
   const keys = new Set(Object.keys(obj));
   // Boot has the field and the replay dropped it — put it back where it was.
-  if (leaf && base && Object.hasOwn(base, head)) keys.add(head);
+  if (leaf && base) {
+    for (const k of Object.keys(base)) {
+      if (segNames(head, k, wildcard, star)) keys.add(k);
+    }
+  }
   let changed = false;
   const out: Record<string, unknown> = {};
   for (const k of keys) {
-    if (k === head) {
+    if (segNames(head, k, wildcard, star)) {
       if (leaf) {
-        if (base && Object.hasOwn(base, head)) {
-          if (!Object.hasOwn(obj, head) || obj[head] !== base[head]) {
+        if (base && Object.hasOwn(base, k)) {
+          if (!Object.hasOwn(obj, k) || obj[k] !== base[k]) {
             changed = true;
           }
-          setKey(out, head, base[head]);
+          setKey(out, k, base[k]);
         } else changed = true; // boot had none → the field goes
         continue;
       }
-      if (!Object.hasOwn(obj, head)) continue; // no branch to restore under
-      const child = restoreExcluded(obj[head], base?.[head], segs.slice(1));
-      if (child !== obj[head]) changed = true;
-      setKey(out, head, child);
+      if (!Object.hasOwn(obj, k)) continue; // no branch to restore under
+      const child = restoreExcluded(
+        obj[k],
+        base?.[k],
+        segs.slice(1),
+        wildcard,
+        declUnder(decl, k),
+      );
+      if (child !== obj[k]) changed = true;
+      setKey(out, k, child);
       continue;
     }
-    const next = restoreExcluded(obj[k], base?.[k], segs);
+    const next = restoreExcluded(
+      obj[k],
+      base?.[k],
+      segs,
+      wildcard,
+      declUnder(decl, k),
+    );
     if (next !== obj[k]) changed = true;
     setKey(out, k, next);
   }
@@ -333,6 +420,9 @@ function mergePicked(dst: unknown, add: unknown): unknown {
 export function applyCellFieldFilter(
   filter: CellFieldFilter | undefined,
   cellState: Record<string, unknown>,
+  /** A PERSIST filter's reading: a `*` path segment names any key;
+   *  `declared` = the cell's declared state (see `DeepExcludeOptions`). */
+  opts: { wildcard?: boolean; declared?: unknown } = {},
 ): Record<string, unknown> | undefined {
   if (!filter || filter === "none") return undefined;
   if (filter === "all") return cellState;
@@ -374,7 +464,7 @@ export function applyCellFieldFilter(
     }
     // ONE pass over all dot paths — the same call the client seam makes, so
     // the two cannot drift.
-    return deepExcludePaths(result, deep) as Record<string, unknown>;
+    return deepExcludePaths(result, deep, opts) as Record<string, unknown>;
   }
   return undefined;
 }
@@ -405,6 +495,8 @@ export function visibleValueAt(
   filter: CellFieldFilter | undefined,
   segs: readonly string[],
   value: unknown,
+  /** A PERSIST filter's reading: a `*` path segment names any key. */
+  opts: { wildcard?: boolean } = {},
 ): { hidden: true } | { hidden: false; value: unknown } {
   if (!filter || filter === "all") return { hidden: false, value };
   if (filter === "none") return { hidden: true };
@@ -412,7 +504,7 @@ export function visibleValueAt(
   const ambiguous = segs.some((s) => /^(0|[1-9][0-9]*)$/.test(s));
   let cur = value;
   for (const asArray of ambiguous ? [false, true] : [false]) {
-    const seen = _visibleValueAt1(filter, segs, cur, asArray);
+    const seen = _visibleValueAt1(filter, segs, cur, asArray, opts);
     if (seen.hidden) return seen;
     cur = seen.value;
   }
@@ -427,6 +519,7 @@ function _visibleValueAt1(
   segs: readonly string[],
   value: unknown,
   asArray: boolean,
+  opts: { wildcard?: boolean },
 ): { hidden: true } | { hidden: false; value: unknown } {
   if (segs.length === 0) {
     // The leaf IS the whole slice (a root replacement). A slice that is not a
@@ -440,6 +533,7 @@ function _visibleValueAt1(
     const projected = applyCellFieldFilter(
       filter,
       value as Record<string, unknown>,
+      opts,
     );
     return projected === undefined
       ? { hidden: true }
@@ -459,7 +553,11 @@ function _visibleValueAt1(
       read[i] = "0";
     } else nested = { [seg]: nested };
   }
-  let cur = applyCellFieldFilter(filter, nested as Record<string, unknown>);
+  let cur = applyCellFieldFilter(
+    filter,
+    nested as Record<string, unknown>,
+    opts,
+  );
   for (const seg of read) {
     if (
       cur === null || typeof cur !== "object" ||

@@ -10,6 +10,7 @@ import {
   appIconIco,
   appIconPng,
   appIconSvg,
+  type HueKey,
   icoFromPngs,
   pngSize,
 } from "./app-icon.ts";
@@ -506,7 +507,7 @@ export function misplacedIconHint(misplaced: string, appDir: string): string {
 export async function writeDefaultIcon(
   base: string,
   appName: string,
-  id = appName,
+  id: HueKey = appName,
 ): Promise<void> {
   await Deno.writeTextFile(`${base}.svg`, appIconSvg(appName, 512, id));
   await Deno.writeFile(`${base}.png`, await appIconPng(appName, 512, id));
@@ -535,8 +536,9 @@ export async function writeWindowsIcon(
     root: string;
     appDir: string;
     name: string;
-    /** The appId: the icon's colour, so the exe matches every other target. */
-    id?: string;
+    /** The appId (or deno.json `hue`): the icon's colour, so the exe
+     *  matches every other target. */
+    id?: HueKey;
     warn?: (msg: string) => void;
   },
 ): Promise<string> {

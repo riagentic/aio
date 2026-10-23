@@ -32,7 +32,9 @@ names themselves:
 - **Client targets** (`electron-client`, `android-client`, `ios-client`,
   `cli-client`) — thin clients that connect to a separately-running aio server.
   iOS has no Deno, so it has ONLY a client target: an Xcode project on any host,
-  an `.app` where `xcodebuild` is (macOS).
+  an `.app` where `xcodebuild` is (macOS). Experimental: no aio test lane has
+  built that project with Xcode yet (the build says so on its `proof:` line), so
+  build and try the `.app` on a Mac before you ship it.
 
 ```
 ┌──────────────────┬─────────────────────────────────────────────┐
@@ -1470,7 +1472,7 @@ through it.
 - **Electron is already in the store** (another app put it there, or this one
   did before): the app opens as fast as a bundled one. Nothing is shown.
 - **It is not**: a window named after the app says _Getting <title> ready_ —
-  _Downloading Electron 44.9.0 — first start only · 22 / 123 MB_ — with a
+  _Downloading Electron 44.9.3 — first start only · 22 / 123 MB_ — with a
   progress bar and one button, **Cancel**, while Electron (~110–130 MB)
   downloads, is checked against the release's `SHASUMS256.txt`, and unpacks;
   then the app opens. Closing that window cancels the start — nothing is
@@ -1605,7 +1607,7 @@ the look it was built with.)
 
 | Key            | What                                                                                                                                                      | Left out                                                                                                    |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `size`         | `{ "width": 640, "height": 360 }`: the window's size in logical pixels (16–4096)                                                                          | the image's size (`@2x` halved)                                                                             |
+| `size`         | `{ "width": 640, "height": 360 }`: the window's size in logical pixels (16–4096)                                                                          | the image's size (`@2x` halved), scaled down to fit 1092×614 (the build says so)                            |
 | `fit`          | `"cover"` (fills the size, the overflow cropped) or `"contain"` (the whole image, `background` around it)                                                 | `"cover"`                                                                                                   |
 | `position`     | `"window"`: centred on the app window's saved bounds; `"primary"`: the primary display's centre; `"pointer"`: the centre of the display under the pointer | `"window"` (on a first start, with no saved bounds: the primary display, where Electron opens a new window) |
 | `background`   | `"#rrggbb"` behind a transparent or `contain`ed image and the strip below, in both modes                                                                  | the app's page background, per mode                                                                         |
@@ -1678,6 +1680,21 @@ Android and the web, the build says it once.
   `show: "firstStart"`: the first start (and the first after an update that pins
   a new Electron) shows the splash for the download, on every OS; every later
   start shows nothing.
+- **"Show the splash at start" as the person's setting** is
+  `aio.run({ splash: { show } })`: `show` is called just before the splash would
+  open (from source and built, on every desktop OS, Windows' Electron-drawn
+  splash included) and returns `"always"` or `"firstStart"`, which replaces the
+  build's `show` for that start. There is no `"never"`: a download always runs
+  in its splash. It is synchronous on purpose — the splash does not wait — so
+  read the setting before `aio.run`. If it throws, takes over 50 ms or returns
+  anything else, the build's `show` is used and the log says why, once. A start
+  it turned off logs
+  `electron: splash — not shown (the app's run-time show: "firstStart")`.
+
+  ```ts
+  const atStart = loadSettings().splashAtStart; // the app's own, read first
+  aio.run({ cells, splash: { show: () => atStart ? "always" : "firstStart" } });
+  ```
 - **Without `splash`** (or with `false`), nothing changes: there is no splash,
   and a first download shows the download window above, in the app's colours.
 - **Runs from source** (`deno task dev`, `--prod`, `am start`) show the same
@@ -1786,20 +1803,21 @@ a wrong value stops the start (or the build, for `build.*`) with a message that
 names it. The splash's own look keys are in
 [the splash table](#splash-buildsplash).
 
-| Key                                                                        | Default                                                                    | What                                                                                                                  | Per OS                                                                                            |
-| -------------------------------------------------------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `build.splash`                                                             | none                                                                       | a splash while the app starts; the first start's download runs in it                                                  | Windows Forms, Cocoa, GTK; yad/zenity draw less ([what each OS draws](#where-every-window-opens)) |
-| `build.splash.show`                                                        | `"always"`                                                                 | `"firstStart"`: only while Electron downloads — "the download in my splash, no splash otherwise"                      | every desktop OS; no splash on the web and Android                                                |
-| `build.splash.position`                                                    | `"window"`                                                                 | centred on the app's window, `"primary"` display, or the `"pointer"`'s                                                | yad: no `"primary"`; Wayland: the compositor's                                                    |
-| `build.splash.followWindow`                                                | `true`                                                                     | the splash moves onto where the window really opened, and after each move                                             | GTK, Windows Forms, Cocoa; yad/zenity cannot (said once)                                          |
-| `build.splash.cancel`                                                      | `true`                                                                     | the ✕ that cancels a download                                                                                         | yad: none                                                                                         |
-| `electron.showWhenPainted`                                                 | `true` (`capMs` 5000)                                                      | the window is made hidden and shown once its page has painted, or after `capMs`; `false`: shown the moment it is made | every desktop OS                                                                                  |
-| `electron.backgroundColor`                                                 | the theme's page background, else Electron's                               | the window's colour before the page paints: `"#rrggbb"` or `{ light, dark }`                                          | every desktop OS                                                                                  |
-| `electron.downloadWindow.heading`                                          | `"Getting {title} ready"`                                                  | the download window's heading (with no `build.splash`)                                                                | Windows Forms, Cocoa, GTK, yad, zenity                                                            |
-| `electron.downloadWindow.text`                                             | `"Downloading Electron {version} — first start only · {got} / {total} MB"` | its detail line; `{title}`, `{version}`, `{got}`, `{total}`                                                           | as above                                                                                          |
-| `electron.downloadWindow.question`                                         | aio's (what failed, how to fix it)                                         | the Retry / Quit question's text; `{title}`, `{version}`, `{reason}`                                                  | as above                                                                                          |
-| `electron.downloadWindow.background`, `.color`, `.bar.color`, `.bar.track` | the app's identity colours, light or dark as the OS is                     | the download window's and the question's colours; a colour set is used in both modes                                  | Windows Forms, Cocoa, GTK; yad/zenity: the GTK theme's                                            |
-| `electron.downloadWindow.cancel`                                           | `true`                                                                     | the download window's Cancel button (its close cancels either way)                                                    | zenity keeps its own OK, greyed                                                                   |
+| Key                                                                        | Default                                                                    | What                                                                                                                        | Per OS                                                                                            |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `build.splash`                                                             | none                                                                       | a splash while the app starts; the first start's download runs in it                                                        | Windows Forms, Cocoa, GTK; yad/zenity draw less ([what each OS draws](#where-every-window-opens)) |
+| `build.splash.show`                                                        | `"always"`                                                                 | `"firstStart"`: only while Electron downloads — "the download in my splash, no splash otherwise"                            | every desktop OS; no splash on the web and Android                                                |
+| `splash.show`                                                              | the build's `show`                                                         | `aio.run({ splash: { show: () => "always" \| "firstStart" } })`: the person's say at run time, read before the splash opens | every desktop OS                                                                                  |
+| `build.splash.position`                                                    | `"window"`                                                                 | centred on the app's window, `"primary"` display, or the `"pointer"`'s                                                      | yad: no `"primary"`; Wayland: the compositor's                                                    |
+| `build.splash.followWindow`                                                | `true`                                                                     | the splash moves onto where the window really opened, and after each move                                                   | GTK, Windows Forms, Cocoa; yad/zenity cannot (said once)                                          |
+| `build.splash.cancel`                                                      | `true`                                                                     | the ✕ that cancels a download                                                                                               | yad: none                                                                                         |
+| `electron.showWhenPainted`                                                 | `true` (`capMs` 5000)                                                      | the window is made hidden and shown once its page has painted, or after `capMs`; `false`: shown the moment it is made       | every desktop OS                                                                                  |
+| `electron.backgroundColor`                                                 | the theme's page background, else Electron's                               | the window's colour before the page paints: `"#rrggbb"` or `{ light, dark }`                                                | every desktop OS                                                                                  |
+| `electron.downloadWindow.heading`                                          | `"Getting {title} ready"`                                                  | the download window's heading (with no `build.splash`)                                                                      | Windows Forms, Cocoa, GTK, yad, zenity                                                            |
+| `electron.downloadWindow.text`                                             | `"Downloading Electron {version} — first start only · {got} / {total} MB"` | its detail line; `{title}`, `{version}`, `{got}`, `{total}`                                                                 | as above                                                                                          |
+| `electron.downloadWindow.question`                                         | aio's (what failed, how to fix it)                                         | the Retry / Quit question's text; `{title}`, `{version}`, `{reason}`                                                        | as above                                                                                          |
+| `electron.downloadWindow.background`, `.color`, `.bar.color`, `.bar.track` | the app's identity colours, light or dark as the OS is                     | the download window's and the question's colours; a colour set is used in both modes                                        | Windows Forms, Cocoa, GTK; yad/zenity: the GTK theme's                                            |
+| `electron.downloadWindow.cancel`                                           | `true`                                                                     | the download window's Cancel button (its close cancels either way)                                                          | zenity keeps its own OK, greyed                                                                   |
 
 `electron.*` keys are `aio.run({ electron: { … } })` options, read when the app
 starts — a packaged app included.

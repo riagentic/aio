@@ -178,6 +178,21 @@ Deno.test("am backup: a finished copy is renamed into place", async () => {
       [...Deno.readDirSync(base)].map((e) => e.name).includes("bk.partial"),
       false,
     );
+    assertEquals(r.out.includes("NO state.db"), false, r.out);
+  } finally {
+    await done(base);
+  }
+});
+
+Deno.test("am backup: a data/ with no state.db (an app run with dbPath) is said, not a silent success", async () => {
+  const { base, d } = await world();
+  try {
+    Deno.removeSync(d.stateDb); // the state lives at the app's dbPath
+    const dest = join(base, "bk");
+    const r = await run(cmdBackup, [dest]);
+    assertEquals(r.exited, null, r.out); // still a backup of data/
+    assertStringIncludes(r.out, "NO state.db");
+    assertStringIncludes(r.out, "dbPath");
   } finally {
     await done(base);
   }

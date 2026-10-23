@@ -1,7 +1,7 @@
 // renderer-rerender.ts — per-component reactive re-render, signal subscription, hooks factory.
 // Provides: _scheduleComponentRender, _rerenderComponent, _subscribeComponentDeps, _createHooks.
 
-import { nullSlot } from "./vdom-create.ts";
+import { _throwIfNotANode, nullSlot } from "./vdom-create.ts";
 import {
   _wrongPrefix,
   isDevMode,
@@ -294,6 +294,7 @@ export function _rerenderComponent(inst: ComponentInstance): void {
           : (vnode.props.children ?? vnode.children),
       });
     }
+    _throwIfNotANode(rendered);
   } catch (error) {
     // Popped FIRST: the fallback re-entry below rebuilds its own chain.
     popChain();
@@ -315,11 +316,16 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     // `console.error`'d and dropped, so `testUI` showed stale content and an
     // assertion on the OLD value passed "correctly". Prod keeps its graceful
     // degradation (keep the last good output) — this is dev-stricter-only,
-    // category (b).
-    _renderErrorSink?.(
-      error instanceof Error ? error : new Error(String(error)),
-      failedName,
-    );
+    // category (b). Only when the content IS stale: a throw an enclosing
+    // `<ErrorBoundary>` catches below shows the author's fallback, the same
+    // outcome a mount-time throw under a boundary has, which passes.
+    const fb = _boundaryFallback(inst._boundary);
+    if (!(fb && inst._fallbackError === undefined)) {
+      _renderErrorSink?.(
+        error instanceof Error ? error : new Error(String(error)),
+        failedName,
+      );
+    }
     // `<ErrorBoundary>` on the RE-RENDER path. Mount already unwinds to the
     // boundary; a later throw did not, so the subtree kept its last good
     // output and silently stopped updating — a panel that quietly stops being
@@ -330,7 +336,6 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     // way to replace a subtree's DOM. The boundary's other children are
     // untouched: containing the failure where it happened loses less than
     // replacing everything beside it.
-    const fb = _boundaryFallback(inst._boundary);
     if (fb && inst._fallbackError === undefined) {
       // Re-enter, rendering the fallback instead of the component. Re-entry
       // rather than a second DOM-patching path: everything below — the diff,
@@ -822,6 +827,11 @@ export function _setRenderErrorSink(
   fn: ((e: Error, component: string) => void) | null,
 ): void {
   _renderErrorSink = fn;
+}
+
+/** The render-error sink in place — so a harness can chain to it. @internal */
+export function _renderErrorSinkInPlace(): typeof _renderErrorSink {
+  return _renderErrorSink;
 }
 
 export function _createHooks(rootState: RootState): VDomHooks {

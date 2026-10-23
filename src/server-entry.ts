@@ -24,6 +24,21 @@ export { reactiveDB } from "./db/reactive.ts";
 export type { DB, DBOpts, QueryResult, Tx } from "./db/mod.ts";
 export type { ReactiveDB, ReactiveQuery } from "./db/reactive.ts";
 export { connectCli, connectCliUDS } from "./server/cli-client.ts";
+// One aio app using another, by appId, with no source of it: calls by name,
+// `describe()` of what this caller may call (docs/basics/cross-app.md).
+export {
+  type Peer,
+  peer,
+  type PeerBlob,
+  type PeerCell,
+  type PeerDescription,
+  type PeerMethod,
+  type PeerOptions,
+  type PeerStream,
+} from "./server/peer.ts";
+// …and the other side of `peer().stream()`: a method sends its caller pieces
+// of the result while it runs.
+export { emitChunk } from "./server/call-stream.ts";
 // Signed release artifacts (`aio ship`) live on `aio/build` — build-time
 // tooling, not server runtime; the duplicate export here was surface bloat.
 

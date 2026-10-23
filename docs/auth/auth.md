@@ -284,6 +284,11 @@ await aio.run({ cells: [myCell], resolveUser });
 - `resolveUser(token, state)` is called with the extracted token and current app
   state
 - Return `AioUser` to authenticate, `null` to reject (401)
+- The user must be `{ id: "<non-empty string>", role: "<string>" }` (plus any
+  fields). A malformed answer is logged once per shape. One that names nobody —
+  a bare string like `"admin"`, no `id`, an empty `id` — is refused (401) in dev
+  and accepted with that warning in production; a missing `role` is warned in
+  both. The same check covers static `users:` entries
 - Supports async — return a `Promise<AioUser | null>` for JWT verification,
   database lookups, etc.
 - If both `resolveUser` and `users` are set, `resolveUser` takes precedence

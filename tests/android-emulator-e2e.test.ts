@@ -139,6 +139,10 @@ async function ensureEmulator(): Promise<{ serial: string; started: boolean }> {
         null,
     120_000,
   );
+  // Every adb call below names it: with a phone also plugged in, a bare
+  // `adb shell` answers "more than one device" and the boot wait read that
+  // as "not yet" for its whole ten minutes.
+  SERIAL = serial;
   // Ten minutes: on a machine that is also running a suite the boot took
   // 4 min 30 s, twice (load 13–16, 2026-10-13) — past the four minutes this
   // gave it, and the emulator this run had started was left running, since

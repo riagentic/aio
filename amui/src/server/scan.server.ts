@@ -71,7 +71,13 @@ export interface DiscoveredProject {
      *  one appId apart, and what a restart must boot again. */
     home?: string;
     profile?: string;
+    /** The client it runs (the lock's) — what a restart boots again. */
+    client?: string;
   } | null;
+  /** The last instance amui saw run from this directory, on an entry that is
+   *  no longer running — where its logs are (`~/.<appId>/logs`) once the lock
+   *  that named them is gone, i.e. exactly when a crash needs reading. */
+  lastRun?: { appId: string; home?: string };
   /** true when a `.git` dir is present. */
   git: boolean;
   /** true for amui itself. amui is an aio app like any other, so it appears in
@@ -341,6 +347,9 @@ export const rootsExample = (os: OS): string =>
     ? "AMUI_ROOTS=C:\\path;D:\\path2"
     : "AMUI_ROOTS=/path:/path2";
 
+/** cwd → the last instance this amui process saw running there. */
+const lastRuns = new Map<string, { appId: string; home?: string }>();
+
 /** Discover every aio project: running instances (with cwd) ∪ on-disk scan.
  *  Returns the projects plus the roots searched (surfaced in the empty state so
  *  "found nothing" is diagnosable, not a mystery). */
@@ -412,13 +421,43 @@ export async function discoverProjects(): Promise<
         ...(i.maintenance ? { maintenance: i.maintenance } : {}),
         ...(i.home ? { home: i.home } : {}),
         ...(i.profile ? { profile: i.profile } : {}),
+        ...(i.client ? { client: i.client } : {}),
       },
       git,
     };
     if (i.pid === Deno.pid || self.has(i.cwd)) entry.self = true;
     byId.set(entry.id, entry);
+    // Not a maintenance hold: its cwd is wherever `am backup` ran.
+    if (!i.maintenance) {
+      lastRuns.set(i.cwd, {
+        appId: i.appId,
+        ...(i.home ? { home: i.home } : {}),
+      });
+    }
   }
   for (const p of ran) byPath.delete(p);
+  // An app amui watched run, from a directory the disk walk does not reach
+  // (a scratch app under /tmp): it stays listed once it stops — a crash
+  // otherwise made the entry, the selection and its logs vanish together.
+  for (const p of lastRuns.keys()) {
+    if (ran.has(p) || byPath.has(p) || !await isDir(p)) continue;
+    const meta = await readProjectMeta(p);
+    // A compiled app launched from $HOME or / ran in a folder that is no
+    // project: listed after it stopped, it was a phantom Start could not run.
+    if (!meta.isAio) continue;
+    byPath.set(p, {
+      id: p,
+      path: p,
+      name: meta.name || basename(p) || p,
+      meta,
+      running: null,
+      git: await isDir(join(p, ".git")),
+    });
+  }
+  for (const [p, entry] of byPath) {
+    const last = lastRuns.get(p);
+    if (last) entry.lastRun = { ...last };
+  }
   for (const [p, entry] of byPath) {
     if (self.has(p)) entry.self = true;
     byId.set(entry.id, entry);

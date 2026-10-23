@@ -43,3 +43,42 @@ Deno.test("a raw route proxying a fetch() response is served", async () => {
     await upstream.shutdown();
   }
 });
+
+// Shared-key mode: the request that proves the key with `?token=` (the share
+// link `aio` prints) gets the key cookie APPENDED to whatever answers it — and
+// that append threw on an immutable response, so a redirect route reached by
+// the share link answered 500 instead of its 302.
+Deno.test("shared key: ?token= into a Response.redirect() route is a 302 that carries the key cookie", async () => {
+  const { join } = await import("@std/path");
+  const baseDir = await Deno.makeTempDir({ prefix: "aio-key-redir-" });
+  const srv = await testServer({
+    appId: "keyredir",
+    cells: [cell("keyredir", { state: { n: 0 }, methods: {} })],
+    expose: true,
+    key: "secret-key-123",
+    baseDir,
+    routes: {
+      "/go": () => Response.redirect("https://127.0.0.1/elsewhere", 302),
+    },
+  } as never);
+  const cert = await Deno.readTextFile(
+    join(baseDir, ".aio", "data", "tls", "tls-cert.pem"),
+  );
+  const client = Deno.createHttpClient({ caCerts: [cert] });
+  try {
+    const r = await fetch(
+      `https://127.0.0.1:${srv.port}/go?token=secret-key-123`,
+      { client, redirect: "manual" } as RequestInit & {
+        client: Deno.HttpClient;
+      },
+    );
+    await r.body?.cancel();
+    assertEquals(r.status, 302);
+    assertEquals(r.headers.get("location"), "https://127.0.0.1/elsewhere");
+    assert(r.headers.get("set-cookie")?.startsWith("aio_key_keyredir="));
+  } finally {
+    client.close();
+    await srv.close();
+    await Deno.remove(baseDir, { recursive: true });
+  }
+});

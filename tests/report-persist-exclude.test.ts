@@ -154,3 +154,25 @@ Deno.test("report timeline: diff values and args of writes to a persist-excluded
   assertEquals(r.timeline![0]!.diff[0]!.after, "ann", "a kept leaf stays");
   assertEquals(r.state?.o, { n: 1 });
 });
+
+// The timeline screen called `visibleValueAt` without the persist reading of
+// `*`, so a `*.token` exclude — which the store itself honours — left the
+// value unredacted in `data/reports/*.json`.
+Deno.test("report timeline: a persist `*` segment redacts the diff leaf it names", async () => {
+  const timeline: TimelineEntry[] = [{
+    seq: 1,
+    ts: 1,
+    type: "auth:set",
+    diff: [
+      { path: "auth.sess.token", before: "", after: TOKEN },
+      { path: "auth.sess", before: {}, after: { token: TOKEN, n: 1 } },
+    ],
+  }];
+  const r = await buildReport({ kind: "user", title: "t" }, {
+    ...sources(timeline),
+    _persistFilters: { auth: { exclude: ["*.token"] }, o: "all" as const },
+  });
+  const text = JSON.stringify(r.timeline);
+  assert(!text.includes(TOKEN), text);
+  assertEquals(r.timeline![0]!.diff[1]!.after, { n: 1 });
+});

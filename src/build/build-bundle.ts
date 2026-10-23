@@ -644,6 +644,22 @@ export async function runBundle(
     const strings = (v: unknown): string[] =>
       Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
     for (const input of inputs) {
+      // `import "./widget.css"`: esbuild emits it beside app.js, the dist
+      // sweep drops it, and the page links only the app's stylesheet — dev
+      // refuses it (graph-validator.ts), so the build says it too.
+      if (input.endsWith(".css")) {
+        // The linked stylesheet itself, imported too, does reach the page.
+        if (resolve(root, input) === resolve(appDir, APP_STYLE)) continue;
+        warn(
+          `${input} is imported by a module and never reaches the page — ` +
+            `aio does not load CSS through imports: the only stylesheet ` +
+            `the page links is ${APP_STYLE} next to your entry.`,
+          undefined,
+          `delete the import line and move the rules into ${APP_STYLE}, or ` +
+            `\`@import\` that file from ${APP_STYLE}.`,
+        );
+        continue;
+      }
       if (input.startsWith("..") || input.includes("node_modules/")) continue;
       const code = await Deno.readTextFile(join(root, input)).catch(() => {
         // aio-ok: a plugin's virtual input has no file here to read
@@ -1061,10 +1077,13 @@ export async function runBundle(
     // appTitle → binaryName → the app dir's own name. `binaryName` is always
     // set by loadBuildConfig, but the bundle step is also driven by harnesses
     // with a hand-built config — the icon label must resolve to SOMETHING.
-    const label = appIconLabel(appTitle, binaryName ?? basename(appDir));
+    const label = appIconLabel(
+      appTitle,
+      cfg.appId ?? binaryName ?? basename(appDir),
+    );
     // The HUE keys on the appId (binaryName), as the theme does — a title
     // that is not the appId's spelling must not paint another colour.
-    const id = binaryName ?? label;
+    const id = cfg.hue ?? cfg.appId ?? binaryName ?? label;
     await Deno.writeFile(
       join(dist, APP_ICON),
       await appIconPng(label, 512, id),

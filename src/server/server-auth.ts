@@ -6,6 +6,8 @@ import type { AioUser } from "./aio.ts";
 import { parseCookies } from "./route.ts";
 import { slugify } from "./single-instance-lock.ts";
 import { certSubjectAltNames } from "./x509.ts";
+import { firstTime } from "../protocol/said-once.ts";
+import { isDevMode } from "../state/dev-flag.ts";
 
 // Constant-time string comparison — prevents timing attacks on token auth
 // Compares full length even on mismatch to avoid leaking token length
@@ -173,17 +175,88 @@ export function _buildUserResolver(config: {
   resolveUser?: UserResolverFn;
   users?: Record<string, AioUser>;
 }): UserResolverFn | null {
-  if (config.resolveUser) return config.resolveUser;
+  if (config.resolveUser) {
+    return _shapeChecked("resolveUser", config.resolveUser);
+  }
   if (config.users) {
     const users = config.users;
-    return (token: string) => {
+    return _shapeChecked("users", (token: string) => {
       for (const [t, user] of Object.entries(users)) {
         if (_timingSafeEqual(token, t)) return user;
       }
       return null;
+    });
+  }
+  return null;
+}
+
+/** What is wrong with a resolved user, or null for `{ id: "<non-empty>" | n,
+ *  role: "<string>" }`. `identity` = the record names NOBODY (not an object,
+ *  or no non-empty string / finite number `id`) — every per-user reader
+ *  (`user.id` in access filters, `own`, per-user views) sees `undefined`/`""`
+ *  for it. A finite NUMBER id (`{ id: row.id }` from SQLite) names someone.
+ *  `kind` names the fault without the user: the once-only key is one per
+ *  fault, never one per user (that flooded the shared once-only set). Pure. */
+export function _userShapeFault(
+  u: unknown,
+): { fault: string; kind: string; identity: boolean } | null {
+  if (typeof u !== "object" || u === null || Array.isArray(u)) {
+    const fault = Array.isArray(u) ? "an array" : `a ${typeof u}`;
+    return { fault, kind: fault, identity: true };
+  }
+  const { id, role } = u as Record<string, unknown>;
+  const named = (typeof id === "string" && id !== "") ||
+    (typeof id === "number" && Number.isFinite(id));
+  if (!named) {
+    const fault = id === ""
+      ? "an empty id"
+      : "an object with no string or number id";
+    return { fault, kind: fault, identity: true };
+  }
+  if (typeof role !== "string") {
+    return {
+      fault: `user ${JSON.stringify(id)} with no string role`,
+      kind: "no role",
+      identity: false,
     };
   }
   return null;
+}
+
+/** A resolver whose malformed answers are SAID, never silently accepted (a
+ *  field report: `resolveUser` returning `"admin"` authenticated every caller
+ *  as a user with no id). Once per shape, prod too. A record that names
+ *  nobody is refused (unauthenticated) in dev — dev stricter than prod, which
+ *  keeps accepting it so an app that works today keeps working. A falsy
+ *  answer is "no user" already and passes through. */
+/** Any user-returning hook (`resolveUser`, `resolvePeer`), shape-checked. */
+export function _shapeChecked<T>(
+  src: string,
+  f: (arg: T) => AioUser | null | Promise<AioUser | null>,
+): (arg: T) => AioUser | null | Promise<AioUser | null> {
+  const check = (u: AioUser | null): AioUser | null => {
+    if (!u) return u;
+    const bad = _userShapeFault(u);
+    if (!bad) return u;
+    const refuse = bad.identity && isDevMode();
+    if (firstTime(`user-shape ${src} ${bad.kind}`)) {
+      log.warn(
+        "auth",
+        `${src} returned ${bad.fault} — expected { id: "<non-empty string or finite number>", role: "<string>" }. ` +
+          (refuse
+            ? "Refused in dev (treated as unauthenticated); a production build accepts it with this warning. Fix the hook."
+            : "Accepted as authenticated" +
+              (bad.identity
+                ? ", but it names nobody: every per-user check sees no id."
+                : ".")),
+      );
+    }
+    return refuse ? null : u;
+  };
+  return (arg) => {
+    const r = f(arg);
+    return r instanceof Promise ? r.then(check) : check(r);
+  };
 }
 
 /** Below either bound a static `users:` token is WEAK. A VALID credential is
@@ -498,6 +571,9 @@ export function cellAccessAllowed(
   user: AioUser | undefined,
   method: string,
   args: unknown[] = [],
+  /** Ask without logging — `describe` probes every method, and a row-level
+   *  rule that needs args it was not given is a quiet "no", not an error. */
+  quiet = false,
 ): boolean {
   if (rule === true) return user !== undefined;
   if (typeof rule === "string") return user?.role === rule;
@@ -506,6 +582,7 @@ export function cellAccessAllowed(
     try {
       answer = rule(user, method, ...args);
     } catch (e) {
+      if (quiet) return false;
       // A guard that cannot answer is not a yes — the same rule the update
       // applier's `canApply` follows. The alternative is a 500 whose cause is
       // three layers away from the sentence that would have explained it.
@@ -517,6 +594,7 @@ export function cellAccessAllowed(
       return false;
     }
     if (typeof answer === "boolean") return answer;
+    if (quiet) return false;
     // NOT a boolean. This used to be returned as-is into `if (!allowed)`, so
     // any truthy non-boolean granted access — and the one an app reaches for
     // by accident is a PROMISE: `access: async (u) => await check(u)` is a

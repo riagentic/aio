@@ -157,6 +157,9 @@ function __aioSplashOpen() {
     w.setAlwaysOnTop(true, 'floating');
     w.once('ready-to-show', () => {
       if (__aioSplGone || w.isDestroyed()) return;
+      // The app's window already showed: the splash goes at once, never
+      // over it (splashStep: ready before the splash is on screen).
+      if (__aioSplReady) return __aioSplashClose('ready');
       w.showInactive();
       __aioSplAt = Date.now();
       ${
@@ -195,7 +198,9 @@ function __aioSplashOnWindow(at, first) {
     __aioSplashSettle();
   }
   if (__aioSpl.mode === 'window' && __aioSpl.follow && __aioSplWin && !__aioSplWin.isDestroyed()) {
-    try { const p = __aioSplashPlace(at); __aioSplWin.setPosition(p.x, p.y); } catch {}
+    // at.screen (Windows) is the WINDOW's rect in physical px, for the
+    // helpers — not a work area: centre within the display it is on.
+    try { const p = __aioSplashPlace({ x: at.x, y: at.y, width: at.width, height: at.height }); __aioSplWin.setPosition(p.x, p.y); } catch {}
   }
 }
 __aioSplashOpen();

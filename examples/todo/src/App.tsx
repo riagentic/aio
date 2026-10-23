@@ -64,6 +64,7 @@ export default function App(): JSX.Element {
               class="ghost"
               onClick={() =>
                 todo.remove(t.id)}
+              aria-label={"Remove " + t.text}
             >
               ×
             </button>

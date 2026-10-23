@@ -416,6 +416,50 @@ function projectOf(
   return null;
 }
 
+/** The app's base dir as its server resolves it — the folder of the module
+ *  it runs (`src/` for `src/app.ts`) in the test's project — or null with no
+ *  project. With no entry on disk, the module a deno.json task `deno run`s
+ *  (`dev` / `start` / `serve` first — an app run as `deno run -A main.ts`
+ *  serves the project root); else `src/`
+ *  when it exists, else the project root. */
+export function appDirOf(testFile: string | null): string | null {
+  const project = projectOf(testFile);
+  if (!project) return null;
+  const exists = (p: string) => {
+    try {
+      Deno.statSync(p);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const entry = join(project.dir, resolveEntryPath(project.config));
+  if (exists(entry)) return dirname(entry);
+  const tasks = (project.config.tasks && typeof project.config.tasks ===
+      "object"
+    ? project.config.tasks
+    : {}) as Record<string, unknown>;
+  // The app's own run tasks first: a `gen` / `build` helper task also
+  // `deno run`s a module, and its folder is not the app's.
+  const order = ["dev", "start", "serve"].filter((k) =>
+    Object.hasOwn(tasks, k)
+  );
+  for (const k of Object.keys(tasks)) if (!order.includes(k)) order.push(k);
+  for (const t of order.map((k) => tasks[k])) {
+    const cmd = typeof t === "string"
+      ? t
+      : (t as { command?: unknown })?.command;
+    if (typeof cmd !== "string") continue;
+    const m = cmd.match(
+      /\bdeno\s+run\b[^&|;]*?\s([^\s&|;"']+\.(?:tsx?|jsx?|mjs))\b/,
+    );
+    if (m && exists(join(project.dir, m[1]!))) {
+      return dirname(join(project.dir, m[1]!));
+    }
+  }
+  return exists(dirname(entry)) ? dirname(entry) : project.dir;
+}
+
 /** Resolve the look the app's real page would have. */
 export function appLook(testFile: string | null): AppLook {
   const project = projectOf(testFile);

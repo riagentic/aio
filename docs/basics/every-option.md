@@ -1,12 +1,12 @@
 # Every option, one page
 
 > Generated from the source by `deno task update:reference` — do not edit by
-> hand; `check:release` fails when it is stale. 193 entries: the signature, what
+> hand; `check:release` fails when it is stale. 196 entries: the signature, what
 > it does, an example when the source has one, and the file it lives in. The
 > guides explain; this page is for looking a name up.
 
 - [cell options](#cell-options) — 25
-- [aio.run options](#aiorun-options) — 81
+- [aio.run options](#aiorun-options) — 84
 - [aio/air](#aioair) — 87
 
 ## cell options
@@ -180,7 +180,7 @@ nothing. { include: [...] } or { exclude: [...] } for field-level control.
 <sub>src/state/cell-config-types.ts</sub>
 
 ```ts
-persist: { exclude: ["draft", "scrollTop"] },
+persist: { exclude: ["draft", "scrollTop", "feeds.*.busy"] },
 ```
 
 ### `diagnostics`
@@ -703,6 +703,35 @@ resolveUser?: ResolveUserFn
 `(token, state) => user | null` — authenticate each connection's token against
 current state. <sub>src/server/aio-types.ts</sub>
 
+### `resolvePeer`
+
+```ts
+resolvePeer?: ResolvePeerFn
+```
+
+Admit another aio app on THIS machine by its proven appId — the user its
+`peer()` connection gets: `resolvePeer: (p) => ({ id: p.app, role: "app" })`.
+<sub>src/server/aio-types.ts</sub>
+
+```ts
+resolvePeer: (p) => p.app === "billing" ? { id: p.app, role: "app" } : null,
+```
+
+### `peerTypes`
+
+```ts
+peerTypes?: string
+```
+
+The TypeScript types other apps call this one with, as SOURCE TEXT —
+`import types from "./contract.ts" with { type: "text" }`.
+<sub>src/server/aio-types.ts</sub>
+
+```ts
+import types from "./contract.ts" with { type: "text" };
+aio.run({ cells, peerTypes: types }); // am peer <appId> --types=… saves it
+```
+
 ### `sessions`
 
 ```ts
@@ -921,6 +950,24 @@ production local-peer lockdown —, and `ignoreDebugEnv` — ambient `AIO_CDP` /
 aio.run({
   cells: [wallet],
   electron: { requireSandbox: true, unsandboxedChildWindows: false },
+});
+```
+
+### `splash`
+
+```ts
+splash?: { show? }
+```
+
+The desktop app's run-time say over its start splash (`build.splash`).
+<sub>src/server/aio-types.ts</sub>
+
+```ts
+aio.run({
+  cells,
+  splash: {
+    show: () => settings.splashAtStart ? "always" : "firstStart",
+  },
 });
 ```
 

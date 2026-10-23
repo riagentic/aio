@@ -80,6 +80,15 @@ Deno.test("dispatch: a SHORT call still runs, and the reply says so", async () =
     const full = await dispatch(port, "shortcall:addTwo", ["one", "two"]);
     assertEquals(full.ok, true);
     assertEquals("short" in full, false, JSON.stringify(full));
+    assertEquals("extra" in full, false, JSON.stringify(full));
+
+    // MORE than it requires: run, and said — `am dispatch todo:add hello
+    // world` stored "hello" and dropped "world" without a word.
+    const extra = await dispatch(port, "shortcall:addTwo", ["a", "b", "c"]);
+    assertEquals(extra.ok, true, "never refused: a rest/default may take it");
+    assert(typeof extra.extra === "string", JSON.stringify(extra));
+    assert((extra.extra as string).includes("passed 3"), extra.extra as string);
+    assert((extra.extra as string).includes("quote it"), extra.extra as string);
 
     // The body-defaulter: `fn.length` says 1, the method needs none. It still
     // reports — the framework cannot tell it apart, and says which spelling

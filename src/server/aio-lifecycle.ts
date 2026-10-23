@@ -52,7 +52,12 @@ import { appKeyPath } from "./app-key.ts";
 import { type Log, log as globalLog } from "../diagnostics/logger-api.ts";
 import type { DB } from "../db/mod.ts";
 import type { ScheduleDef } from "../state/schedule.ts";
-import { appIconLabel, appIconPngBase64 } from "../build/app-icon.ts";
+import {
+  appIconLabel,
+  appIconPngBase64,
+  type HueKey,
+  hueKey,
+} from "../build/app-icon.ts";
 import { identityDialogColors, windowBackground } from "../build/app-theme.ts";
 import { appHasStylesheet } from "./app-files.ts";
 import { appConfigTitle } from "./deno-json.ts";
@@ -368,7 +373,7 @@ export function shareLink(
 /** A run from source: deno.json `build.splash`, resolved as its build
  *  would bake it (`sourceSplash`). A spec the build would refuse is said
  *  with the build's own words, and this start goes on without a splash. */
-function sourceSplashSpec(appId: string, version: string) {
+function sourceSplashSpec(appId: HueKey, version: string) {
   const located = appDenoJsonLocated();
   if (!located || located.dir.protocol !== "file:") return undefined;
   const r = sourceSplash(located.config, {
@@ -376,6 +381,8 @@ function sourceSplashSpec(appId: string, version: string) {
     appId,
     version,
     restarted: isSupervisedChild(),
+    // Through the app's logger (its level, its quiet), as the build's own.
+    warn: (m: string) => globalLog.warn("electron", m),
     read: (p) => {
       try {
         return Deno.readFileSync(p);
@@ -417,6 +424,8 @@ export interface LifecycleDeps<S, A> {
   childWindows: boolean;
   /** The Electron process's own security decisions — see ElectronConfig. */
   electron?: import("./aio-types.ts").ElectronConfig;
+  /** The app's run-time say over the start splash — see AioRunOptions. */
+  splash?: import("./aio-types.ts").CellsConfig["splash"];
   // Client / transport
   client: string;
   useElectron: boolean;
@@ -597,7 +606,7 @@ export function noDesktopSessionWarning(
  *  the APPID's hue — the key the theme and every packaged icon tint on. The
  *  title hashed alone gave every app with no title the "AIO App" fallback's
  *  colour, unrelated to its own buttons. */
-export function devWindowIcon(title: string, appId: string): Promise<string> {
+export function devWindowIcon(title: string, appId: HueKey): Promise<string> {
   return appIconPngBase64(title, 256, appId);
 }
 
@@ -614,6 +623,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     singletonMode,
     childWindows,
     electron: electronConfig,
+    splash: splashConfig,
     client,
     useElectron,
     isHeadless,
@@ -649,6 +659,9 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     window: updateWindow,
     log,
   } = deps;
+  // The key every identity colour is drawn from: deno.json `hue`, else the
+  // appId to hash — one app, one colour: the window, its icon, its splash.
+  const hue = hueKey(appDenoJsonLocated()?.config, appId);
   noteLifecycle({ libraryMode: !!libraryMode });
 
   // Set __aio global variables
@@ -1096,10 +1109,10 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         electronConfig?.backgroundColor,
         ui.theme,
         appHasStylesheet(deps.baseDir, electronDistDir),
-        appId,
+        hue,
       ),
       // What a first start's download window and its question wear.
-      colors: identityDialogColors(appId, electronConfig?.downloadWindow),
+      colors: identityDialogColors(hue, electronConfig?.downloadWindow),
 
       tray: ui.tray,
       // WHICH Chromium profile this window opens. Two homes of one app are
@@ -1129,9 +1142,8 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     const launchHooks: LaunchHooks = {
       ...updateWindow?.hooks,
       previous: previous && (async () => (handedOver = await previous())),
-      splash: isCompiled()
-        ? undefined
-        : sourceSplashSpec(appId, deps.appVersion),
+      splash: isCompiled() ? undefined : sourceSplashSpec(hue, deps.appVersion),
+      splashShow: splashConfig?.show,
     };
     // NOT distDir — that can be the binary's embedded VFS copy, which this
     // (foreign) Electron process cannot open. Undefined ⇒ it loads over HTTP,
@@ -1195,7 +1207,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           layout: ui.layout,
           dir: ui.dir,
           lang: ui.lang,
-          themeName: appId,
+          themeName: hue,
           appVersion: deps.appVersion,
           // The policy travels WITH the document, because this shell is
           // returned from the Electron main process and never meets the
@@ -1212,7 +1224,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     // launch, so the dev window is identified exactly like the packaged one
     // (which reads dist/icon.png, written by the same generator). A failure to
     // draw it must never stop the app from starting — it is an icon.
-    devWindowIcon(appIconLabel(appConfigTitle(deps.baseDir), appId), appId)
+    devWindowIcon(appIconLabel(appConfigTitle(deps.baseDir), appId), hue)
       .catch(() => "")
       .then(async (defaultIcon) => {
         // The guest preloads this window may load by name: the package's

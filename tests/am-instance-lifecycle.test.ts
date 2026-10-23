@@ -316,7 +316,7 @@ Deno.test({
         "an instance saw another instance",
       );
 
-      // A second start names the private copy.
+      // A second start names the private copy — ANOTHER instance name.
       const again = await am(
         {},
         "start",
@@ -325,7 +325,10 @@ Deno.test({
         "--json",
       );
       assertEquals(again.code, 1);
-      assertStringIncludes(last(again.out).fix ?? "", "--instance=<name>");
+      assertStringIncludes(
+        last(again.out).fix ?? "",
+        "--instance=<a name other than t>",
+      );
 
       // Restart from a shell WITHOUT the start's XDG_DATA_HOME: replayed.
       const r = await am(

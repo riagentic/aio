@@ -10,12 +10,17 @@ import {
   _notANode,
   _registerLazyListeners,
   _tagComponentError,
+  _throwIfNotANode,
   nullSlot,
 } from "./vdom-create.ts";
 import { _componentName } from "./hook-error.ts";
 import { applyChildDependentProps, applyProps } from "./vdom-props.ts";
 import { _assertTagName } from "./prop-write.ts";
-import { _removeDomCleanup, getDom } from "./vdom-remove.ts";
+import {
+  _removeDomCleanup,
+  _supersededPortals,
+  getDom,
+} from "./vdom-remove.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
   _devA11yCheckFn,
@@ -31,7 +36,7 @@ import {
   SVG_TAGS,
 } from "./vdom-types.ts";
 import type { ComponentFn, RenderCtx, VNode } from "./vdom-types.ts";
-import { _boundaryStack, _noteDiscard } from "./renderer-state.ts";
+import { _activeRoot, _boundaryStack, _noteDiscard } from "./renderer-state.ts";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -203,6 +208,7 @@ export function createDom(
           ? vnode.children
           : (vnode.props.children ?? vnode.children),
       });
+      _throwIfNotANode(rendered);
     } catch (e) {
       ctx.hooks?.abortComponent?.(vnode, hookState);
       if (e !== _LAZY_PENDING) {
@@ -343,6 +349,7 @@ export function createDom(
 
   // Portal — render children into target DOM node
   if (vnode.tag === Portal) {
+    _supersededPortals.delete(vnode); // live again (see the set)
     const target = vnode.props.target as Node;
     if (!target) return null;
     // AIO-184: try-finally ensures delegation root is restored on error
@@ -350,6 +357,15 @@ export function createDom(
     if ((target as Node).nodeType === 1) {
       _setDelegationRoot(target as Element);
     }
+    // Hydrating: the server rendered NONE of a portal's content (there is no
+    // target on a server), so none of its `useId()`s are the server's. Drawn
+    // from the server's sequence, a portal took the page's next id and every
+    // id after it moved up one (`:r0:` written by the server became `:r1:`),
+    // with dev blaming correct code for "server markup that disagrees". The
+    // content takes client ids; the server's sequence resumes after it.
+    const root = _activeRoot;
+    const ssrIds = root?._ssrIds;
+    if (root) root._ssrIds = false;
     try {
       // A portal's content is a REGION of the target, not the whole of it.
       // When the target already holds something — another portal (a modal and
@@ -388,6 +404,7 @@ export function createDom(
         if (end.parentNode === target) target.removeChild(end);
       }
     } finally {
+      if (root) root._ssrIds = ssrIds;
       _setDelegationRoot(prevDelegation);
     }
     // Portal has no DOM in its parent — it renders elsewhere

@@ -497,38 +497,30 @@ yet therefore heals itself within the reconnect backoff, out loud.
 
 `<webview>` renders once the app turns the tag on (`childWindows: true` or
 `electron: { webviewTag: true }`, see [webview](webview.md#turn-it-on)); without
-either it does not render at all. What TypeScript refuses is its **attributes**:
-aio's intrinsic element map admits any tag name and hands back the standard HTML
-attribute set, which has no `src` or `partition`.
-
-Declare it once, and it is typed exactly the way you want:
-
-```ts
-// types/webview.d.ts
-declare module "aio/jsx-runtime" {
-  interface JsxIntrinsicElements {
-    webview: {
-      src?: string;
-      partition?: string;
-      allowpopups?: boolean;
-      preload?: string;
-    };
-  }
-}
-```
+either it does not render at all. Its attributes are typed out of the box —
+`src`, `partition`, `httpreferrer`, `useragent`, `allowpopups`, `preload`,
+`webpreferences`:
 
 ```tsx
 <webview src={url} partition="persist:session" allowpopups />;
 ```
 
-The same four lines work for any web component. This is TypeScript's own
-interface merging, so the declaration is yours: add exactly the attributes you
-use, and a typo in one of them is still a compile error — which a blanket
-"unknown elements take anything" would have cost you.
+Any other custom element — or another `<webview>` attribute — gets the standard
+HTML attribute set. Declare it once, and it is typed exactly the way you want:
 
-aio does not widen the map itself. Its index type is published surface, and the
-compatibility promise has no exceptions — not even for a widening that provably
-breaks nobody, because the value of the promise is that it has none.
+```ts
+// types/my-widget.d.ts
+declare module "aio/jsx-runtime" {
+  interface JsxIntrinsicElements {
+    "my-widget": { tilt?: number };
+  }
+}
+```
+
+This is TypeScript's own interface merging, so the declaration is yours: add
+exactly the attributes you use, and a typo in one of them is still a compile
+error — which a blanket "unknown elements take anything" would have cost you. A
+`webview` declared this way replaces the built-in attribute set for that tag.
 
 ## Child windows (`openWindow`)
 
@@ -834,13 +826,13 @@ xvfb-run -a deno task dev --client=electron
 An **allow-list**: the display, GPU, locale and logging vocabulary a headless
 host or a VM needs, and nothing else.
 
-| Group           | Switches                                                                                                                                                                                                                  |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GPU / rendering | `--disable-gpu` · `--disable-gpu-compositing` · `--disable-software-rasterizer` · `--disable-accelerated-2d-canvas` · `--disable-accelerated-video-decode` · `--enable-unsafe-swiftshader` · `--use-gl=` · `--use-angle=` |
-| Display         | `--ozone-platform=` · `--ozone-platform-hint=` · `--force-device-scale-factor=` · `--force-color-profile=` · `--disable-lcd-text` · `--disable-smooth-scrolling`                                                          |
-| Memory          | `--disable-dev-shm-usage`                                                                                                                                                                                                 |
-| Background work | `--disable-background-timer-throttling` · `--disable-backgrounding-occluded-windows` · `--disable-renderer-backgrounding`                                                                                                 |
-| Locale / logs   | `--lang=` · `--enable-logging` · `--log-level=`                                                                                                                                                                           |
+| Group           | Switches                                                                                                                                                                                                                                             |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GPU / rendering | `--disable-gpu` · `--disable-gpu-compositing` · `--disable-software-rasterizer` · `--disable-accelerated-2d-canvas` · `--disable-accelerated-video-decode` · `--enable-unsafe-swiftshader` · `--ignore-gpu-blocklist` · `--use-gl=` · `--use-angle=` |
+| Display         | `--ozone-platform=` · `--ozone-platform-hint=` · `--force-device-scale-factor=` · `--force-color-profile=` · `--disable-lcd-text` · `--disable-smooth-scrolling`                                                                                     |
+| Memory          | `--disable-dev-shm-usage`                                                                                                                                                                                                                            |
+| Background work | `--disable-background-timer-throttling` · `--disable-backgrounding-occluded-windows` · `--disable-renderer-backgrounding`                                                                                                                            |
+| Locale / logs   | `--lang=` · `--enable-logging` · `--log-level=`                                                                                                                                                                                                      |
 
 These switches are appended **last**, so they override aio's own — which is also
 why the list is closed. Whoever controls the launch environment (a `.desktop`

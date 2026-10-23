@@ -23,12 +23,14 @@ import { assert, assertEquals } from "@std/assert";
 import {
   displayChoice,
   type DisplayProbe,
+  NESTED_GPU_ARGS,
   planDisplay,
   readDisplayFlag,
   validDisplayChoice,
 } from "../src/am/am-display.ts";
 import { AIO_NESTED_DISPLAY } from "../src/server/nested-display.ts";
 import { clientOpensTabs } from "../src/am/am-cmd-process.ts";
+import { electronArgsFromEnv } from "../src/electron/electron-spawn.ts";
 
 const COOKIE = "/run/user/1000/aio/xephyr-77.auth";
 
@@ -379,4 +381,38 @@ Deno.test("a contained GUI launch on Windows/macOS says where the window really 
   }
   // Linux with no DISPLAY: unchanged, word for word.
   assertEquals(say("linux").note, "no desktop session — nothing to contain");
+});
+
+Deno.test("a window on am's own nested display renders WebGL in software; the caller's switches still win", () => {
+  const contained = (probe: DisplayProbe, inheritedElectronArgs?: string) =>
+    planDisplay({
+      choice: "auto",
+      gui: true,
+      interactive: false,
+      probe,
+      inheritedElectronArgs,
+    });
+  for (const probe of [UP, CAN_START]) {
+    assertEquals(
+      contained(probe, " --use-angle=gl ").env.AIO_ELECTRON_ARGS,
+      `${NESTED_GPU_ARGS} --use-angle=gl`,
+    );
+    assertEquals(contained(probe).env.AIO_ELECTRON_ARGS, NESTED_GPU_ARGS);
+  }
+  // Every switch is one the allow-list carries — else it would be refused.
+  assertEquals(electronArgsFromEnv(NESTED_GPU_ARGS).refused, []);
+  // Never on a display am does not own: the real desktop, a named :N, none.
+  const others = [
+    planDisplay({ choice: "auto", gui: true, interactive: true, probe: UP }),
+    planDisplay({
+      choice: "current",
+      gui: true,
+      interactive: false,
+      probe: UP,
+    }),
+    planDisplay({ choice: ":9", gui: true, interactive: false, probe: UP }),
+    contained(NO_XEPHYR),
+    contained(HEADLESS),
+  ];
+  for (const p of others) assertEquals(p.env.AIO_ELECTRON_ARGS, undefined);
 });

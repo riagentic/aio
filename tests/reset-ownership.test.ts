@@ -60,6 +60,12 @@ const OWNERS: Record<string, [Owner, string]> = {
     "that rendered nothing could read the PREVIOUS test's page out of " +
     "collectHead().",
   ],
+  _resetKitStylesCheck: [
+    "MANUAL",
+    'the once-per-page "kit is unstyled" dev hint lives in src/ui/, which ' +
+    "_resetAioRuntime may not import (the boundary matrix); the one test " +
+    "that asserts the hint clears it. A leak only silences that dev hint",
+  ],
   _resetCss: [
     "MANUAL",
     "scoped-CSS rules live in src/ui/, and neither src/state/ (where " +

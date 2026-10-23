@@ -386,13 +386,19 @@ methods: {
     s.status = "done";
   },
   stop() {
-    blocking.cancel("report:build"); // terminates the worker
+    blocking.cancel("report:build"); // terminates the worker (see below)
   },
 }
 ```
 
 The function is serialized to source, so it must be **self-contained** (no
 closures — pass data as `arg`), and `arg`/result must be structured-cloneable.
+
+A cancel releases the caller at once, but Deno cannot interrupt synchronous
+code: a task cancelled mid-loop keeps its thread busy until that loop returns
+(aio warns when it does). Yield between chunks of work
+(`await new Promise((r) => setTimeout(r))`) and a cancel stops it at the next
+yield.
 
 **A job that needs an import, a constant or a helper** goes in its own module:
 pass its URL instead of a function and the worker imports it and calls its

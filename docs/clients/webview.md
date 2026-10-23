@@ -105,6 +105,26 @@ fails exactly when the user needs it. Declare the keys the app must always get:
   an undeclared key never leaves the main process, and the guest page gets
   nothing — no preload, no API, no sign that it is being listened to.
 
+## An embed that checks the Referer
+
+An app page is `aio://app/`, which sends no `Referer`, so an embed that checks
+it refuses to play (YouTube: error 153). `httpReferrer` sets the one the guest
+sends — on its first load and on every navigation after:
+
+```tsx
+<Browser src={embedUrl} httpReferrer="https://example.com/" />;
+```
+
+On a hand-written `<webview>` it is the `httpreferrer` attribute.
+
+## Drag and resize over a guest
+
+A `<webview>` guest swallows pointer events: once the pointer is over it, the
+app's `pointermove`/`pointerup` stop arriving, so a splitter or a drag handle
+next to it sticks. For the length of the gesture, cover the window with a
+transparent shield (`position: fixed; inset: 0`) that takes the events, and
+remove it on `pointerup`.
+
 ## A preload for the guest
 
 A guest preload is a script Electron runs inside the embedded page before the

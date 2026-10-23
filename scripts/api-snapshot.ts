@@ -482,9 +482,12 @@ async function extractMembers(
   // as one digest. Without this the pair had no member map, so widening one
   // parameter of the function read as a reshape of the whole symbol. A
   // namespace member is recorded `opt:` because ADDING one breaks nobody;
-  // removing or changing one is reported like any other member.
+  // removing or changing one is reported like any other member. A LONE
+  // namespace (`JSX`) is read the same way: its members, each one digest.
   const ns = decls.length === 2
     ? decls.find((d) => d.kind === "namespace")
+    : decls[0]?.kind === "namespace"
+    ? decls[0]
     : undefined;
   const fnDecl = ns ? decls.find((d) => d.kind === "function") : undefined;
   if (decls.length !== 1 && !(ns && fnDecl)) return undefined;
@@ -508,6 +511,7 @@ async function extractMembers(
     out[key] = `${optional ? "opt" : "req"}:${await memberDigest(member)}`;
   };
 
+  if (decl.kind === "namespace") return out;
   if (decl.kind === "function") {
     const params = (def.params as DocDeclaration[] | undefined) ?? [];
     for (let i = 0; i < params.length; i++) {

@@ -1,0 +1,38 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none"
+  xmlns="http://www.w3.org/2000/svg" role="img"
+  aria-label="amui — the aio app manager">
+  <!-- The aio tile (docs/aio-logo.svg: same gradient, same corner ratio
+       26/112) holding the aio mark inside an app window: amui is the window
+       you manage aio apps from. Built to read at 16 px: a solid title bar and
+       a thick frame say "window" where three dots would blur. Source of
+       amui/src/icon.png (512 px, what the build reads); re-render with
+       inkscape amui/icon.svg -w 512 -h 512 -o amui/src/icon.png -->
+  <defs>
+    <!-- user space, so the window's inside is the very same gradient as the
+         tile around it -->
+    <linearGradient id="g" gradientUnits="userSpaceOnUse"
+      x1="0" y1="0" x2="512" y2="512">
+      <stop offset="0" stop-color="#00c2d6" />
+      <stop offset="1" stop-color="#5b6cff" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="119" fill="url(#g)" />
+
+  <!-- the window: a white body, its inside cut back to the tile -->
+  <rect x="76" y="92" width="360" height="328" rx="44" fill="#ffffff" />
+  <rect x="104" y="164" width="304" height="228" rx="20" fill="url(#g)" />
+  <g fill="url(#g)">
+    <circle cx="132" cy="128" r="12" />
+    <circle cx="170" cy="128" r="12" />
+    <circle cx="208" cy="128" r="12" />
+  </g>
+
+  <!-- the aio mark, scaled 2.8× from the logo's geometry (bar lengths
+       31 / 39 / 31, the node a cap's gap past the longest bar) -->
+  <g stroke="#ffffff" stroke-width="25" stroke-linecap="round">
+    <path d="M146 222 H233" />
+    <path d="M146 278 H255" />
+    <path d="M146 334 H233" />
+  </g>
+  <circle cx="342" cy="278" r="36" fill="#ffffff" />
+</svg>

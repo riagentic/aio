@@ -126,9 +126,14 @@ from a shell, name the cookie:
 `DISPLAY=:77 XAUTHORITY=$XDG_RUNTIME_DIR/aio/xephyr-77.auth xdpyinfo`.
 
 The nested display has no GPU, so Chromium blocklists WebGL there and a WebGL or
-three.js view draws black. Render it in software:
-`AIO_ELECTRON_ARGS="--use-angle=swiftshader --enable-unsafe-swiftshader"` (both
-are on the allow-list — see docs/clients/electron.md).
+three.js view draws black. `am start` therefore renders a window it puts on its
+own nested display in software: it adds
+`AIO_ELECTRON_ARGS="--use-angle=swiftshader --enable-unsafe-swiftshader"` there
+(your own `AIO_ELECTRON_ARGS` follows, so it still wins) — never on your real
+display or a `--display=:N` you manage. Anywhere else a GPU-less display
+blocklists WebGL2, set the same line yourself, plus `--ignore-gpu-blocklist` for
+a real but blocklisted driver (all are on the allow-list — see
+docs/clients/electron.md).
 
 `testDisplayEnv()` (`src/testing/test-display.ts`) is how the tests do the same.
 A capture of what a launch _generated_ — the main script Electron was handed —

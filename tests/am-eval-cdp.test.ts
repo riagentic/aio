@@ -195,6 +195,27 @@ Deno.test({
 });
 
 Deno.test({
+  name: "am eval: an error's column is the user's, not the wrapper's",
+  ignore: !CHROME,
+  fn: () =>
+    withPage(async (run) => {
+      // `;` is column 3 of what the user typed; the wrap prefix is 17 chars.
+      const syntax = await run(`a(); 1`);
+      assertEquals(syntax.ok, false);
+      assert(
+        (syntax as { error: string }).error.endsWith("(at 0:3)"),
+        JSON.stringify(syntax),
+      );
+      // A runtime throw on line 0 is shifted the same way.
+      const thrown = await run(`1 + nope.x`);
+      assert(
+        (thrown as { error: string }).error.endsWith("(at 0:4)"),
+        JSON.stringify(thrown),
+      );
+    }),
+});
+
+Deno.test({
   name: "am eval: undefined and null stay distinguishable",
   ignore: !CHROME,
   fn: () =>

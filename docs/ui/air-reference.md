@@ -209,6 +209,31 @@ so `<ErrorBoundary …>` in TSX fails `deno check` with TS2604 — write them wi
 | `useProjection` | `useProjection(fn): T`                                             | Derived state     |
 | `useTimeTravel` | `useTimeTravel(): TimeTravelState`                                 | Debug time travel |
 
+**The tuple's value is a snapshot of THIS render.**
+`const [n, setN] =
+useLocal(0)` copies the value into `n`, so a closure that
+outlives the render — an `onMount` body, a listener it adds, a timer — keeps
+reading the value from the render that created it. Inside such a closure read
+`.local` (a live getter) and write with an updater:
+
+```tsx
+import { onMount, useLocal } from "aio/air";
+
+function Clicks() {
+  const clicks = useLocal(0);
+  onMount(() => {
+    const onClick = () => clicks.set((n) => n + 1); // ✓ never stale
+    // ✗ const [n, setN] = useLocal(0); … setN(n + 1) — `n` stays 0 forever
+    globalThis.addEventListener("click", onClick);
+    return () => globalThis.removeEventListener("click", onClick);
+  });
+  return <p>{clicks.local} clicks</p>;
+}
+```
+
+Handlers passed to `onWindowEvent`, `onGlobalKey`, `useInterval` and `useRaf`
+are re-read at event time, so the tuple value is current there.
+
 ## Routing
 
 | Function      | Signature                           | Description             |

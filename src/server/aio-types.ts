@@ -120,6 +120,16 @@ export type ResolveUserFn<S = unknown> = (
   state: S,
 ) => AioUser | null | Promise<AioUser | null>;
 
+/** `aio.run({ resolvePeer })` — the user a PROVEN local aio app connects as
+ *  when it calls this one with `peer()`. `peer.app` is its appId, proven by
+ *  its local control credential (same OS user, this machine, its current
+ *  boot); null = no identity (normal auth applies).
+ *  @experimental */
+export type ResolvePeerFn<S = unknown> = (
+  peer: { app: string; pid: number },
+  state: S,
+) => AioUser | null | Promise<AioUser | null>;
+
 /** `ui.theme` — how much of aio's default look the shell emits. ONE spelling:
  *  every shell (server, electron, android) and the config bridge import this
  *  type rather than re-typing the union. See {@linkcode UiConfig.theme}. */
@@ -586,6 +596,14 @@ export type AioConfig<S, A, E> = {
    *  until 1.0.6. */
   key?: string | boolean;
   resolveUser?: ResolveUserFn<S>; // dynamic user resolution — overrides users if both set (AIO-171)
+  /** A proven local aio app calling with `peer()` → its user (see
+   *  `ResolvePeerFn`). Opt-in. @experimental */
+  resolvePeer?: ResolvePeerFn<S>;
+  /** The TypeScript types other apps call this one with, as SOURCE TEXT —
+   *  `import types from "./contract.ts" with { type: "text" }`. Served to
+   *  callers by `peer().describe()` and saved by `am peer <appId> --types`, so
+   *  a caller gets typed calls without this app's source. @experimental */
+  peerTypes?: string;
   /** AUTH-1: enable the SQLite session store — `app.sessions.issue(user)`
    *  returns a bearer token that authenticates like any users/resolveUser
    *  token, with TTL + revocation. `true` = 30-day default TTL. */
@@ -842,6 +860,22 @@ export type AioConfig<S, A, E> = {
    *  ```
    */
   electron?: ElectronConfig;
+  /** The desktop app's run-time say over its start splash (`build.splash`).
+   *  `show` is called just before the splash would open, from source and
+   *  built, on every desktop OS: `"firstStart"` shows it only while Electron
+   *  downloads (a person's "no splash at start" setting), `"always"` on every
+   *  start. There is no `"never"`: a download always shows its splash.
+   *  Synchronous on purpose — it throws, takes over 50 ms or returns
+   *  anything else, and the build's `show` is used, said once. Default: the
+   *  build's `show`.
+   *
+   *  @example
+   *  ```ts
+   *  aio.run({ cells, splash: {
+   *    show: () => settings.splashAtStart ? "always" : "firstStart",
+   *  } });
+   *  ``` */
+  splash?: { show?: () => "always" | "firstStart" };
   /** Internal: checkpoint restore callback passed from CellsConfig */
   _onCheckpointRestore?: (
     checkpoint: CheckpointData,
@@ -1284,6 +1318,27 @@ export type CellsConfig = {
   /** `(token, state) => user | null` — authenticate each connection's token
    *  against current state. Overrides `users`. */
   resolveUser?: ResolveUserFn;
+  /** Admit another aio app on THIS machine by its proven appId — the user its
+   *  `peer()` connection gets: `resolvePeer: (p) => ({ id: p.app, role:
+   *  "app" })`. Opt-in: absent, peer proofs are ignored. TCP only (the local
+   *  socket door carries no identity). @experimental
+   *
+   *  @example
+   *  ```ts
+   *  resolvePeer: (p) => p.app === "billing" ? { id: p.app, role: "app" } : null,
+   *  ``` */
+  resolvePeer?: ResolvePeerFn;
+  /** The TypeScript types other apps call this one with, as SOURCE TEXT —
+   *  `import types from "./contract.ts" with { type: "text" }`. Served to
+   *  callers by `peer().describe()` and saved by `am peer <appId> --types`, so
+   *  a caller gets typed calls without this app's source. @experimental
+   *
+   *  @example
+   *  ```ts
+   *  import types from "./contract.ts" with { type: "text" };
+   *  aio.run({ cells, peerTypes: types });   // am peer <appId> --types=… saves it
+   *  ``` */
+  peerTypes?: string;
   /** Enable the SQLite session store: `app.sessions.issue(user)` returns a
    *  bearer token with TTL and revocation (`true` = 30-day TTL). */
   sessions?: boolean | { ttlMs?: number };
@@ -1429,6 +1484,22 @@ export type CellsConfig = {
    *  ```
    */
   electron?: ElectronConfig;
+  /** The desktop app's run-time say over its start splash (`build.splash`).
+   *  `show` is called just before the splash would open, from source and
+   *  built, on every desktop OS: `"firstStart"` shows it only while Electron
+   *  downloads (a person's "no splash at start" setting), `"always"` on every
+   *  start. There is no `"never"`: a download always shows its splash.
+   *  Synchronous on purpose — it throws, takes over 50 ms or returns
+   *  anything else, and the build's `show` is used, said once. Default: the
+   *  build's `show`.
+   *
+   *  @example
+   *  ```ts
+   *  aio.run({ cells, splash: {
+   *    show: () => settings.splashAtStart ? "always" : "firstStart",
+   *  } });
+   *  ``` */
+  splash?: { show?: () => "always" | "firstStart" };
   /** Embed aio in a bigger program or a test: no `Deno.exit`, no signal
    *  handlers, no instance lock; `app.close()` leaves the process alive. */
   libraryMode?: boolean;

@@ -126,6 +126,21 @@ Deno.test("am upgrade takes a name too, and refuses the same shapes", async () =
   }
 });
 
+Deno.test("am upgrade --flag is named as an unknown flag, not refused as a path", async () => {
+  // `am upgrade --dry-run` answered "takes the NAME of an installed app, never
+  // a path" — wrong about the word (a flag) and about the verb (a checkout
+  // path is taken). Nothing ran either way; the message has to be true.
+  const home = await fakeHome();
+  try {
+    const r = await am(home, ["upgrade", "--dry-run"]);
+    assertEquals(r.code, 1, r.out);
+    assertMatch(r.out, /unknown flag --dry-run/);
+    assert(!r.out.includes("never a path"), r.out);
+  } finally {
+    await Deno.remove(home, { recursive: true }).catch(() => {});
+  }
+});
+
 // ── the rule itself ──────────────────────────────────────────
 
 Deno.test("app names: the shapes that make join() escape are unrepresentable", () => {

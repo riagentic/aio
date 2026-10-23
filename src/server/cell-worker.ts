@@ -153,7 +153,7 @@ export type CellWorker = {
   /** Run the cell's disable in the worker (see ToWorker["disable"]); `done`
    *  gets its outcome. A closed worker never answers: its cell stays as the
    *  close left it. */
-  disable(done: (ok: boolean) => void): void;
+  disable(done: (ok: boolean) => void, keep?: boolean): void;
   /** Run the cell's enable (`__init` + `onInit`) in the worker. */
   enable(): void;
   /** Graceful stop, then terminate. Safe to call twice. */
@@ -602,13 +602,13 @@ export function createCellWorker(
       if (closed) return;
       send({ t: "cancel", type: actionType });
     },
-    disable(done: (ok: boolean) => void): void {
+    disable(done: (ok: boolean) => void, keep?: boolean): void {
       if (closed) return;
       disabling.push((ok) => {
         if (ok) disabled = true;
         done(ok);
       });
-      send({ t: "disable" });
+      send(keep ? { t: "disable", keep } : { t: "disable" });
     },
     enable(): void {
       if (closed) return;

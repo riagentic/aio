@@ -180,7 +180,9 @@ Deno.test("assets serves in DEV and, unlike serveDirs, in PROD", async () => {
   // `serveDirs` is dev-only BY CONSTRUCTION — server.ts passes `undefined` in
   // prod — so a data mount had to be hand-rolled or it vanished at build time.
   const dev = handlerFor(f.base, { serveDirs: { "/media": f.media } }, false);
-  assertEquals((await dev.serveStatic("/media/song.txt")).status, 200);
+  const viaDirs = await dev.serveStatic("/media/song.txt");
+  assertEquals(viaDirs.status, 200);
+  await viaDirs.body?.cancel(); // closes the file: a body left unread held it
 });
 
 Deno.test("a mounted root is not a weaker root — the real handler refuses", async () => {
@@ -218,7 +220,9 @@ Deno.test("when both claim a prefix, the one that survives a build wins", async 
       assets: { "/media": f.media },
       serveDirs: { "/media": other },
     });
-    assertEquals((await h.serveStatic("/media/song.txt")).status, 200);
+    const first = await h.serveStatic("/media/song.txt");
+    assertEquals(first.status, 200);
+    await first.body?.cancel();
     assertEquals(
       (await (await handlerFor(f.base, {
         assets: { "/media": f.media },

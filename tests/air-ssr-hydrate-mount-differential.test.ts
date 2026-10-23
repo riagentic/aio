@@ -37,6 +37,7 @@ import {
   ErrorBoundary,
   Fragment,
   h,
+  Portal,
   renderToString,
   type VNode,
 } from "../src/air/vdom.ts";
@@ -44,10 +45,13 @@ import { renderToStream } from "../src/air/ssr-stream.ts";
 import {
   _setDocument,
   _unmount,
+  createContext,
   hydrate,
   mount,
   type MountHandle,
   setDevMode,
+  useContext,
+  useId,
 } from "../src/air/aio-renderer.ts";
 import { signal } from "../src/state/signal.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
@@ -71,7 +75,11 @@ type Spec =
   | { k: "in"; id: number; ii: number }
   | { k: "btn"; id: number; dis: boolean; v: string }
   | ({ k: "b"; id: number; fb: number } & Kids) // ErrorBoundary
-  | { k: "x"; id: number; when: When }; // thrower (only under a boundary)
+  | { k: "x"; id: number; when: When } // thrower (only under a boundary)
+  | ({ k: "p"; id: number } & Kids) // Portal, own target per id per root
+  | { k: "r"; id: number } // an element with a callback ref
+  | { k: "sg"; id: number; bare: boolean } // signal child (+ signal class)
+  | { k: "id"; id: number }; // a useId() component
 
 type CompKind = "str" | "num" | "null" | "frag" | "wrap";
 /** When a thrower throws: `r` (recovers) while `flip` is 0 — the SERVER renders
@@ -88,6 +96,33 @@ const WHENS: readonly When[] = ["r", "s", "a"];
 const tick = signal(0);
 const flip = signal(0);
 const tree = signal<Spec | null>(null);
+/** Signal-valued text and class: they change in the self re-render steps. */
+const sTxt = signal("s0");
+const sCls = signal("c0");
+
+/** What each ROOT owns apart from its host: portal targets (one per portal
+ *  id, under `box`), the elements its callback refs hold, and how often each
+ *  button's click handler ran. Reached through a context, so one shared `App`
+ *  serves every root; the server render has none. */
+interface Env {
+  box: Element;
+  refs: Map<number, Element | null>;
+  clicks: Map<number, number>;
+}
+const EnvCtx = createContext<Env | null>(null);
+let curEnv: Env | null = null;
+function targetOf(env: Env, id: number): Element {
+  let t = env.box.querySelector(`[data-p="${id}"]`);
+  if (!t) {
+    t = env.box.ownerDocument!.createElement("section");
+    t.setAttribute("data-p", String(id));
+    env.box.appendChild(t);
+  }
+  return t;
+}
+const rootOf = (env: Env | null) =>
+  (() =>
+    h(EnvCtx.Provider, { value: env }, h(App, null))) as unknown as ComponentFn;
 
 // deno-lint-ignore no-explicit-any
 type P = any;
@@ -101,6 +136,10 @@ const CNum = ((p: P) => p.v.length * 10 + tick.value) as unknown as ComponentFn;
 const CNull = (() => null) as unknown as ComponentFn;
 const CFrag = (p: P) => h(Fragment, null, ...(p.children ?? []));
 const CWrap = (p: P) => h("span", { class: "w" }, ...(p.children ?? []));
+const CId = (() => {
+  const id = useId();
+  return h("var", { title: id }, id);
+}) as unknown as ComponentFn;
 const COMP: Record<CompKind, ComponentFn> = {
   str: CStr,
   num: CNum,
@@ -216,8 +255,37 @@ function build(s: Spec, key?: string): VNode | string | number | null | false {
       );
     case "in":
       return h("input", { ...INPUTS[s.ii % INPUTS.length], ...kp });
-    case "btn":
-      return h("button", { type: "button", disabled: s.dis, ...kp }, s.v);
+    case "btn": {
+      const env = curEnv;
+      return h("button", {
+        type: "button",
+        disabled: s.dis,
+        "data-b": s.id,
+        onClick: env
+          ? () => env.clicks.set(s.id, (env.clicks.get(s.id) ?? 0) + 1)
+          : undefined,
+        ...kp,
+      }, s.v);
+    }
+    case "p":
+      return h(Portal, {
+        target: curEnv ? targetOf(curEnv, s.id) : null,
+        ...kp,
+      }, ...kids(s));
+    case "r": {
+      const env = curEnv;
+      return h("p", {
+        "data-r": s.id,
+        ref: env ? (el: Element | null) => env.refs.set(s.id, el) : undefined,
+        ...kp,
+      }, "r");
+    }
+    case "sg":
+      return s.bare && !key
+        ? (sTxt as unknown as VNode)
+        : h("i", { class: sCls, ...kp }, sTxt as unknown as VNode);
+    case "id":
+      return h(CId, { ...kp });
     case "b":
       return h(
         ErrorBoundary,
@@ -230,6 +298,7 @@ function build(s: Spec, key?: string): VNode | string | number | null | false {
 }
 
 const App = (() => {
+  curEnv = useContext(EnvCtx);
   const s = tree.value;
   return s ? build(s) : null;
 }) as unknown as ComponentFn;
@@ -240,10 +309,23 @@ let nextId = 1;
 function gen(r: Rng, depth: number, inB: boolean, keyable: boolean): Spec {
   const id = nextId++;
   const leafOnly = depth <= 0;
-  const kinds: Spec["k"][] = keyable
-    ? ["e", "f", "c", "svg", "ta", "sel", "in", "btn"]
-    : ["t", "t", "t", "z", "e", "f", "c", "svg", "ta", "sel", "in", "btn"];
-  if (!leafOnly) kinds.push("e", "f", "c", "b");
+  const kinds: Spec["k"][] = [
+    ...(keyable ? [] : ["t", "t", "t", "z"] as const),
+    ...[
+      "e",
+      "f",
+      "c",
+      "svg",
+      "ta",
+      "sel",
+      "in",
+      "btn",
+      "r",
+      "sg",
+      "id",
+    ] as const,
+  ];
+  if (!leafOnly) kinds.push("e", "f", "c", "b", "p");
   if (inB) kinds.push("x", "x");
   const k = r.pick(kinds);
   const children = (): Kids => {
@@ -307,6 +389,13 @@ function gen(r: Rng, depth: number, inB: boolean, keyable: boolean): Spec {
     }
     case "x":
       return { k, id, when: r.pick(WHENS) };
+    case "p":
+      return { k, id, ...children() };
+    case "r":
+    case "id":
+      return { k, id };
+    case "sg":
+      return { k, id, bare: r.chance(0.5) };
   }
 }
 
@@ -411,14 +500,22 @@ const SHAPES = [
   "fallback-string",
   "fallback-null",
   "fallback-fragment",
+  "portal",
+  "portal-keyed",
+  "portal-in-boundary",
+  "ref",
+  "signal-bare",
+  "signal-el",
+  "use-id",
 ] as const;
 type Shape = typeof SHAPES[number];
 const seen = new Map<Shape, number>();
 const see = (s: Shape) => seen.set(s, (seen.get(s) ?? 0) + 1);
 
-function census(s: Spec): void {
+function census(s: Spec, inB = false): void {
   if ("kids" in s && s.kids.length > 1) {
     see(s.keyed ? "keyed-list" : "unkeyed-list");
+    if (s.keyed && s.kids.some((x) => x.k === "p")) see("portal-keyed");
   }
   switch (s.k) {
     case "t":
@@ -482,6 +579,19 @@ function census(s: Spec): void {
       }
       break;
     }
+    case "p":
+      see("portal");
+      if (inB) see("portal-in-boundary");
+      break;
+    case "r":
+      see("ref");
+      break;
+    case "sg":
+      see(s.bare ? "signal-bare" : "signal-el");
+      break;
+    case "id":
+      see("use-id");
+      break;
     case "x":
       see(
         s.when === "r"
@@ -492,7 +602,7 @@ function census(s: Spec): void {
       );
       break;
   }
-  if ("kids" in s) { for (const c of s.kids) census(c); }
+  if ("kids" in s) { for (const c of s.kids) census(c, inB || s.k === "b"); }
 }
 
 // ── the late SSR thrower ─────────────────────────────────────────────────
@@ -534,6 +644,17 @@ function hasLateSsrThrower(s: Spec): boolean {
   return "kids" in s && s.kids.some(hasLateSsrThrower);
 }
 
+/** SSR_BLIND_PORTAL: the server renders no Portal content (there is no target
+ *  on a server), so a throw that starts inside one never reaches a boundary
+ *  there — the server shows the region, the client its fallback. By design,
+ *  and the client still converges: these rounds skip only the
+ *  server-markup-vs-mount comparisons, never hydrated-vs-mounted. */
+function hasPortalSsrThrow(s: Spec): boolean {
+  if (s.k === "p" && s.kids.some(throwsAtSsr)) return true;
+  return "kids" in s && s.kids.some(hasPortalSsrThrow);
+}
+let ssrBlindRounds = 0;
+
 // ── comparing documents ──────────────────────────────────────────────────
 
 let probe: HTMLElement | null = null;
@@ -566,6 +687,7 @@ function canonStyle(css: string): string {
  *  - style serialization — see {@link canonStyle}. */
 function norm(html: string): string {
   return html
+    .replace(/:(?:r|w)c?\d+:/g, ":id:")
     .replace(
       /style="([^"]*)"/g,
       (_m, css: string) => `style="${canonStyle(css)}"`,
@@ -614,9 +736,98 @@ function formState(root: Element): string[] {
   return out;
 }
 
-/** A root's document, normalized, plus its live form state. */
-function snap(host: Element): { html: string; form: string[] } {
-  return { html: norm(host.innerHTML), form: formState(host) };
+/** A root's document, normalized, plus its live form state and its portal
+ *  targets (by portal id; an emptied target is no target). */
+function snap(
+  host: Element,
+  env?: Env,
+): { html: string; form: string[]; portals: string[] } {
+  const portals = env
+    ? Array.from(env.box.children)
+      .filter((t) => t.childNodes.length > 0)
+      .map((t) => `${t.getAttribute("data-p")}=${norm(t.innerHTML)}`)
+      .sort()
+    : [];
+  return {
+    html: norm(host.innerHTML),
+    form: [...formState(host), ...(env ? formState(env.box) : [])],
+    portals,
+  };
+}
+
+function newEnv(doc: Document): Env {
+  const box = doc.createElement("aside");
+  doc.body.appendChild(box);
+  return { box, refs: new Map(), clicks: new Map() };
+}
+
+/** Root-local invariants that need no second root:
+ *  - every `[data-r]` element on screen is what its callback ref holds, and a
+ *    ref holds nothing that is not on screen;
+ *  - every `useId()` reads the same in its text and its attribute, and no two
+ *    on-screen ids are equal (`all` collects across roots);
+ *  - clicking each enabled button runs ITS handler exactly once. */
+/** How much the invariants below actually exercised — checked at the end. */
+const exercised = { refs: 0, ids: 0, clicks: 0 };
+
+function invariants(
+  host: Element,
+  env: Env,
+  all: Set<string>,
+  what: string,
+): void {
+  const on = [
+    ...Array.from(host.querySelectorAll("[data-r]")),
+    ...Array.from(env.box.querySelectorAll("[data-r]")),
+  ];
+  for (const el of on) {
+    const id = Number(el.getAttribute("data-r"));
+    assert(env.refs.get(id) === el, `${what}: ref ${id} ≠ its element`);
+    exercised.refs++;
+  }
+  for (const [id, el] of env.refs) {
+    if (el) assert(on.includes(el), `${what}: ref ${id} holds a gone element`);
+  }
+  for (
+    const v of [
+      ...Array.from(host.querySelectorAll("var")),
+      ...Array.from(env.box.querySelectorAll("var")),
+    ]
+  ) {
+    const t = v.getAttribute("title")!;
+    assertEquals(v.textContent, t, `${what}: useId text ≠ attribute`);
+    assert(!all.has(t), `${what}: useId ${t} handed out twice`);
+    all.add(t);
+    exercised.ids++;
+  }
+  const before = new Map(env.clicks);
+  const want = new Map<number, number>();
+  for (
+    const b of [
+      ...Array.from(host.querySelectorAll("button[data-b]")),
+      ...Array.from(env.box.querySelectorAll("button[data-b]")),
+    ] as HTMLButtonElement[]
+  ) {
+    if (b.disabled) continue;
+    const id = Number(b.getAttribute("data-b"));
+    want.set(id, (want.get(id) ?? 0) + 1);
+    b.click();
+    exercised.clicks++;
+  }
+  for (const [id, n] of env.clicks) {
+    assertEquals(
+      n - (before.get(id) ?? 0),
+      want.get(id) ?? 0,
+      `${what}: button ${id}'s handler ran a wrong number of times`,
+    );
+  }
+  for (const [id, n] of want) {
+    assertEquals(
+      (env.clicks.get(id) ?? 0) - (before.get(id) ?? 0),
+      n,
+      `${what}: button ${id} did not reach its handler`,
+    );
+  }
 }
 
 // ── the gate ─────────────────────────────────────────────────────────────
@@ -627,19 +838,29 @@ async function settle(...hs: MountHandle[]): Promise<void> {
   for (const x of hs) x._flush();
 }
 
-async function freshMount(doc: Document, s: Spec): Promise<string> {
+async function freshMount(
+  doc: Document,
+  s: Spec,
+): Promise<{ html: string; portals: string[] }> {
   // A fresh root of the same model. `tree` is shared by all roots, so every
   // live root would re-render to `s` too — which is exactly the state they are
   // meant to be in when this is called.
   tree.set(s);
   const host = doc.createElement("main");
   doc.body.appendChild(host);
-  const handle = mount(host, App);
+  const env = newEnv(doc);
+  const handle = mount(host, rootOf(env));
   await settle(handle);
-  const out = norm(host.innerHTML);
+  const { html, portals } = snap(host, env);
   _unmount(handle);
+  assertEquals(
+    snap(host, env).portals,
+    [],
+    "unmount left portal content in its target",
+  );
   host.remove();
-  return out;
+  env.box.remove();
+  return { html, portals };
 }
 
 Deno.test("air differential: SSR string == stream, mount == SSR+hydrate, and both follow the same updates", async () => {
@@ -677,6 +898,8 @@ Deno.test("air differential: SSR string == stream, mount == SSR+hydrate, and bot
 
       tick.set(0);
       flip.set(0);
+      sTxt.set("s0");
+      sCls.set("c0");
       tree.set(t1);
       // Ambient dev (`__aioDev`, what the test harness runs under), NOT
       // `setDevMode(true)`: the explicit form opts into `data-component`
@@ -688,9 +911,11 @@ Deno.test("air differential: SSR string == stream, mount == SSR+hydrate, and bot
       warns = [];
 
       // (a) the two SSR writers
-      const ssr = renderToString(h(App, null));
+      const ssr = renderToString(h(rootOf(null), null));
       const chunks: string[] = [];
-      for await (const c of renderToStream(h(App, null))) chunks.push(c);
+      for await (const c of renderToStream(h(rootOf(null), null))) {
+        chunks.push(c);
+      }
       assertEquals(
         chunks.join(""),
         ssr,
@@ -701,28 +926,55 @@ Deno.test("air differential: SSR string == stream, mount == SSR+hydrate, and bot
       const mHost = doc.createElement("main");
       const hHost = doc.createElement("main");
       doc.body.append(mHost, hHost);
-      const mh = mount(mHost, App);
+      const mEnv = newEnv(doc);
+      const hEnv = newEnv(doc);
+      const mh = mount(mHost, rootOf(mEnv));
       hHost.innerHTML = ssr;
-      assertEquals(
-        norm(hHost.innerHTML),
-        norm(mHost.innerHTML),
-        `the server's markup ≠ the mounted DOM — ${where()}`,
-      );
+      const ssrBlind = hasPortalSsrThrow(t1);
+      if (ssrBlind) ssrBlindRounds++;
+      else {
+        assertEquals(
+          norm(hHost.innerHTML),
+          norm(mHost.innerHTML),
+          `the server's markup ≠ the mounted DOM — ${where()}`,
+        );
+      }
       warns = [];
-      const hh = hydrate(hHost, App);
+      const hh = hydrate(hHost, rootOf(hEnv));
+      // Hydration CONTINUES the server's id sequence: the ids on screen are
+      // the ones the server wrote, in order.
+      const ids = (html: string) =>
+        Array.from(html.matchAll(/<var title="([^"]*)"/g), (m) => m[1]);
+      if (!ssrBlind) {
+        assertEquals(
+          ids(hHost.innerHTML),
+          ids(ssr),
+          `hydrate did not keep the server's useId()s — ${where()}`,
+        );
+      }
       // (d) identical trees on both sides: hydrate must not report a
       // divergence (or fall back and discard the server's markup).
       if (hasLateSsrThrower(t1)) lateThrowerRounds++;
+      // (A server that could not see the throw rendered the region, not the
+      // fallback — those rounds may legitimately re-render on the client.)
+      if (!ssrBlind) {
+        assertEquals(
+          warns.filter((w) => w.includes("hydrate()")),
+          [],
+          `hydrate reported a divergence for the SAME tree — ${where()}`,
+        );
+      }
       assertEquals(
-        warns.filter((w) => w.includes("hydrate()")),
-        [],
-        `hydrate reported a divergence for the SAME tree — ${where()}`,
-      );
-      assertEquals(
-        snap(hHost),
-        snap(mHost),
+        snap(hHost, hEnv),
+        snap(mHost, mEnv),
         `hydrated DOM ≠ mounted DOM — ${where()}`,
       );
+      const live = (step: string) => {
+        const all = new Set<string>();
+        invariants(mHost, mEnv, all, `${step} mounted — ${where()}`);
+        invariants(hHost, hEnv, all, `${step} hydrated — ${where()}`);
+      };
+      live("b");
       hydratedRounds++;
 
       const sameEverywhere = async (
@@ -733,17 +985,19 @@ Deno.test("air differential: SSR string == stream, mount == SSR+hydrate, and bot
         if (vsFresh) {
           const fresh = await freshMount(doc, model);
           await settle(mh, hh);
+          const m = snap(mHost, mEnv);
           assertEquals(
-            snap(mHost).html,
+            { html: m.html, portals: m.portals },
             fresh,
             `${step}: mounted root ≠ a fresh mount of the same model — ${where()}`,
           );
         }
         assertEquals(
-          snap(hHost),
-          snap(mHost),
+          snap(hHost, hEnv),
+          snap(mHost, mEnv),
           `${step}: hydrated root ≠ mounted root — ${where()}`,
         );
+        live(step);
         steps++;
       };
 
@@ -751,6 +1005,7 @@ Deno.test("air differential: SSR string == stream, mount == SSR+hydrate, and bot
       // every thrower whose fallback the SERVER rendered.
       tick.set(1);
       flip.set(1);
+      sTxt.set("s1");
       await settle(mh, hh);
       await sameEverywhere("c1 self re-render (recover)", t1, true);
       if (ssr.includes("boom-r")) recovered++;
@@ -769,6 +1024,7 @@ Deno.test("air differential: SSR string == stream, mount == SSR+hydrate, and bot
       // boundary that is not on the boundary stack does not catch at all.
       tick.set(2);
       flip.set(2);
+      sCls.set("c1");
       await settle(mh, hh);
       await sameEverywhere("c3 self re-render (start throwing)", t2, false);
       if (norm(hHost.innerHTML).includes("boom-s")) startedThrowing++;
@@ -777,13 +1033,36 @@ Deno.test("air differential: SSR string == stream, mount == SSR+hydrate, and bot
       // are back to exactly what a fresh mount of t2 builds.
       tick.set(3);
       flip.set(1);
+      sTxt.set("a");
       await settle(mh, hh);
       await sameEverywhere("c4 self re-render (recover again)", t2, true);
 
+      // The reconciler reports its own lost positions ("…will stay on the
+      // page forever", "This is an aio bug") — on a tree no foreign code
+      // touched, any such line is a defect, whatever the documents say.
+      assertEquals(
+        warns.filter((w) => /aio bug|stay on the page/.test(w)),
+        [],
+        `the reconciler reported losing track of a node — ${where()}`,
+      );
       _unmount(mh);
       _unmount(hh);
+      assertEquals(
+        [snap(mHost, mEnv).portals, snap(hHost, hEnv).portals],
+        [[], []],
+        `unmount left portal content in its target — ${where()}`,
+      );
+      assertEquals(
+        [mEnv, hEnv].flatMap((env) =>
+          [...env.refs].filter(([, el]) => el).map(([id]) => id)
+        ),
+        [],
+        `a ref still held after unmount — ${where()}`,
+      );
       mHost.remove();
       hHost.remove();
+      mEnv.box.remove();
+      hEnv.box.remove();
       rounds++;
     }
   } finally {
@@ -796,7 +1075,8 @@ Deno.test("air differential: SSR string == stream, mount == SSR+hydrate, and bot
   }
   console.log(
     `[air-diff] ${rounds} rounds, ${steps} update steps, ${hydratedRounds} ` +
-      `hydrate-asserted (${lateThrowerRounds} with a late SSR thrower)`,
+      `hydrate-asserted (${lateThrowerRounds} with a late SSR thrower, ` +
+      `${ssrBlindRounds} with a throw the server cannot see in a portal)`,
   );
   assertEquals(rounds, N, "every seeded round must run to its end");
   assertEquals(hydratedRounds, N, "every round must assert the hydrate side");
@@ -811,4 +1091,7 @@ Deno.test("air differential: SSR string == stream, mount == SSR+hydrate, and bot
     "the generator never produced a late SSR thrower",
   );
   assert(startedThrowing > 0, "no hydrated boundary ever caught a new throw");
+  for (const [k, n] of Object.entries(exercised)) {
+    assert(N < 10 || n > 0, `the ${k} invariant never ran`);
+  }
 });

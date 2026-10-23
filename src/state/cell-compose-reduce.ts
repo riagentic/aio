@@ -4,7 +4,7 @@ import { notifyMethodCancel } from "./method-cancel.ts";
 import { isDevMode } from "./dev-flag.ts";
 import { draftCloneError, isFrozenWriteError } from "./immutable.ts";
 import { recordRejection } from "./rejection-tracker.ts";
-import { RefusedWrite } from "./method-rejection.ts";
+import { markThrower, RefusedWrite } from "./method-rejection.ts";
 import {
   current,
   type Draft,
@@ -810,6 +810,13 @@ export function buildRootReducer(
         break;
       }
       if (action.type === f.__aio.destroyType) {
+        // The circuit breaker's trip keeps the data: its reset was persisted,
+        // so an outage that tripped it erased the cell's saved state for good
+        // — gone after `enable` and after a restart alike.
+        if ((action.payload as { keep?: unknown } | undefined)?.keep === true) {
+          isLifecycle = true;
+          break;
+        }
         const machine = f.__aio.machine;
         const targetSlice: Record<string, unknown> = machine === false
           ? { ...f.__aio.state }
@@ -970,7 +977,13 @@ export function buildRootReducer(
     if (listeners && !refusedOp) {
       for (const listener of listeners) {
         if (disabledCells.has(listener.__aio.id)) continue;
-        const result = reduceCell(listener, currentState, action, ctx);
+        let result: ReturnType<typeof reduceCell>;
+        try {
+          result = reduceCell(listener, currentState, action, ctx);
+        } catch (e) {
+          markThrower(e, listener.__aio.id);
+          throw e;
+        }
         // Only a listener that KEPT something reacted to the refused action;
         // one that checked and changed nothing is doing what the warning asks.
         const id = listener.__aio.id;

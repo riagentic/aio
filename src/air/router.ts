@@ -13,6 +13,8 @@
 
 import { createContext, onMount, useContext } from "./aio-renderer.ts";
 import { isSignal } from "./signal-binding.ts";
+import { isDevMode } from "../state/dev-flag.ts";
+import { firstTime } from "../protocol/said-once.ts";
 import {
   _isSsrRendering,
   _registerSsrCapture,
@@ -248,6 +250,20 @@ export function Route(
     : children != null;
   const params = matchPath(full, currentPath, !hasChildren);
   if (!params) return null;
+  if (
+    hasChildren && element === undefined && isDevMode() &&
+    !_hasRoute(children) && !matchPath(full, currentPath, true) &&
+    firstTime("route-children " + full)
+  ) {
+    // Observe-only: children with no <Route> in them read as a page written
+    // where `element=` belongs, and as a page it would not match here.
+    console.warn(
+      `[aio-dev] <Route path="${path}"> has children but no nested <Route>, ` +
+        `so it matches as a layout PREFIX — it rendered at "${currentPath}". ` +
+        `A page is <Route path="${path}" element={<Page/>}/>; a layout whose ` +
+        `routes live in a component says so with element={<Outlet/>}.`,
+    );
+  }
 
   const allParams = { ...parentParams, ...params };
   return h(
@@ -263,6 +279,15 @@ export function Route(
       ? (element ?? h(Outlet as ComponentFn, {}))
       : element ?? null) as VChild,
   );
+}
+
+/** Is a `<Route>` anywhere in this JSX (not inside a component's output)? */
+function _hasRoute(c: unknown): boolean {
+  if (Array.isArray(c)) return c.some(_hasRoute);
+  if (c == null || typeof c !== "object") return false;
+  const v = c as VNode;
+  return v.tag === Route || _hasRoute(v.children) ||
+    _hasRoute(v.props?.children);
 }
 
 /** Renders the matching child route inside a parent Route's element. */

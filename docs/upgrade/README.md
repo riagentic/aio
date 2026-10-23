@@ -71,6 +71,9 @@ them before the first run:
   three) in `old/` beside the install, `updates.keepOld` for more.
   `build.splash` adds a splash screen on every target; nothing to change by
   hand.
+- [1.0.23-beta → **1.0.24-beta**](from-1.0.23-beta-to-1.0.24-beta.md) — nothing
+  to change in an app; a few tests that passed for the wrong reason can go red
+  (`ui.advance`, async predicates, `testComponent`).
 - [1.0.22-beta → **1.0.23-beta**](from-1.0.22-beta-to-1.0.23-beta.md) — nothing
   to change; the desktop splash no longer holds the window back and opens where
   the window will.

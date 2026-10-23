@@ -54,7 +54,7 @@
  * `codesign --deep --strict` clean in exactly this position.
  */
 import { join } from "@std/path";
-import { appIconPng, pngSize } from "./app-icon.ts";
+import { appIconPng, type HueKey, pngSize } from "./app-icon.ts";
 import {
   bundleSymlink,
   copyDir,
@@ -128,7 +128,7 @@ export function icnsFromSlots(
  *  `iconutil -c iconset` on a real Mac, which is the only test that matters. */
 export async function icnsFromName(
   name: string,
-  id = name,
+  id: HueKey = name,
 ): Promise<Uint8Array> {
   const cache = new Map<number, Uint8Array>();
   const parts: Uint8Array[] = [];

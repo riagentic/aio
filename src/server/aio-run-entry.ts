@@ -73,6 +73,8 @@ import {
   validateConfig,
 } from "./config.ts";
 import { describeThrown } from "../diagnostics/fmt.ts";
+import { declaredHue } from "../build/app-icon.ts";
+import { appDenoJson } from "./aio-run-helpers.ts";
 import { _run, electronRuntimeAnswer } from "./aio.ts";
 import {
   _appVersion,
@@ -407,6 +409,8 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
   // file belongs to Deno and other tools keep their own sections in it, so the
   // right answer is to name the key and where it belongs.
   _warnMisplacedDenoJson();
+  // deno.json `hue` is refused at boot, not at the first icon it would draw.
+  declaredHue(appDenoJson());
   // Multi-instance (perfect-aio D2): several aio.run() calls may coexist in
   // one process — each app's cells bind exclusively (bindCell throws on a
   // def already bound to another app), each appId takes its own singleton

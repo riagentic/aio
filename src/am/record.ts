@@ -123,6 +123,8 @@ export function generateReplayTest(
   let callCount = 0;
   let caused = 0;
   let jumps = 0;
+  /** `app.cells.disable` resets — not actions, so not reproduced. */
+  let resets = 0;
   let syncReactions = 0;
   let rejects = false;
   // A caused action is not called — its cause re-creates it — but a SCHEDULED
@@ -205,6 +207,10 @@ export function generateReplayTest(
     if (isListenerReaction(a)) continue;
     if (a.type === TT_RESTORE_TYPE) {
       jumps++;
+      continue;
+    }
+    if (isResetRow(a)) {
+      resets++;
       continue;
     }
     const ci = a.type.indexOf(":");
@@ -315,6 +321,15 @@ export function generateReplayTest(
         `//`,
         `// ⚠ the run TIME-TRAVELLED (${count(jumps, "jump")}) — calls after a`,
         `// jump ran on restored state, which this replay does not reproduce.`,
+      ]
+      : []),
+    ...(resets > 0
+      ? [
+        `//`,
+        `// ⚠ a cell was RESET by app.cells.disable (${
+          count(resets, "reset")
+        }) — calls`,
+        `// after it ran on its initial state, which this replay does not reproduce.`,
       ]
       : []),
     ...(syncReactions > 0
@@ -712,4 +727,12 @@ async function liveTimeline(
     entries: data?.entries ?? [],
     ...(typeof data?.rotated === "boolean" ? { rotated: data.rotated } : {}),
   };
+}
+
+/** A disable's reset (`<cell>:__destroy {reset: true}`, journalled since
+ *  hunt round 4): the cell went back to its initial state — which a replay,
+ *  sending only actions, cannot do. Pure. */
+export function isResetRow(r: { type: string; payload?: unknown }): boolean {
+  return r.type.endsWith(":__destroy") &&
+    (r.payload as { reset?: unknown } | undefined)?.reset === true;
 }

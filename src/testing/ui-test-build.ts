@@ -26,8 +26,8 @@ import {
   _isolateWorkerCellsInProcess,
   _refuseUnsafeCells,
 } from "./boot-refusals.ts";
-import { formatCellState } from "./test-format.ts";
-import { openUiVideo } from "./ui-video.ts";
+import { formatCellState, predicateVerdict } from "./test-format.ts";
+import { appDirOf, openUiVideo } from "./ui-video.ts";
 import type { UiVideoRecorder } from "./ui-video.ts";
 import { _resetRootSignals } from "../state/signal.ts";
 import { _resetAioRuntime } from "../state/runtime-reset.ts";
@@ -388,13 +388,16 @@ export async function _buildTestUI(
       // Call through FIRST: a test that stubbed fetch before the mount may
       // answer relative URLs on purpose, and it must keep doing so. Only a
       // failure on a relative URL gets the better message.
-      return Promise.resolve(answer(input, init)).finally(() => {
-        fetching.delete(waiting);
-      }).catch((e: unknown) => {
+      return Promise.resolve(answer(input, init)).catch(async (e: unknown) => {
         if (
           typeof input === "string" && !URL.canParse(input) &&
           e instanceof TypeError
         ) {
+          // Under a deno.json `assets` mount the app's server answers it —
+          // so testUI does, from disk, by the server's own rules. Not when
+          // the test brought its own network (`opts.fetch`).
+          const served = stub ? null : await _mountFetch(input, init, testFile);
+          if (served) return served;
           throw withRefusalCode(
             new TypeError(
               `testUI: fetch("${input}") is a relative URL, and testUI runs the ` +
@@ -408,6 +411,8 @@ export async function _buildTestUI(
           );
         }
         throw e;
+      }).finally(() => {
+        fetching.delete(waiting);
       });
     } as typeof globalThis.fetch;
     globalThis.fetch = guarded;
@@ -2120,6 +2125,11 @@ export async function _buildTestUI(
     // drives toast auto-dismiss / debounce / backoff / poll deterministically
     // in tests. Then settles so the UI reflects the fired actions.
     advance: async (ms: number) => {
+      // The queued actions run FIRST: `ui.Start.click(); await ui.advance(5000)`
+      // reads as "click, then five seconds pass". Advancing before the click
+      // ran armed its schedule after the time had passed — nothing fired, and
+      // a "has not fired yet" assertion passed for the wrong reason.
+      await drain();
       await _inMount(mountFence, async () => await advanceSchedules?.(ms));
       await drain();
       await settle(true); // an observation point too — see settle above
@@ -2150,11 +2160,15 @@ export async function _buildTestUI(
       let lastErr: unknown;
       while (true) {
         await settle();
+        let r: unknown;
         try {
-          if (pred(subject)) return video?.observe();
-          lastErr = undefined; // it ran; it was merely false
+          r = pred(subject);
+          lastErr = undefined; // it ran
         } catch (e) {
           lastErr = e;
+        }
+        if (predicateVerdict(r, "testUI: expectCell")) {
+          return video?.observe();
         }
         if (Date.now() >= deadline) break;
         await tick(20);
@@ -2202,12 +2216,14 @@ export async function _buildTestUI(
       // without asking once — failing a condition that was already true.
       for (;;) {
         await settle();
+        let r: unknown;
         try {
-          if (pred()) return video?.observe();
-          lastErr = undefined; // it ran; it was merely false
+          r = pred();
+          lastErr = undefined; // it ran
         } catch (e) {
           lastErr = e;
         }
+        if (predicateVerdict(r, "testUI: waitFor")) return video?.observe();
         if (Date.now() >= deadline) break;
         await tick(20);
       }
@@ -2423,6 +2439,58 @@ export async function _buildTestUI(
  *  call order, tracking the not-yet-dispatched calls in `latent` so
  *  `settle()` waits for them. A Proxy keeps the method's own properties
  *  (`.action()`, `.type`). Returns the undo. */
+/** The deno.json `assets` mounts, per project dir — read once, as a server
+ *  booting there reads them. */
+const _mountsOf = new Map<
+  string,
+  Promise<
+    ((path: string, req?: Request) => Promise<Response | null>) | null
+  >
+>();
+
+/** A relative GET/HEAD `fetch` under one of the app's deno.json `assets`
+ *  mounts, answered BY the app's server (`mountFileServer`: its own static
+ *  handler — app dir first, the mount filling in) — `null` when no mount
+ *  claims it. The server modules load only here, and by a computed
+ *  specifier: this module rides in app bundle graphs (see "happy-dom"). */
+async function _mountFetch(
+  input: string,
+  init: RequestInit | undefined,
+  testFile: string | null | undefined,
+): Promise<Response | null> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD") return null;
+  // The dir the app's server serves from (its entry's folder), not the test's.
+  const dir = appDirOf(testFile ?? null) ?? Deno.cwd();
+  let serve = _mountsOf.get(dir);
+  if (!serve) {
+    const spec = "../server/server.ts";
+    const staticSpec = "../server/server-static.ts";
+    serve = Promise.all([
+      import(new URL(spec, import.meta.url).href) as Promise<
+        typeof import("../server/server.ts")
+      >,
+      import(new URL(staticSpec, import.meta.url).href) as Promise<
+        typeof import("../server/server-static.ts")
+      >,
+    ]).then(([m, st]) => {
+      const served = m._servedAssets(undefined, dir) ?? {};
+      if (Object.keys(served).length === 0) return null;
+      return st.mountFileServer(
+        dir,
+        served,
+        m._mountsDenoJsonOnly(undefined, served),
+      );
+    });
+    _mountsOf.set(dir, serve);
+  }
+  const server = await serve;
+  if (!server) return null;
+  const base = (globalThis as AnyDoc).location?.href ?? "http://localhost/";
+  const url = new URL(input, base);
+  return await server(url.pathname, new Request(url, init));
+}
+
 function _delayCalls(
   // deno-lint-ignore no-explicit-any
   cells: any[],

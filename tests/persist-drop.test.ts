@@ -12,6 +12,7 @@ import { freePort } from "../src/testing/server-test.ts";
 import { readStoredState } from "../src/server/stored-state.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { DENO_DIR } from "./deno-dir-helper.ts";
+import { spec } from "./module-spec-helper.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -174,5 +175,87 @@ Deno.test("am persist --drop: needs a cell, and a stopped app is refused with th
     assertStringIncludes(stopped.text, "am persist --drop=pick");
   } finally {
     await dropTempDir(base);
+  }
+});
+
+// Journal on: a SIGKILL leaves the cell's last write as journal lines past the
+// watermark; the boot that does not declare it HOLDS them for a build that
+// will (`journalHeldCellsKey`). Dropping the cell must drop them too, in the
+// same save — they used to stay held, and a build declaring the cell again
+// replayed them onto its defaults: `{ last: "after-crash" }`, data the drop
+// said was gone, in a state the app never had.
+const DROP_CHILD = `
+import { aio, cell } from "${spec(new URL("../mod.ts", import.meta.url).href)}";
+const DIR = Deno.env.get("DIR"), PHASE = Deno.env.get("PHASE");
+const PORT = Number(Deno.env.get("PORT"));
+const pick = cell("pick", { state: { last: "" }, methods: { set(s, v) { s.last = v; } } });
+const keep = cell("keep", { state: { n: 0 }, methods: { add(s, by) { s.n += by; } } });
+const app = await aio.run({
+  cells: PHASE === "drop" ? [keep] : [pick, keep],
+  appId: "persist-drop-journal",
+  client: "server-only",
+  journal: true,
+  port: PORT,
+  appDir: DIR,
+});
+if (PHASE === "seed") await pick.set("stored");
+if (PHASE === "kill") {
+  await pick.set("after-crash");
+  await keep.add(1);
+  Deno.kill(Deno.pid, "SIGKILL");
+}
+if (PHASE === "drop") {
+  const r = await fetch("http://127.0.0.1:" + PORT + "/__aio/trojan/persist/drop", {
+    method: "POST",
+    headers: { "X-AIO": "1", "Content-Type": "application/json" },
+    body: JSON.stringify({ cell: "pick" }),
+  });
+  if (r.status !== 200) throw new Error("drop: " + r.status + " " + await r.text());
+  await r.body?.cancel();
+}
+if (PHASE === "read") {
+  Deno.writeTextFileSync(DIR + "/out.json", JSON.stringify(app.getState()));
+}
+await app.close();
+Deno.exit(0);
+`;
+
+Deno.test("persist/drop (journal): a SIGKILL's held lines go with the dropped cell", async () => {
+  const dir = await tempDir("persist-drop-journal-");
+  try {
+    await Deno.writeTextFile(join(dir, "app.ts"), DROP_CHILD);
+    for (const phase of ["seed", "kill", "drop", "read"]) {
+      const o = await new Deno.Command(Deno.execPath(), {
+        args: [
+          "run",
+          "-A",
+          "--config",
+          fromFileUrl(new URL("../deno.json", import.meta.url)),
+          join(dir, "app.ts"),
+        ],
+        env: {
+          DIR: dir,
+          PHASE: phase,
+          PORT: String(freePort()),
+          AIO_APPS_DIR: dir,
+        },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      if (phase !== "kill" && !o.success) {
+        throw new Error(
+          `${phase}: ${new TextDecoder().decode(o.stdout)}${
+            new TextDecoder().decode(o.stderr)
+          }`,
+        );
+      }
+    }
+    assertEquals(
+      JSON.parse(await Deno.readTextFile(join(dir, "out.json"))),
+      { pick: { last: "" }, keep: { n: 1 } },
+      "the re-declared cell starts fresh; the declared one keeps its replay",
+    );
+  } finally {
+    await dropTempDir(dir);
   }
 });

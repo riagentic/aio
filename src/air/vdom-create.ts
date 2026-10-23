@@ -293,6 +293,17 @@ export function _notANode(v: unknown): string | null {
   return `${lead}${kind}${tail}`;
 }
 
+/** Throws `_notANode`'s message for a component's return value. Called INSIDE
+ *  the try around a component body, so a bad return takes the same path as a
+ *  body that threw — the last good output stays, the boundary's fallback shows.
+ *  Thrown later, from `createDom`, it had already been stored as `_rendered`:
+ *  the old output was never removed (a ghost node that stayed on the page
+ *  through every later render) and the root unmount died walking an array. */
+export function _throwIfNotANode(v: unknown): void {
+  const bad = _notANode(v);
+  if (bad) throw new Error(bad);
+}
+
 // ── Static optimization helpers ───────────────────────────────────────
 
 /** A form control that carries a `value`/`checked` prop. */

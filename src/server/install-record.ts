@@ -315,6 +315,10 @@ export async function pruneVersions(opts: {
   keep: number;
   /** The version DIRECTORY in use — never removed, whatever its age. */
   current?: string;
+  /** The version DIRECTORY an update replaces — the running build and the
+   *  rollback's copy. Never removed either: by age alone, versions that
+   *  failed and were rolled back (newer, and kept) outranked it. */
+  previous?: string;
 }): Promise<string[]> {
   const versionsDir = join(opts.dir, "versions");
   const dirs: { name: string; mtime: number }[] = [];
@@ -335,11 +339,13 @@ export async function pruneVersions(opts: {
   }
   // `basename`, not "after the last `/`": a Windows install path has no `/`,
   // so the RUNNING version was not recognised as current and could be pruned.
-  const currentName = opts.current ? basename(opts.current) : "";
+  const kept = new Set(
+    [opts.current, opts.previous].filter((p) => p).map((p) => basename(p!)),
+  );
   const doomed = dirs
-    .filter((d) => d.name !== currentName)
+    .filter((d) => !kept.has(d.name))
     .sort((a, b) => b.mtime - a.mtime) // newest first
-    .slice(Math.max(0, opts.keep - (currentName ? 1 : 0)));
+    .slice(Math.max(0, opts.keep - kept.size));
   const removed: string[] = [];
   for (const d of doomed) {
     try {

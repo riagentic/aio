@@ -994,6 +994,11 @@ export async function scanFolders(path: string, signal?: AbortSignal) {
 }
 ```
 
+An aborted `output()` still resolves, with the stdout written before the kill —
+[cookbook recipe 22](../basics/cookbook.md#22-a-subprocess-with-a-timeout-and-a-stop-button)
+adds a timeout, keeps that partial output, and names the
+grandchild-holds-the-pipe trap.
+
 See [`examples/disk`](../../examples/disk/) for the whole shape — subprocesses
 from a cell, supersession, cancel, and the `.server.ts` boundary — and
 [imports](../build/imports.md) for why the Deno-only half lives in its own file.

@@ -11,6 +11,7 @@
 import { createDB } from "../db/async-db.ts";
 import { sqliteKv } from "./skv-sqlite.ts";
 import { migrateSchema } from "./persist-schema.ts";
+import { storedLayoutKey } from "./boot-restore.ts";
 
 /** The multi-layout row separator (skv-sqlite.ts). */
 const SEP = "\x1f";
@@ -38,10 +39,14 @@ export function _storedPersistKey(keys: readonly string[]): string | null {
 /** The persisted state of app `appId` in the store at `dbPath`, opened
  *  read-only — null when nothing is stored. Framework-parked slices (`__…`)
  *  are not state and are left out. Throws on a store that cannot be opened,
- *  one written by a NEWER aio (`PERSIST_SCHEMA`), and an ambiguous one. */
+ *  one written by a NEWER aio (`PERSIST_SCHEMA`), and an ambiguous one. A
+ *  document in both layouts is read from the one the app boots on, as its
+ *  boot recorded it (`storedLayoutKey`) — told to `warn`, as the boot says
+ *  it. */
 export async function readStoredState(
   dbPath: string,
   appId: string,
+  warn?: (msg: string) => void,
 ): Promise<Record<string, unknown> | null> {
   await Deno.stat(dbPath); // NotFound says "no store here", not "cannot open"
   const db = createDB(dbPath, { readonly: true });
@@ -68,15 +73,41 @@ export async function readStoredState(
             )
             : x,
       );
-    if (single && multi && canon(single) !== canon(multi)) {
-      throw new Error(
-        `"${key}" is stored in BOTH layouts with different contents — the ` +
-          `app's persistMode decides which one it boots on; start it once ` +
-          `and it says which copy it ignores`,
+    const isDoc = (v: unknown) =>
+      !!v && typeof v === "object" && !Array.isArray(v);
+    let doc = single ?? multi;
+    // A leftover single row that is no document (`0`, `""`, `false`) beside
+    // real rows: a multi-mode boot never reads it, so it is not what the app
+    // runs on — unless the boot recorded "single", which refuses it below.
+    if (single !== null && !isDoc(single) && isDoc(multi)) {
+      const layout = await kv.get(storedLayoutKey(appId));
+      if (layout !== "single") doc = multi;
+    }
+    if (isDoc(single) && multi && canon(single) !== canon(multi)) {
+      const layout = await kv.get(storedLayoutKey(appId));
+      if (layout !== "single" && layout !== "multi") {
+        throw new Error(
+          `"${key}" is stored in BOTH layouts with different contents — the ` +
+            `app's persistMode decides which one it boots on; start it once ` +
+            `and it says which copy it ignores`,
+        );
+      }
+      doc = layout === "multi" ? multi : single;
+      warn?.(
+        `"${key}" is stored in BOTH layouts with different contents — read ` +
+          `the "${layout}" one the app boots on; the "${
+            layout === "multi" ? "single" : "multi"
+          }" copy is IGNORED, as the app's boot says`,
       );
     }
-    const doc = single ?? multi;
-    if (!doc) return null;
+    if (doc == null) return null;
+    if (typeof doc !== "object" || Array.isArray(doc)) {
+      throw new Error(
+        `"${key}" holds ${
+          JSON.stringify(doc).slice(0, 80)
+        }, not an object of cells — the app refuses to boot over it`,
+      );
+    }
     const schema = await kv.get<number>(`${appId}:__schema`) ?? 0;
     const { state } = migrateSchema(doc, schema);
     return Object.fromEntries(

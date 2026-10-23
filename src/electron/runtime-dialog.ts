@@ -57,7 +57,7 @@ export const PS_PLACE = `
 function AioAll { @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object { $_.WorkingArea }) }
 function AioPrimary { [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea }
 function AioFit($v, $lo, $n, $span) { if ($n -ge $span) { $lo } else { [Math]::Max($lo, [Math]::Min($v, $lo + $span - $n)) } }
-function AioPlace($T, $W, $H, $all, $p) {
+function AioPlace($T, $W, $H, $all, $p, $real = $false) {
   if (@($all).Count -eq 0) { $all = @($p) }
   if ($null -eq $T) { $s = $p; $rx = $p.X; $ry = $p.Y; $rw = $p.Width; $rh = $p.Height }
   else {
@@ -76,8 +76,12 @@ function AioPlace($T, $W, $H, $all, $p) {
           $iy = [Math]::Max(0, [Math]::Min($y + $rh, $k.Y + $k.Height) - [Math]::Max($y, $k.Y))
           if ($ix * $iy -gt $best) { $best = $ix * $iy; $s = $k }
         }
-        $rx = AioFit $x $s.X $rw $s.Width
-        $ry = AioFit $y $s.Y $rh $s.Height
+        # Where the window REALLY is ($real): centred on it as it is, only
+        # its screen chosen; else where it opens, kept inside that screen.
+        if ($real) { $rx = $x; $ry = $y } else {
+          $rx = AioFit $x $s.X $rw $s.Width
+          $ry = AioFit $y $s.Y $rh $s.Height
+        }
       }
     }
   }
@@ -90,12 +94,13 @@ function AioPlace($T, $W, $H, $all, $p) {
 /** splash-place.ts for the Cocoa helpers: `windowRect` and `centredOn` AS
  *  THEIR OWN SOURCE, and the screens in Electron's coordinates (origin at
  *  the primary's top-left; `NSScreen.screens[0]` is the primary, the one
- *  with the menu bar). `aioPlace(T, w, h)` — `T` as on Windows — is the
- *  Cocoa origin of a w×h frame centred where the app's window opens. */
+ *  with the menu bar). `aioPlace(T, w, h, real)` — `T` as on Windows — is
+ *  the Cocoa origin of a w×h frame centred where the app's window opens
+ *  (`real`: where it really is, as `AioPlace -real`). */
 export const MAC_PLACE_JS = `
 const windowRect = ${windowRect.toString()};
 const centredOn = ${centredOn.toString()};
-function aioPlace(T, w, h) {
+function aioPlace(T, w, h, real) {
   const scr = $.NSScreen.screens;
   const PH = scr.objectAtIndex(0).frame.size.height;
   const areas = [];
@@ -105,7 +110,10 @@ function aioPlace(T, w, h) {
   }
   const p = areas[0];
   const b = T && (T[0] === null ? { width: T[2], height: T[3] } : { x: T[0], y: T[1], width: T[2], height: T[3] });
-  const o = b ? centredOn(windowRect(b, areas, p), w, h) : centredOn({ x: p.x, y: p.y, width: p.width, height: p.height, screen: p }, w, h);
+  const r = b && windowRect(b, areas, p);
+  // Where the window REALLY is (real): centred on it as it is, only its
+  // screen chosen; else where it opens.
+  const o = b ? centredOn(real && T[0] !== null ? { x: b.x, y: b.y, width: b.width, height: b.height, screen: r.screen } : r, w, h) : centredOn({ x: p.x, y: p.y, width: p.width, height: p.height, screen: p }, w, h);
   return $.NSMakePoint(o.x, PH - (o.y + h));
 }
 `;
@@ -303,7 +311,7 @@ export function progressLine(fraction: number | null, detail: string): string {
   return `${pct}\t${detail.replace(/[\r\n\t]+/g, " ")}`;
 }
 
-/** "Downloading Electron 44.9.0 — first start only · 45 / 110 MB": what
+/** "Downloading Electron 44.9.3 — first start only · 45 / 110 MB": what
  *  comes down, that later starts skip it, and how far it is. Pure. */
 export function downloadDetail(
   version: string,
@@ -776,7 +784,7 @@ $t2.Add_Tick({
     try { $a2 = [IO.File]::ReadAllText($env:AIO_SPL_AT) } catch {}
     if ($a2 -and $a2 -ne $script:at) {
       $script:at = $a2
-      $o2 = AioPlace ($a2 | ConvertFrom-Json) $f.Width $f.Height (AioAll) (AioPrimary)
+      $o2 = AioPlace ($a2 | ConvertFrom-Json) $f.Width $f.Height (AioAll) (AioPrimary) $true
       $f.Location = New-Object System.Drawing.Point($o2[0], $o2[1])
     }
   }
@@ -1198,7 +1206,7 @@ function run(argv) {
       const av = $.NSString.stringWithContentsOfFileEncodingError(atFile, $.NSUTF8StringEncoding, null);
       if (av && !av.isNil() && av.js !== lastAt) {
         lastAt = av.js;
-        win.setFrameOrigin(aioPlace(JSON.parse(lastAt), win.frame.size.width, win.frame.size.height));
+        win.setFrameOrigin(aioPlace(JSON.parse(lastAt), win.frame.size.width, win.frame.size.height, true));
       }
     }
     // The app that opened this window is gone: nobody will close it.
@@ -1827,6 +1835,9 @@ export function gtkBackend(
 export interface SplashOpener {
   readonly name: string;
   open(title: string, text: string): Promise<ProgressDialog>;
+  /** Frees what the opener holds (GTK's worker thread) when the splash
+   *  ended before it was opened. */
+  dispose?(): void;
 }
 
 /** `"#bg #text #bar #track"` — one mode's colours as a helper reads them. */

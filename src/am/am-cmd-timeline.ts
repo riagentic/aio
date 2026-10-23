@@ -9,10 +9,18 @@
 //    passed" class becomes replay-and-look). `--dry` lists without dispatching.
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outData, outError, sayErr } from "./am-output.ts";
-import { amCtx, defaultJournalPath, resolveAmAppId } from "./am-utils.ts";
+import {
+  amCtx,
+  defaultJournalPath,
+  liveLock,
+  resolveAmAppId,
+} from "./am-utils.ts";
+import { waitingOf } from "./am-cmd-start.ts";
+import { isLockOwnerAlive } from "../server/single-instance-lock.ts";
 import { trojanGet, trojanPost } from "./am-http.ts";
 import {
   isRedactedRow,
+  isResetRow,
   journalDamage,
   type JournalRow,
   parseJournal,
@@ -197,8 +205,13 @@ export async function cmdTimeline(
   const q = limit ? `timeline?limit=${limit}` : "timeline";
   const r = await trojanGet(ctx.port, q, ctx.appId);
   if (!r.ok) {
+    // A session WAITING for a fix has said so already; "is the app running?"
+    // after it contradicted the answer.
+    const pf = liveLock(ctx.appId);
+    const waiting = pf && isLockOwnerAlive(pf) && waitingOf(pf);
     outError(
-      `${r.error} — is the app running? (offline: am timeline --from=<journal>)`,
+      waiting ? r.error : `${r.error} — is the app running? (offline: am ` +
+        `timeline --from=<journal>)`,
       mode,
     );
     Deno.exit(1);
@@ -252,6 +265,7 @@ export type ReplaySkipReason =
   | "reaction"
   | "sync-reaction"
   | "internal"
+  | "reset"
   | "version";
 
 /** The running app's cell versions, as its trojan `cell-versions` route says
@@ -296,6 +310,9 @@ export const REPLAY_SKIP_WHY: Record<ReplaySkipReason, string> = {
     "sync op, not in the journal — not reproduced (the rows after it run on " +
     "different state)",
   internal: "framework-internal — not dispatchable",
+  reset: "an app.cells.disable reset — the cell went back to its initial " +
+    "state; not an action, so the live app is not reset and the rows after " +
+    "it run on different state",
   version: "written under a cell version the running app does not run (the " +
     "same rule boot recovery applies) — its method is not this build's, and " +
     "re-running it through the new one would be a guess",
@@ -340,6 +357,8 @@ export function planReplay(
       ? "time-travel"
       : method.startsWith("__set")
       ? "write-set"
+      : isResetRow(r)
+      ? "reset"
       : method.startsWith("__")
       ? "internal"
       : cause === "effect"

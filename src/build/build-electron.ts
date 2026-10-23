@@ -446,8 +446,8 @@ async function packageFor(
     // icon does before someone draws a real one.
     await writeDefaultIcon(
       join(appDir, binaryName),
-      appIconLabel(appTitle, binaryName),
-      binaryName,
+      appIconLabel(appTitle, cfg.appId ?? binaryName),
+      cfg.hue ?? cfg.appId ?? binaryName,
     );
     console.log(
       `${OK} default icon for "${appTitle ?? binaryName}"`,
@@ -702,7 +702,12 @@ async function _packageMacos(
       );
     }
   }
-  if (icns === null) icns = await icnsFromName(displayName, binaryName);
+  if (icns === null) {
+    icns = await icnsFromName(
+      appIconLabel(cfg.appTitle, cfg.appId ?? binaryName),
+      cfg.hue ?? cfg.appId ?? binaryName,
+    );
+  }
 
   // Assembled into the build SCRATCH, never the output dir: a `.app` is a
   // 300 MB directory, and the artifact this target ships is the ONE file that

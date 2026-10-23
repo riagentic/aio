@@ -189,7 +189,9 @@ testUI(App, "add a todo end-to-end", async (ui) => {
 For **multi-cell logic tests without a component**, `bootCells([a, b])` from
 `aio/testing` boots several cells on the same runtime and returns a handle with
 `advance(ms)` / `settle()` / `dispose()` — the counterpart to single-cell
-`testCell`.
+`testCell`. `h.serverState(cell?)` reads the server-authoritative state,
+`visible.exclude`d fields included (a client-context `cell.x` read of one
+throws, as it should).
 
 ### Handle form — compose your own test
 
@@ -585,7 +587,11 @@ previous run's entry), and dispose flushes the pending save, so the next
 mount in between clears it). Nothing is installed twice: a `document` you pass
 in is used as-is.
 
-There is no HTTP server under `testUI`, so a component's relative
+There is no HTTP server under `testUI`. A relative `fetch` under one of the
+app's deno.json `"assets"` mounts (`"/geo": "./geo"` →
+`fetch("/geo/x.geojson")`) is answered from disk, read-only, by the server's own
+rules — the same mapping, the same 404 for a missing file, the same refusal of
+dotfiles, server-only files and paths that leave the mount. Any other relative
 `fetch("/media/x.txt")` fails — with an error that says so and points to
 `testServer()` (below), instead of Deno's bare `Invalid URL`. To test the
 component alone, give the test its network:
@@ -597,11 +603,12 @@ await using ui = await testUI(Gate, {
 ```
 
 `fetch` answers every request the component makes **from the first mount on**,
-relative URLs included, and is gone when the test ends. That is the point of it:
-the component is mounted before the test body runs, so a stub the body installs
-is too late for a request `onMount` makes — that one has already gone to the
-real network. (Replacing `globalThis.fetch` at module level, above `testUI`, is
-in time as well, but it stays for every other test in the file.)
+relative URLs included (an `assets` mount too), and is gone when the test ends.
+That is the point of it: the component is mounted before the test body runs, so
+a stub the body installs is too late for a request `onMount` makes — that one
+has already gone to the real network. (Replacing `globalThis.fetch` at module
+level, above `testUI`, is in time as well, but it stays for every other test in
+the file.)
 
 For the binding every app needs, there is a primitive:
 
@@ -1052,6 +1059,10 @@ WebView** — over aio's own protocol; no driver install. Dev-mode only. Both
 tiers share one trigger implementation and the **full action set** (including
 `select`, `check`, `clear`, `scroll "top=200"`, `dragTo "<target path>"`), so a
 test and an `am` session send the same events.
+
+Right after a reload the page may briefly have no UI client connected, and both
+commands answer at once. `--wait-client[=ms]` (bare: 10000) waits for one to
+connect first: `am trigger --wait-client "App:SaveButton" click`.
 
 **Except for time.** `testUI` runs cell methods in process, inside the handler:
 a keystroke's answer is rendered before the next key. Over a real socket the

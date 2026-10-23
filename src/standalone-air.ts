@@ -2599,6 +2599,7 @@ export function _keepStoredState(
       const after = applyCellFieldFilter(
         filter,
         slice as Record<string, unknown>,
+        { wildcard: true },
       );
       if (!after || Object.keys(slice).some((k) => !Object.hasOwn(after, k))) {
         c.__aio.persist = "all";

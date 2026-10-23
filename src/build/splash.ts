@@ -7,11 +7,13 @@
  */
 import { basename, resolve } from "@std/path";
 import { appIdentityColors } from "./app-theme.ts";
+import type { HueKey } from "./app-icon.ts";
 import { pngSize } from "./app-icon.ts";
 import { decodePngSync } from "./png-scale.ts";
 import {
   SPLASH_CAP_MS,
   SPLASH_DEFAULTS,
+  SPLASH_MAX_BOX,
   type SplashColors,
   type SplashLook,
   type SplashSpec,
@@ -71,11 +73,14 @@ export function resolveSplash(
   ctx: {
     /** The project root — `image` is relative to it. */
     root: string;
-    /** The appId: the identity colours' hue. */
-    appId: string;
+    /** The identity colours' hue: the appId to hash, or deno.json `hue`. */
+    appId: HueKey;
     read: (path: string) => Uint8Array | null;
+    /** A key that is kept but changes what is drawn, said by name. */
+    warn?: (m: string) => void;
   },
 ): { splash: SplashSpec | null } | { error: string } {
+  const say = ctx.warn ?? ((m: string) => console.warn(`[aio] warning: ${m}`));
   const raw = (mainConfig.build as { splash?: unknown } | undefined)?.splash;
   if (raw === undefined || raw === false) return { splash: null };
   const at = "deno.json build.splash";
@@ -298,6 +303,34 @@ export function resolveSplash(
     );
   }
   if (raw.show === "never") return { splash: null };
+  if (raw.textPosition === "none") {
+    const dropped = (["text", "downloadText"] as const).filter((k) =>
+      typeof raw[k] === "string"
+    );
+    if (dropped.length) {
+      say(
+        `${at}.textPosition is "none", so ${dropped.join(" and ")} ${
+          dropped.length > 1 ? "are" : "is"
+        } never shown — remove ` +
+          `${dropped.length > 1 ? "them" : "it"}, or set textPosition to ` +
+          `"over" or "below".`,
+      );
+    }
+  }
+  const scale = /@2x\.png$/i.test(basename(path)) ? 2 : 1;
+  const [lw, lh] = [Math.round(size.w / scale), Math.round(size.h / scale)];
+  if (
+    sz === undefined &&
+    (lw > SPLASH_MAX_BOX.width || lh > SPLASH_MAX_BOX.height)
+  ) {
+    say(
+      `${at}.image (${path}) is ${lw}×${lh} logical px — the desktop ` +
+        `splash shows it scaled down to fit ${SPLASH_MAX_BOX.width}×` +
+        `${SPLASH_MAX_BOX.height} (not by the yad fallback); use a smaller ` +
+        `image, name it …@2x.png ` +
+        `if it is drawn for a 2× screen, or set "size".`,
+    );
+  }
 
   // Colours the app did not set are its identity's, per light/dark mode; a
   // colour it set is the same in both. The text over the image (the
@@ -324,7 +357,7 @@ export function resolveSplash(
         png: pngBase64(bytes),
         w: size.w,
         h: size.h,
-        scale: /@2x\.png$/i.test(basename(path)) ? 2 : 1,
+        scale,
       },
       // Left out: the app's title, and while Electron downloads the
       // download's own line (SPLASH_DEFAULTS). `text: false`: no text.
@@ -424,10 +457,12 @@ export function sourceSplash(
   config: { build?: unknown } | undefined,
   ctx: {
     root: string;
-    appId: string;
+    appId: HueKey;
     version: string;
     restarted: boolean;
     read: (path: string) => Uint8Array | null;
+    /** A key that is kept but changes what is drawn, said by name. */
+    warn?: (m: string) => void;
   },
 ): { splash: SplashSpec | null } | { error: string } {
   if (!config || ctx.restarted) return { splash: null };

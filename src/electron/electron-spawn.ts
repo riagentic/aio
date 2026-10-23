@@ -21,7 +21,7 @@ import {
   NOISE_NOTE,
   type WindowAt,
 } from "./electron-renderer-log.ts";
-import { bakedSplash, type SplashSpec } from "./splash.ts";
+import { bakedSplash, type SplashSpec, withRunTimeShow } from "./splash.ts";
 import { type Bounds, boundsFromState } from "./splash-place.ts";
 import { type SplashSession, splashSession } from "./splash-session.ts";
 import { electronSplashFor } from "./electron-splash.ts";
@@ -1206,6 +1206,8 @@ export const ELECTRON_ARGS_ALLOWED: ReadonlySet<string> = new Set([
   "disable-accelerated-2d-canvas",
   "disable-accelerated-video-decode",
   "enable-unsafe-swiftshader",
+  // WebGL on a driver Chromium blocklists (a VM, a nested display).
+  "ignore-gpu-blocklist",
   "use-gl",
   "use-angle",
   "force-device-scale-factor",
@@ -1826,6 +1828,9 @@ export type LaunchHooks = {
   /** A run from source: the splash deno.json declares (a package reads the
    *  one its build baked instead). */
   splash?: SplashSpec;
+  /** `aio.run({ splash: { show } })`: the app's run-time say over the start
+   *  splash, read just before it opens (`withRunTimeShow`). */
+  splashShow?: () => "always" | "firstStart";
 };
 
 /** Spawns Electron with the main app script — under the splash a packaged
@@ -1842,7 +1847,12 @@ export async function launchElectron(
   hooks: LaunchHooks = {},
 ): Promise<Deno.ChildProcess | null> {
   if (signal?.aborted) return null;
-  const spec = isCompiled() ? await bakedSplash(distDir) : hooks.splash ?? null;
+  const declared = isCompiled()
+    ? await bakedSplash(distDir)
+    : hooks.splash ?? null;
+  const { spec, byApp } = declared
+    ? withRunTimeShow(declared, hooks.splashShow, (m) => log.error(m))
+    : { spec: null, byApp: false };
   if (!spec) {
     return launchElectronNow(
       url,
@@ -1867,6 +1877,7 @@ export async function launchElectron(
     // Windows: Electron's main process draws it when Electron is here
     // (electron-splash.ts) — the Forms helper is too slow to come first.
     electronDraws: Deno.build.os === "windows",
+    showByApp: byApp,
   });
   return await runUnderSplash(
     splash,

@@ -128,6 +128,8 @@ Static analysis of `cell()` calls:
 - Empty state objects
 - Reserved state keys (`$p`, `$d`, `_status`, `__proto__`) — these collide with
   aio internals
+- **State key named like a method or selector** (error) — `cell()` throws on it
+  at boot; read from the plain `cell("c", { state: {…}, methods: {…} })` literal
 - Mixing methods and actions styles in one cell
 - Cell with no methods and no actions (can't change state)
 - Non-standard naming (convention: lowercase with hyphens)

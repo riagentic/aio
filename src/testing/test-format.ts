@@ -108,3 +108,18 @@ export function assertionFailure(message: string): Error {
 
 /** This folder, as it appears in a stack frame. */
 const HARNESS_DIR = "/src/testing/";
+
+/** A predicate's answer, refused when it is a promise: an `async` predicate
+ *  returns a Promise, which is truthy, so every wait/assertion that takes one
+ *  passed on its first look without the condition ever being asked.
+ *  @internal */
+export function predicateVerdict(r: unknown, api: string): boolean {
+  if (typeof (r as { then?: unknown } | null)?.then === "function") {
+    throw assertionFailure(
+      `${api}: the predicate returned a Promise (an async function?) — a ` +
+        `Promise is always truthy, so this would pass without checking ` +
+        `anything. Make the predicate synchronous; await the work before it.`,
+    );
+  }
+  return Boolean(r);
+}

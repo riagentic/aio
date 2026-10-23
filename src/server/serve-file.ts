@@ -93,6 +93,13 @@ export function fileWindow(
       }
       remaining -= n;
       controller.enqueue(buf.subarray(0, n));
+      // Closed with the last byte, not on a next pull: a client that has
+      // every byte by Content-Length never asks for one, and the file stayed
+      // open until the connection went (a loaded test run saw the leak).
+      if (remaining <= 0) {
+        close();
+        controller.close();
+      }
     },
     cancel() {
       close();
@@ -148,6 +155,60 @@ export interface ServeFileOptions {
   type?: string;
 }
 
+/** The longest file NAME any filesystem aio runs on accepts (ext4, APFS,
+ *  NTFS: 255 bytes/units). A longer segment cannot name a file, so the
+ *  answer is 404 — decided BEFORE the filesystem is asked, because asking
+ *  threw ENAMETOOLONG, which the text branch answered with a 500 and an
+ *  error line carrying the absolute path. */
+const MAX_SEGMENT_BYTES = 255;
+/** PATH_MAX on Linux; the same "cannot exist" reasoning as the segment cap. */
+const MAX_PATH_BYTES = 4096;
+const _utf8 = new TextEncoder();
+
+/** True when no filesystem could hold a file at `filepath` — a segment over
+ *  255 bytes or a path over PATH_MAX. Pure; exported for tests. */
+export function cannotExist(filepath: string): boolean {
+  // PATH_MAX is POSIX's: Windows takes far longer (`\\?\` and long paths).
+  if (
+    Deno.build.os !== "windows" &&
+    _utf8.encode(filepath).byteLength > MAX_PATH_BYTES
+  ) return true;
+  return filepath.split(/[\\/]/).some((seg) =>
+    _utf8.encode(seg).byteLength > MAX_SEGMENT_BYTES
+  );
+}
+
+/** A filesystem error that means "there is no such file to serve" — the
+ *  request named something that does not exist, or names a path through a
+ *  file (`/app.js/x.txt` → ENOTDIR), or a symlink cycle. Anything else (EACCES,
+ *  EISDIR, EIO) is the server's problem and stays a 500. */
+export function isNotServable(e: unknown): boolean {
+  return e instanceof Deno.errors.NotFound ||
+    e instanceof Deno.errors.NotADirectory ||
+    e instanceof Deno.errors.FilesystemLoop;
+}
+
+/** A Windows device name. Measured on Windows 11: `NUL` opens and then
+ *  fails its stat ("Incorrect function"), while `aux.txt`, `con.json`,
+ *  `nul.txt` — even a bare `aux` — are ordinary files. So the name alone
+ *  decides nothing: only a stat that FAILED on such a name is a 404. */
+const WINDOWS_DEVICE =
+  /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)$/i;
+
+/** True when `path` cannot name a servable file before the filesystem is
+ *  asked: too long ({@linkcode cannotExist}), or a NUL byte (Deno throws a
+ *  TypeError naming it). */
+function noSuchFile(path: string): boolean {
+  return path.includes("\0") || cannotExist(path);
+}
+
+/** A failed stat of an opened `path` that is a Windows device, not a file. */
+function isWindowsDevice(path: string): boolean {
+  if (Deno.build.os !== "windows") return false;
+  const name = path.split(/[\\/]/).at(-1) ?? "";
+  return WINDOWS_DEVICE.test(name.replace(/[. ]+$/, ""));
+}
+
 /** Serve the file at `path` (a filesystem path the APP chose — never a raw
  *  request path; containment is the caller's) the way `/__aio/blobs/<id>`
  *  serves a blob: GET/HEAD (405 otherwise), `Accept-Ranges: bytes`, a single
@@ -175,14 +236,16 @@ export async function serveFile(
       headers: { Allow: "GET, HEAD" },
     });
   }
+  // Not there, a path through a file, a symlink loop, a name no filesystem
+  // holds: 404, as the static files answer — a 500 put an error line naming
+  // the absolute path in the log for any anonymous request.
+  if (noSuchFile(path)) return new Response("Not Found", { status: 404 });
   let file: Deno.FsFile;
   let st: Deno.FileInfo;
   try {
     file = await Deno.open(path, { read: true });
   } catch (e) {
-    if (
-      e instanceof Deno.errors.NotFound || e instanceof Deno.errors.IsADirectory
-    ) {
+    if (isNotServable(e) || e instanceof Deno.errors.IsADirectory) {
       return new Response("Not Found", { status: 404 });
     }
     throw e;
@@ -191,6 +254,9 @@ export async function serveFile(
     st = await file.stat();
   } catch (e) {
     file.close();
+    if (isWindowsDevice(path)) {
+      return new Response("Not Found", { status: 404 });
+    }
     throw e;
   }
   if (!st.isFile) {
@@ -202,7 +268,10 @@ export async function serveFile(
     "Content-Type": opts.type ?? blobContentType(path),
     "Accept-Ranges": "bytes",
     "ETag": etag,
-    "Cache-Control": "no-cache",
+    // `no-transform`: never compressed on the way out, as the blob route —
+    // a gzipped 200 and a raw 206 under one ETag glue into garbage when a
+    // download is resumed (`curl -C`, `wget -c`).
+    "Cache-Control": "no-cache, no-transform",
     "Content-Security-Policy": "sandbox",
     "X-Content-Type-Options": "nosniff",
   };

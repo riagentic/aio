@@ -209,6 +209,11 @@ const SCENARIOS: Record<string, Scenario> = {
     names: /nope\.ts/,
     why: "file does not exist",
   },
+  peer: {
+    argv: () => ["peer", "no-such-peer-app"],
+    names: /no-such-peer-app/,
+    why: "that app is not running",
+  },
   feedback: {
     argv: () => ["feedback", "someapp", "--create"],
     names: /feedback/,

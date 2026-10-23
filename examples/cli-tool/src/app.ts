@@ -12,6 +12,9 @@
 // — so `todo serve` on a free port just works. `--url` overrides (a remote
 // server, or one behind a tunnel).
 //
+// `todo` above is THIS tool's name: its deno.json title — the name the help,
+// the refusals, and the compiled binary carry.
+//
 // Dev: deno task dev (= serve)   Build: deno task compile (a `cli` binary)
 import { aio } from "aio";
 import { connectCli } from "aio/server";
@@ -42,21 +45,21 @@ if (Deno.args[0] === "serve") {
   });
 } else {
   const a = args({
-    name: "todo",
+    name: APP_ID,
     help: "A todo list you can script: a server owns it, commands talk to it.",
     version: "0.1.0",
     commands: {
       serve: "run the server (takes aio's flags: --port, --expose, …)",
       list: "show the list",
-      add: "add a todo: todo add <text...>",
-      done: "mark one done: todo done <id>",
+      add: "add a todo: add <text...>",
+      done: "mark one done: done <id>",
       clear: "drop every done todo",
     },
     rest: "arg",
     flags: {
       url: {
         type: "string",
-        help: "the server to talk to (default: the running `todo serve`)",
+        help: "the server to talk to (default: the running `serve`)",
       },
       watch: { type: "boolean", short: "w", help: "list: redraw on change" },
       json: { type: "boolean", help: "machine-readable output" },
@@ -68,11 +71,11 @@ if (Deno.args[0] === "serve") {
   // `--json` like every other refusal (`args()` does the same for typos).
   const usage = (msg: string) => fail(msg, { code: EXIT.usage, json: a.json });
   if (a.command === "add" && !a.rest.join(" ").trim()) {
-    usage("todo add <text...>");
+    usage(`${APP_ID} add <text...>`);
   }
   const doneId = Number(a.rest[0]);
   if (a.command === "done" && !Number.isInteger(doneId)) {
-    usage("todo done <id>");
+    usage(`${APP_ID} done <id>`);
   }
 
   // WHERE the server is. `serve` binds a FREE port unless one is named, so a
@@ -83,13 +86,15 @@ if (Deno.args[0] === "serve") {
   const url = a.flags.url ??
     (live ? `ws://localhost:${live.port}/ws` : undefined);
   if (!url) {
-    fail("no todo server running — start one: todo serve", { json: a.json });
+    fail(`no ${APP_ID} server running — start one: ${APP_ID} serve`, {
+      json: a.json,
+    });
   }
 
   const app = connectCli(url!, { readyTimeoutMs: 3000 });
   app.bind(todos);
   await app.ready.catch(() =>
-    fail(`no server at ${url} — start one: todo serve`, {
+    fail(`no server at ${url} — start one: ${APP_ID} serve`, {
       json: a.json,
     })
   );

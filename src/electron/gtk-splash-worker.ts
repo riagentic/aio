@@ -915,9 +915,19 @@ self.onmessage = (e: MessageEvent<GtkSplashIn>) => {
     else if (m.type === "ask") openAsk(m);
     else if (m.type === "update") update(m.pct, m.text);
     else if (m.type === "move") {
-      if (win && look && placed) {
-        look = { ...look, mode: "window", target: m.target };
-        const o = placeOn(g!, placed.w, placed.h);
+      if (win && placed) {
+        // Where the window REALLY is: centred on it as it is (only its
+        // screen chosen, as Electron's own splash does) — never on where
+        // `windowRect` would have opened it, which for a window partly off
+        // its screen is beside it.
+        const [x, y, width, height] = m.target;
+        const r = { x, y, width, height };
+        const { screens, primary } = screensOf(g!);
+        const o = centredOn(
+          { ...r, screen: windowRect(r, screens, primary ?? r).screen },
+          placed.w,
+          placed.h,
+        );
         g!.gtk_window_move(win, o.x, o.y);
       }
     } else if (m.type === "click") {

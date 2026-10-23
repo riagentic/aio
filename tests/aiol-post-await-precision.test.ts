@@ -330,3 +330,38 @@ export const c = cell("c", {
   assert(hints[0]!.includes(":7 "), hints[0]);
   assert(hints[1]!.includes(":14 "), hints[1]);
 });
+
+Deno.test("draftReadOffsets: a destructuring-assignment TARGET is a write", () => {
+  const reads = (c: string) => draftReadOffsets(c, "s").map((o) => c.slice(o));
+  // Pure writes — a field report's async method, after its await.
+  assertEquals(reads("[s.quotes, s.fear] = [a, b];"), []);
+  assertEquals(reads("({ x: s.quotes } = obj);"), []);
+  assertEquals(reads("({ a: [s.x, ...s.r] } = o);"), []);
+  assertEquals(reads("({ ...s.r } = o);"), []);
+  // Still reads: a default, a computed key, an index, the RHS, a spread,
+  // an object/array LITERAL, an equality, call arguments.
+  assertEquals(reads("[s.a = s.b] = v"), ["s.b] = v"]);
+  assertEquals(reads("({ [s.k]: s.v } = o)"), ["s.k]: s.v } = o)"]);
+  assertEquals(reads("[s.a[s.i]] = v"), ["s.i]] = v"]);
+  assertEquals(reads("s.items[s.idx] = v"), ["s.idx] = v"]);
+  assertEquals(reads("[a, b] = [s.x, s.y]").length, 2);
+  assertEquals(reads("const xs = [...s.items]").length, 1);
+  assertEquals(reads("x = { a: s.x }").length, 1);
+  assertEquals(reads("[s.a] == v").length, 1);
+  assertEquals(reads("f([s.a], s.b)").length, 2);
+});
+
+Deno.test("post-await: destructuring writes after an await are not hinted", async () => {
+  const hints = await hintsFor(`import { cell } from "aio";
+export const c = cell("c", {
+  state: { quotes: 0, fear: 0, x: 0 },
+  methods: {
+    async go(s) {
+      const [a, b] = await Promise.all([fetch("/a"), fetch("/b")]);
+      [s.quotes, s.fear] = [a.status, b.status];
+      ({ x: s.x } = { x: 1 });
+    },
+  },
+});`);
+  assertEquals(hints, []);
+});

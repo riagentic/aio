@@ -76,6 +76,11 @@ Deno.test("parity: a pick comes back in the same shape from the window and from 
     ["file", ["/home/u/a|b.txt"]],
     ["directory", ["/home/u/Rock|Pop"]],
     ["files", ["/home/u/a|b.txt", "/home/u/c.txt"]],
+    // Spaces at either end are part of the name the user typed — and the one
+    // the dialog confirmed an overwrite against. Trimmed, `report ` came back
+    // as `report`: another file, overwritten unasked.
+    ["file", ["/home/u/report "]],
+    ["files", [" /home/u/a.txt", "/home/u/b.txt "]],
   ];
   for (const [kind, paths] of cases) {
     const native = _interpret(kind, "zenity", out(paths.join("\n")));

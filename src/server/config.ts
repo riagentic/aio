@@ -52,6 +52,7 @@ export const DENO_JSON_READ_KEYS = new Set<string>([
   "entry",
   "build",
   "version",
+  "hue", // the identity colour instead of the appId's hash (declaredHue)
   // Read by BOTH: `build-includes.ts` embeds each mount in the binary (and the
   // web and Android builds package it), and the server serves it
   // (`_servedAssets`), under whatever `aio.run({ assets })` adds.
@@ -271,6 +272,8 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "users",
   "key",
   "resolveUser",
+  "resolvePeer",
+  "peerTypes",
   "sessions",
   "auth",
   "ui",
@@ -309,6 +312,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "redactActions",
   "childWindows",
   "electron",
+  "splash",
   "onAction",
   "onEffect",
   "onConnect",
@@ -386,6 +390,8 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "users",
   "key",
   "resolveUser",
+  "resolvePeer",
+  "peerTypes",
   "sessions",
   "auth",
   "db",
@@ -407,6 +413,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "redactActions",
   "childWindows",
   "electron",
+  "splash",
   "libraryMode",
   "_workerEntry", // internal: testServer({ workers: "real" })
   "_harnessShapeGuard", // internal: testServer's declared-type guard
@@ -600,6 +607,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
     "{}",
     "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false, { webviewTag } enables <webview> without openWindow, { guestDownloads } lets an embedded or child page save files, { permissions } is the app page's exact permission allow-list (guests then get none), { allowLocalPeers } lets other processes of the same OS user open a production app's local socket (off: only the app's own window may), { ignoreDebugEnv } makes an Electron client ignore AIO_CDP / AIO_PORT / AIO_DEFAULT_PORT from the environment (--cdp and --port still work), { shortcuts: { reload: false, print: false } } leaves Ctrl+R / Ctrl+P to the page, { confirmUnload } asks Leave/Stay natively when the page vetoes a close, { backgroundColor: #rrggbb or { light, dark } } is the window's background before the page paints, { showWhenPainted: false or { capMs } } shows the window at once or caps the wait for its first paint, { downloadWindow } sets the first start's download window and Retry / Quit question (heading, text, question, background, color, bar, cancel); all default to what aio has always done",
   ],
+  splash: [
+    "{}",
+    'the desktop start splash at run time — { show: () => "always" | "firstStart" } is read just before build.splash opens ("firstStart": only while Electron downloads); it throws, takes over 50 ms or returns anything else → the build\'s show, said once',
+  ],
   libraryMode: [
     "false",
     "no exit/signals/instance lock; app.close() leaves the process alive (embedding, tests)",
@@ -617,6 +628,14 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   resolveUser: [
     "",
     "dynamic (token,state)→user hook for runtime auth (AIO-171)",
+  ],
+  resolvePeer: [
+    "",
+    "(peer,state)→user for a PROVEN local aio app calling over peer() — opt-in; absent = peer proofs ignored",
+  ],
+  peerTypes: [
+    "",
+    "TypeScript source of the types other apps call this one with — served by peer().describe(), saved by `am peer`",
   ],
   sessions: [
     "",
@@ -758,12 +777,15 @@ export const CONFIG_GROUPS: [string, string[]][] = [
     "trustProxyHeader",
     "childWindows",
     "electron",
+    "splash",
     "ui",
   ]],
   ["Auth", [
     "users",
     "key",
     "resolveUser",
+    "resolvePeer",
+    "peerTypes",
     "sessions",
     "auth",
   ]],
@@ -909,6 +931,7 @@ export const _CALLABLE_CONFIG_KEYS = [
   "onRestore",
   "beforeReduce",
   "resolveUser",
+  "resolvePeer",
   // Found by tests/callable-config-completeness.test.ts on its first run: the
   // hook that restores state after a crash was function-valued and unchecked,
   // so a typo'd import meant crash recovery silently never happened — the
@@ -1139,6 +1162,18 @@ export function validateConfig(
     log.error(teachMessage(
       badDw,
       "see the keys of electron.downloadWindow",
+      "docs/build/targets.md",
+    ));
+    exit(1);
+  }
+  if (
+    label === "splash" && obj.show !== undefined &&
+    typeof obj.show !== "function"
+  ) {
+    log.error(teachMessage(
+      `splash.show must be a function, not ${JSON.stringify(obj.show)}`,
+      'use show: () => "always" or () => "firstStart" — it is called just ' +
+        "before the splash opens",
       "docs/build/targets.md",
     ));
     exit(1);
@@ -1404,11 +1439,16 @@ export const NESTED_CONFIGS: Record<string, () => Set<string>> = {
   // The Electron block: two SECURITY switches, and a misspelling of either is
   // an app that thinks it is protected and is not.
   electron: () => VALID_ELECTRON_KEYS,
+  // `splash: { shwo }` would leave the person's setting doing nothing.
+  splash: () => VALID_SPLASH_KEYS,
   auth: () => VALID_AUTH_KEYS,
   sessions: () => VALID_SESSIONS_KEYS,
   tls: () => VALID_TLS_KEYS,
   updates: () => VALID_UPDATES_KEYS,
 };
+
+/** Every key of `aio.run({ splash })` (aio-types.ts). */
+export const VALID_SPLASH_KEYS: Set<string> = new Set(["show"]);
 
 /** Every key of `ElectronConfig` (aio-types.ts). */
 export const VALID_ELECTRON_KEYS: Set<string> = new Set([
@@ -1763,6 +1803,7 @@ export const SHAPE_VALUES: Record<string, ConfigShape> = {
   circuitBreaker: "object",
   security: "object",
   electron: "object",
+  splash: "object",
   cellDefaults: "object",
 };
 

@@ -289,5 +289,7 @@ Deno.test({
         "direction the dev==prod rule forbids. See the reason beside each " +
         "name in this file.",
     );
+    // `am shot` waits on it before vouching for a frame — on a prod page too.
+    assert((await probe()).code.includes("__aioMounted"));
   },
 });

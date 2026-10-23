@@ -171,8 +171,9 @@ export function applyProps(
         // the one removal — `value={null}` takes it too.
         _clearDomProp(el, k);
       } else {
-        const ns = _attrNS(k);
-        if (ns) el.removeAttributeNS(ns, k.slice(k.indexOf(":") + 1));
+        const name = _attrName(k);
+        const ns = _attrNS(name);
+        if (ns) el.removeAttributeNS(ns, name.slice(name.indexOf(":") + 1));
         // The SAME name mapping the write used. `_writeProp` sets
         // `strokeWidth` as `stroke-width`, so removing the raw JSX key took
         // an attribute that was never there and left the real one on the
@@ -180,7 +181,7 @@ export function applyProps(
         // what a fresh render produces, silently, for all 41 mapped SVG
         // names. (The `v == null` path already went through the mapper;
         // only key-absent-from-next was wrong.)
-        else el.removeAttribute(_attrName(k));
+        else el.removeAttribute(name);
       }
     }
   }

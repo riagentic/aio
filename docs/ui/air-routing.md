@@ -293,6 +293,14 @@ segment; inside one (`/a*b`) it is a literal. Routes with children use prefix
 matching; leaf routes use exact matching. An `index` child renders wherever its
 parent's pattern matches exactly — params and a trailing slash included.
 
+So a page written as children — `<Route path="/"><Home /></Route>` — is a
+layout, and renders on every page. In dev the first such render names it once: a
+`<Route>` with children, no `element`, and no `<Route>` anywhere in those
+children, matching a path its element form would not. Write a page as
+`element={<Home />}`; a layout whose routes come from a component says so with
+`element={<Outlet />}`, which silences the hint. Matching is the same either
+way.
+
 ---
 
 ## Full Example

@@ -1,6 +1,6 @@
-# Cookbook — twenty recipes, each one tested
+# Cookbook — twenty-two recipes, each one tested
 
-Twenty things an app needs on its first day, each as a complete file you can
+Twenty-two things an app needs on its first day, each as a complete file you can
 copy. The guides explain; [every option](every-option.md) is the lookup table;
 this page is the paste buffer.
 
@@ -40,6 +40,8 @@ faked. Nothing else on the page is an exception.
 | [18](#18-a-resource-you-must-close)                       | `useResource` + `onUnmount` | `testUI` (illustrative last mile)    |
 | [19](#19-keep-one-broken-panel-from-taking-the-page)      | `ErrorBoundary`             | `testUI`                             |
 | [20](#20-move-heavy-work-off-the-main-thread)             | `worker: true`              | `bootCells` (illustrative last mile) |
+| [21](#21-an-external-data-source)                         | fetch → status → last good  | `bootCells` + `stub`                 |
+| [22](#22-a-subprocess-with-a-timeout-and-a-stop-button)   | `Deno.Command` + `signal`   | real child + `bootCells` + `stub`    |
 
 ---
 
@@ -962,6 +964,214 @@ reproduces the serialization boundary but not the thread. Real workers are
 `testServer({ workers: "real", workerEntry })` — an entry that defines the same
 cells and calls `aio.run({ libraryMode: true })` under `isCellWorker()`. See
 [cell workers](../state/cell-workers.md).
+
+## 21. An external data source
+
+The shape every dashboard tile repeats: fetch, normalize, record a status
+`{ at, ok, err, busy }`, and keep the last good data when the source fails. The
+I/O runs outside the cell and commits through sync reducers, so a slow source
+never holds a method open
+([why](../state/methods.md#network-io-fetch-outside-commit-with-a-sync-reducer)).
+
+```ts
+// src/cell/feed.ts
+import { cell, serverImport } from "aio";
+
+export type Item = { id: string; title: string };
+/** What `feed.server.ts` exports — and what a test stubs. */
+export type Source = { fetchItems(signal: AbortSignal): Promise<unknown> };
+type Status = { at: number; ok: boolean; err: string; busy: boolean };
+type FeedState = { items: Item[]; status: Status };
+
+/** The one place the remote shape is trusted: anything else throws. */
+export function normalize(raw: unknown): Item[] {
+  if (!Array.isArray(raw)) throw new Error("expected an array of items");
+  return raw.map((r) => ({ id: String(r.id), title: String(r.title ?? "") }));
+}
+
+export const feed = cell("feed", {
+  state: {
+    items: [],
+    status: { at: 0, ok: false, err: "", busy: false },
+  } as FeedState,
+  // `busy` is a fact about THIS process — never restore it from disk.
+  persist: { exclude: ["status.busy"] },
+  methods: {
+    started(s) {
+      s.status.busy = true;
+    },
+    loaded(s, items: Item[], at: number) {
+      s.items = items;
+      s.status = { at, ok: true, err: "", busy: false };
+    },
+    failed(s, err: string, at: number) {
+      s.status = { at, ok: false, err, busy: false }; // items untouched
+    },
+  },
+});
+
+/** Call it from a schedule, an owned timer, a route or a button. */
+export async function refreshFeed(): Promise<void> {
+  await feed.started();
+  try {
+    const { fetchItems } = await serverImport<Source>(
+      "./feed.server.ts",
+      import.meta.url,
+    );
+    const items = normalize(await fetchItems(AbortSignal.timeout(10_000)));
+    await feed.loaded(items, Date.now());
+  } catch (e) {
+    await feed.failed(e instanceof Error ? e.message : String(e), Date.now());
+  }
+}
+```
+
+```ts
+// src/cell/feed.server.ts
+import type { Source } from "./feed.ts";
+
+export const fetchItems: Source["fetchItems"] = async (signal) => {
+  const res = await fetch("https://api.example.com/items", { signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+};
+```
+
+The test never touches the network: `serverImport` is the seam, and
+`bootCells({ stub })` fills it
+([stubbing](../testing/ui-testing.md#stubbing-a-server-only-module--serverimport)).
+
+```ts
+// tests/feed.test.ts
+import { assertEquals } from "@std/assert";
+import { bootCells } from "aio/testing";
+import { feed, refreshFeed } from "../src/cell/feed.ts";
+
+let reply: unknown = [{ id: 1, title: "first" }];
+const fetchItems = () =>
+  reply instanceof Error ? Promise.reject(reply) : Promise.resolve(reply);
+
+Deno.test("feed: a failure keeps the last good data", async () => {
+  using _boot = await bootCells([feed], {
+    stub: { "./feed.server.ts": { fetchItems } },
+  });
+  await refreshFeed();
+  assertEquals(feed.items, [{ id: "1", title: "first" }]);
+  assertEquals(feed.status.ok, true);
+
+  reply = new Error("HTTP 503");
+  await refreshFeed();
+  assertEquals(feed.status.err, "HTTP 503");
+  assertEquals(feed.status.busy, false);
+  assertEquals(feed.items.length, 1, "the last good data is still shown");
+
+  reply = { not: "an array" };
+  await refreshFeed();
+  assertEquals(feed.status.ok, false, "a bad payload is a failure too");
+  assertEquals(feed.items.length, 1);
+});
+```
+
+Many sources in one cell? Key a map —
+`state: { feeds: {} as Record<string,
+{ items: Item[]; status: Status }> }` —
+and exclude every entry's flag with one `*` segment:
+`persist: { exclude: ["feeds.*.status.busy"] }`
+([auto-persist](../persistence/auto-persist.md)).
+
+## 22. A subprocess with a timeout and a stop button
+
+`Deno.Command` takes a `signal`: aborting it kills the child, and `output()`
+still resolves — with the stdout the child wrote before it died. Combine the
+caller's signal with a timeout and both cut-offs keep the partial output.
+
+```ts
+// src/cell/tool.ts
+import { cell, type MethodDraftMeta, self, serverImport } from "aio";
+
+/** What a run hands back — the output so far, even when it was cut short. */
+export type ToolResult = {
+  out: string;
+  code: number;
+  timedOut: boolean;
+  cancelled: boolean;
+};
+/** What `tool.server.ts` exports — and what a test stubs. */
+export type ToolRunner = {
+  runTool(
+    cmd: string,
+    args: string[],
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<ToolResult>;
+};
+type ToolState = { out: string; status: string };
+
+export const tool = cell("tool", {
+  state: { out: "", status: "idle" } as ToolState,
+  cancelOn: { scan: [self("stop")] },
+  methods: {
+    async scan(s: ToolState & MethodDraftMeta, path: string) {
+      s.status = "running";
+      s.out = "";
+      try {
+        const { runTool } = await serverImport<ToolRunner>(
+          "./tool.server.ts",
+          import.meta.url,
+        );
+        const r = await runTool("du", ["-ak", path], 10_000, s.$signal);
+        s.out = r.out; // partial on a timeout or a stop — still worth showing
+        s.status = r.cancelled
+          ? "stopped"
+          : r.timedOut
+          ? "timed out"
+          : r.code === 0
+          ? "done"
+          : `failed (exit ${r.code})`;
+      } catch (e) {
+        s.status = `failed: ${e instanceof Error ? e.message : e}`; // e.g. no `du`
+      }
+    },
+    stop(s: ToolState) {
+      s.status = "stopping"; // `cancelOn` aborts the running scan's `$signal`
+    },
+  },
+});
+```
+
+```ts
+// src/cell/tool.server.ts
+import type { ToolRunner } from "./tool.ts";
+
+export const runTool: ToolRunner["runTool"] = async (
+  cmd,
+  args,
+  timeoutMs,
+  signal,
+) => {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const r = await new Deno.Command(cmd, {
+    args,
+    stdout: "piped",
+    stderr: "null",
+    signal: AbortSignal.any([signal, timeout]),
+  }).output(); // resolves after a kill too, with what was written so far
+  return {
+    out: new TextDecoder().decode(r.stdout),
+    code: r.code,
+    timedOut: timeout.aborted && !signal.aborted,
+    cancelled: signal.aborted,
+  };
+};
+```
+
+The signal kills the **direct** child only. `output()` waits for the pipe to
+close, so a grandchild that inherited stdout (`sh -c "…; sleep 60"`) holds the
+call open until IT exits. Run the tool itself rather than a shell around it (or
+`exec` it from the shell) — and for a whole tree you can stream, pause and
+cancel, use `spawn()` from `aio/server`
+([desktop jobs](../clients/desktop-jobs.md)). A test stubs `./tool.server.ts`
+exactly as recipe 21 does.
 
 ---
 

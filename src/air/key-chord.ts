@@ -174,15 +174,50 @@ const BIND_MODS: Record<string, BindMod> = {
  *    ASCII character (Alt on macOS, a dead key, a non-Latin layout), the same
  *    fallback browsers' own shortcuts use. An ASCII result is never
  *    re-interpreted: AZERTY's `,` sits at `KeyM` and must not fire `"ctrl+m"`;
+ *  - a US PUNCTUATION key (`/`, `=`, `-`, `[`, `;`, `,` … `US_PUNCT`) is its US position
+ *    (`code` `Slash`) when that key typed its US shifted twin (`?` for `/`)
+ *    and the chord names shift — `"ctrl+shift+/"`, `"shift+="` used to never
+ *    fire, since Shift+/ types `?`. AZERTY's `Slash` key types `!`/`§`:
+ *    an ASCII `!` is never re-read as `/`. With Alt held, a key typing NO
+ *    ASCII character is its US position too, on any layout (as letters
+ *    already are): macOS Alt+/ types `÷`, Alt+= `≠`, so `"alt+/"`, `"alt+="`
+ *    never fired on a Mac — and a German Mac's Alt+- (`–`, at the US Slash
+ *    position) fires `"alt+/"` likewise;
  *  - anything else is `key` alone (case-insensitive). */
-export function keycapMatch(bind: string, key: string, code: string): boolean {
+export function keycapMatch(
+  bind: string,
+  key: string,
+  code: string,
+  shift = false,
+  alt = false,
+): boolean {
   if (key.toLowerCase() === bind.toLowerCase()) return true;
   if (/^[0-9]$/.test(bind)) return code === "Digit" + bind;
-  if (!/^[a-z]$/i.test(bind)) return false;
   const typedNoAscii = key === "Dead" || key === "Unidentified" ||
     ([...key].length === 1 && key.codePointAt(0)! > 0x7f);
+  const sym = Object.hasOwn(US_PUNCT, bind) ? US_PUNCT[bind] : undefined;
+  if (sym) {
+    return code === sym[0] &&
+      ((shift && key === sym[1]) || (alt && typedNoAscii));
+  }
+  if (!/^[a-z]$/i.test(bind)) return false;
   return typedNoAscii && code === "Key" + bind.toUpperCase();
 }
+
+/** A US punctuation keycap: its `code` and what Shift makes it type. */
+const US_PUNCT: Record<string, readonly [string, string]> = {
+  "/": ["Slash", "?"],
+  "=": ["Equal", "+"],
+  "-": ["Minus", "_"],
+  "[": ["BracketLeft", "{"],
+  "]": ["BracketRight", "}"],
+  "\\": ["Backslash", "|"],
+  ";": ["Semicolon", ":"],
+  "'": ["Quote", '"'],
+  ",": ["Comma", "<"],
+  ".": ["Period", ">"],
+  "`": ["Backquote", "~"],
+};
 
 /** `onGlobalKey`'s chord string —`"ctrl+s"`, `"ctrl+shift+s"`, `"mod+k"`,
  *  `"alt+f1"`, `"ctrl++"` — as the key plus the modifiers it names. Unlike a

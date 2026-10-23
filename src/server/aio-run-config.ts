@@ -256,7 +256,7 @@ export function _warnMisplacedDenoJson(): void {
       } silently doing nothing. Move ${
         stray.length === 1 ? "it" : "them"
       } into aio.run({ ${stray.join(", ")} }) in your app entry. ` +
-      `(deno.json carries only identity and build: appId, title, client, ` +
+      `(deno.json carries only identity and build: appId, title, hue, client, ` +
       `entry, build, version.)`,
   );
 }
@@ -378,11 +378,28 @@ export function _denoJsonTargetClient():
     case "cli":
       return "cli";
     case "server":
+    case "server-only": // the --client= flag's spelling, written here too
       return "server-only";
+    case undefined:
+      return undefined;
     default:
+      // Never silent: an unknown value fell through to the electron default
+      // and the boot then blamed a missing App.tsx, never the typo.
+      if (!_warnedClient) {
+        _warnedClient = true;
+        log.warn(
+          "aio",
+          `deno.json "client": ${JSON.stringify(raw)} is not a client — ` +
+            `ignored, so the default client runs. Use one of: "browser", ` +
+            `"electron", "cli", "server" (no UI), "android".`,
+        );
+      }
       return undefined;
   }
 }
+
+/** The unknown deno.json `client` was said (once per process). */
+let _warnedClient = false;
 
 /** THE app-dir ladder for this process, most authoritative first — see
  *  `baseDirCandidates`, which owns the rule. Every input is read here and

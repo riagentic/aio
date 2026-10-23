@@ -28,7 +28,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.23-beta";
+export const VERSION: string = "1.0.24-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -65,7 +65,7 @@ export type CliFlags = {
    *  from the cells rather than guessed from the source. */
   dataContract?: boolean;
   /** `--aio-electron-runtime`: print how this build gets its Electron as one
-   *  JSON line — `{"runtime":"shared","version":"44.9.0"}`, `{"runtime":
+   *  JSON line — `{"runtime":"shared","version":"44.9.3"}`, `{"runtime":
    *  "bundled",…}`, or `{"runtime":"none"}` — and exit, touching nothing. An
    *  updater asks the verified new build this before the swap, so a shared-
    *  runtime update's Electron is in the store when it first starts. */

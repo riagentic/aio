@@ -109,6 +109,20 @@ Deno.test("am data: lists the three tiers and names the backup unit", async () =
     assertStringIncludes(pretty, "logs ②");
     assertStringIncludes(pretty, "runtime ③");
     assertStringIncludes(pretty, "back this up");
+    assertEquals(info.dbPath, undefined, "no dbPath recorded: none listed");
+
+    // A database kept outside data/ by `dbPath` (recorded by the boot) is
+    // listed as part of ① — a hand copy of data/ alone misses it.
+    const d = seedApp("dbtest", home);
+    writeAppMeta(d, {
+      appId: "dbtest",
+      aio: "1.0.0-test",
+      dbPath: "/srv/db/state.db",
+    });
+    const db = await run(cmdData, [], { app: "dbtest" });
+    const dbInfo = JSON.parse(db.out) as Parameters<typeof renderData>[0];
+    assertEquals(dbInfo.dbPath, "/srv/db/state.db");
+    assertStringIncludes(renderData(dbInfo), "database ①  /srv/db/state.db");
   } finally {
     unpin();
     await Deno.remove(home, { recursive: true });

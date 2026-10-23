@@ -123,3 +123,66 @@ Deno.test({
     });
   },
 });
+
+Deno.test("serveFile: a name no file can have is 404, not a 500 naming the path", async () => {
+  await withFile("a.txt", async (p, dir) => {
+    const loop = join(dir, "loop");
+    await Deno.symlink(join(dir, "loop2"), loop, { type: "file" }); // Windows asks
+    await Deno.symlink(loop, join(dir, "loop2"), { type: "file" });
+    for (
+      const bad of [
+        join(dir, "x".repeat(300)), // over any filesystem's name limit
+        join(dir, "a\0b"), // a NUL byte: Deno throws a TypeError
+        loop, // a symlink cycle
+        join(p, "x"), // a path through a file
+        ...(Deno.build.os === "windows" ? [join(dir, "NUL")] : []), // a device
+      ]
+    ) assertEquals((await serveFile(get(), bad)).status, 404, bad);
+    // A device NAME with an extension is an ordinary file on Windows 11
+    // (measured: `aux.txt`, `con.json`, `nul.txt`) — served, never a 404.
+    for (const name of ["aux.txt", "con.json"]) {
+      await Deno.writeTextFile(join(dir, name), "x");
+      const r = await serveFile(get(), join(dir, name));
+      assertEquals([r.status, await r.text()], [200, "x"], name);
+    }
+  });
+});
+
+Deno.test("serveFile: no-transform — a resumed download never glues raw bytes onto a gzip start", async () => {
+  await withFile("a.txt", async (p) => {
+    const r = await serveFile(get(), p);
+    await r.body?.cancel();
+    assert(/\bno-transform\b/.test(r.headers.get("cache-control") ?? ""));
+  });
+});
+
+Deno.test("serveFile: the file is closed with its last byte — a client that has them all never asks again", async () => {
+  // A client reads by Content-Length and stops: the stream closed the file
+  // only on a NEXT pull, which never came, so it stayed open until the
+  // connection went (a loaded suite run saw it as a leak).
+  await withFile("a.bin", async (p) => {
+    const open = Deno.open;
+    let closed = false;
+    Deno.open = async (...a: Parameters<typeof Deno.open>) => {
+      const f = await open(...a);
+      const close = f.close.bind(f);
+      f.close = () => {
+        closed = true;
+        close();
+      };
+      return f;
+    };
+    try {
+      const r = await serveFile(get(), p);
+      const reader = r.body!.getReader();
+      let got = 0;
+      while (got < BYTES.byteLength) {
+        got += (await reader.read()).value!.byteLength;
+      }
+      assertEquals(closed, true, "open after its last byte was read");
+      await reader.cancel();
+    } finally {
+      Deno.open = open;
+    }
+  });
+});

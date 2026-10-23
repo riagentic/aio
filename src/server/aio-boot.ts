@@ -1064,6 +1064,47 @@ async function bootStorageOpening<S>(
     }
   }
 
+  // ── 4a. Read the `db:` rows BEFORE the hooks ──────────────────────
+  // `onMigrate` and `onRestore` (cell and app) used to run before the rows
+  // were loaded (step 7), so a hook reading a bound array saw its declared
+  // default — `onRestore: (s) => { s.total = sum(s.rows) }` restored 0 over a
+  // full table, in silence. They now see the rows the app will hold. Step 7
+  // still places the table over whatever the hooks left (SQLite owns those
+  // rows; a hook's write to them is named there), and the hooks get a COPY —
+  // a row mutated in place must never reach the diff baseline.
+  let loadedTables: Record<string, unknown[]> | undefined;
+  let syncedTables: Set<string> | undefined;
+  let hookView: Map<string, string> | undefined;
+  if (asyncDb && syncKeys.length > 0) {
+    loadedTables = await loadTables(asyncDb, syncSchema);
+    syncedTables = await readSyncedTables(asyncDb);
+    const hasMigrate = [...(cfg.cellMigrations?.values() ?? [])].some((m) =>
+      m.onMigrate
+    );
+    const hasHooks = !!(onRestore || cellRestores?.size || hasMigrate);
+    // The copy only when a hook could touch the rows: a full clone of every
+    // bound table is ~1 ms per thousand rows on EVERY boot.
+    const hookRows = hasHooks ||
+        !!(diagHooks?.getRecoveredState() && onCheckpointRestore)
+      ? structuredClone(loadedTables)
+      : loadedTables;
+    state = placeLoadedTables(
+      state as Record<string, unknown>,
+      dbBindings,
+      hookRows,
+      undefined,
+      syncedTables,
+    ) as S;
+    if (hadPersistedState && hasHooks) {
+      hookView = new Map(
+        dbBindings.filter((b) => b.path.length > 0).map((b) => [
+          b.table,
+          JSON.stringify(readPath(state as Record<string, unknown>, b.path)),
+        ]),
+      );
+    }
+  }
+
   // ── 4b. State migration — check persisted versions vs current ────
   // ONLY when something was actually restored. On a fresh install there is no
   // old shape to migrate: running onMigrate against pristine initialState let
@@ -1412,6 +1453,28 @@ async function bootStorageOpening<S>(
     }
   }
 
+  // The hooks' verdict on the bound rows is read HERE, before the checkpoint
+  // restore: a bound array a checkpoint put back is not a hook's write.
+  if (loadedTables && hookView) {
+    for (const b of dbBindings) {
+      const before = hookView.get(b.table);
+      const rows = loadedTables[b.table];
+      if (before === undefined || !rows) continue;
+      if (!rows.length && !syncedTables?.has(b.table)) continue; // adopted
+      const after = JSON.stringify(
+        readPath(state as Record<string, unknown>, b.path),
+      );
+      if (after === before) continue;
+      log.warn(
+        `db: an onMigrate/onRestore hook changed state.${
+          b.path.join(".")
+        }, which table "${b.table}" owns — the rows are put back from the ` +
+          `table after the hooks run, so that change was replaced. Change ` +
+          `the rows in a method (or with app.db) to keep it.`,
+      );
+    }
+  }
+
   // ── 6. Checkpoint restore ─────────────────────────────────────────
   if (diagHooks?.getRecoveredState() && onCheckpointRestore) {
     try {
@@ -1463,16 +1526,13 @@ async function bootStorageOpening<S>(
   // top-level key nothing owns.
   // Only the BOUND tables are read: an SQL-only table has no state home, so
   // reading it whole at boot was O(rows) of wasted I/O per start.
-  let loadedTables: Record<string, unknown[]> | undefined;
-  if (asyncDb && syncKeys.length > 0) {
-    const loaded = await loadTables(asyncDb, syncSchema);
-    loadedTables = loaded;
+  if (loadedTables) {
     state = placeLoadedTables(
       state as Record<string, unknown>,
       dbBindings,
-      loaded,
+      loadedTables,
       (m) => log.warn(m),
-      await readSyncedTables(asyncDb),
+      syncedTables,
     ) as S;
   }
 
@@ -1558,8 +1618,10 @@ async function bootStorageOpening<S>(
   let heldRelease: string[] = [];
   /** The held map a save must write to drop the released entries. */
   let heldAfterRelease: Record<string, number> = {};
-  /** The seq whose save carried the release — see `planPersisted`. */
+  /** The seq whose save carried the release, and the cells it released —
+   *  see `planPersisted`. */
   let heldReleasePlannedAt: number | undefined;
+  let heldReleasePlanned: string[] = [];
   if (journal && journalWmStored) {
     const declaredCells = initialState as Record<string, unknown>;
     const stored = await kvDb!.get<Record<string, number>>(
@@ -1704,8 +1766,11 @@ async function bootStorageOpening<S>(
         // The save that held the re-declared cells' replay committed their
         // release with it: from here they go by the app-wide watermark.
         if (heldReleasePlannedAt === seq) {
-          journal.releaseCells(heldRelease);
-          heldRelease = [];
+          journal.releaseCells(heldReleasePlanned);
+          heldRelease = heldRelease.filter((c) =>
+            !heldReleasePlanned.includes(c)
+          );
+          heldReleasePlanned = [];
           heldReleasePlannedAt = undefined;
         }
         journal.setWatermark(seq);
@@ -1717,6 +1782,7 @@ async function bootStorageOpening<S>(
           const wm = kvDb!.planSet!(journalWatermarkKey(appId), seq);
           if (heldRelease.length === 0) return wm;
           heldReleasePlannedAt = seq;
+          heldReleasePlanned = [...heldRelease];
           return [
             ...wm,
             ...kvDb!.planSet!(journalHeldCellsKey(appId), heldAfterRelease),
@@ -1729,6 +1795,16 @@ async function bootStorageOpening<S>(
       }
       : {}),
     ...(Object.keys(orphanCells).length ? { orphanCells } : {}),
+    // `am persist --drop` of a cell whose journal lines are HELD: its held
+    // entry leaves the store in the same save as its slice, and its lines
+    // go at that save's compaction — else a build declaring it again
+    // replays them onto its defaults, bringing the dropped data back.
+    onOrphanDropped: (cell) => {
+      if (!journalHeld.has(cell)) return;
+      journalHeld.delete(cell);
+      delete heldAfterRelease[cell];
+      heldRelease = [...heldRelease, cell];
+    },
     ...(persistedSnapshot
       ? {
         storedKeys: (storedKeysOnDisk ?? Object.keys(persistedSnapshot))

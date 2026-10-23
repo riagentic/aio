@@ -222,6 +222,7 @@ export async function gtkSplash(
   const look = gtkSplashLayout(spec, opts.target ?? null);
   return {
     name: "gtk splash",
+    dispose: () => k.terminate(),
     open(title, text) {
       const life = windowLife(k);
       let resolveCancel!: () => void;

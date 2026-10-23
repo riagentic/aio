@@ -377,7 +377,7 @@ export function createCellWorkerPool(opts: {
   // hook of it runs — never on this isolate's copy alone.
   opts.breaker?.bindWorkers?.({
     owns: (cell) => byCell.has(cell),
-    disable: (cell, done) => byCell.get(cell)!.disable(done),
+    disable: (cell, done, keep) => byCell.get(cell)!.disable(done, keep),
     enable: (cell) => byCell.get(cell)!.enable(),
   });
 

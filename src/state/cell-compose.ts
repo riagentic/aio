@@ -8,6 +8,7 @@ import type { AioError } from "../diagnostics/error.ts";
 import type { CellEntry, Msg } from "./cell-types.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 
+import { throwerOf } from "./method-rejection.ts";
 import { resolveCells } from "./cell-compose-resolve.ts";
 import { buildRootReducer } from "./cell-compose-reduce.ts";
 import { cloneState } from "./immutable.ts";
@@ -73,6 +74,27 @@ export function _setRemoteLifecycle(
   remote: RemoteLifecycle,
 ): void {
   _remoteSetters.get(composed)?.(remote);
+}
+
+/** Per composition: the circuit breaker's disable, which keeps the state —
+ *  for the worker isolate, which runs the owner's trip on its own copy. Not
+ *  on `ComposedCells`, for the same reason as `_errorCounters`. @internal */
+const _keepDisablers = new WeakMap<
+  object,
+  (
+    name: string,
+    app: { dispatch: (a: Msg) => void; getState: () => unknown },
+  ) => void
+>();
+
+/** Disable `name` in `composed` without resetting its state — see
+ *  `_keepDisablers`. @internal */
+export function _disableKeepingState(
+  composed: object,
+  name: string,
+  app: { dispatch: (a: Msg) => void; getState: () => unknown },
+): void {
+  _keepDisablers.get(composed)!(name, app);
 }
 
 /** Compose an array of cells into a single dispatch/reduce/execute pipeline with dependency resolution. */
@@ -156,15 +178,21 @@ export function composeCells(
   const cellLastAction = new Map<string, { type: string; at: number }>();
 
   // ── Registry (includes countCellError, setCbApp, clearCell) ──
-  const { registry, countCellError, setCbApp, clearCell, setRemote } =
-    buildRegistry(
-      cells,
-      disabledCells,
-      disableEpoch,
-      cellLastAction,
-      opts?.circuitBreaker,
-      _reportError,
-    );
+  const {
+    registry,
+    countCellError,
+    setCbApp,
+    clearCell,
+    setRemote,
+    disableKeepingState,
+  } = buildRegistry(
+    cells,
+    disabledCells,
+    disableEpoch,
+    cellLastAction,
+    opts?.circuitBreaker,
+    _reportError,
+  );
 
   // ── Perf tracker ──
   let _lastBreakdown: ReduceBreakdown | undefined;
@@ -235,7 +263,8 @@ export function composeCells(
       // existing coverage uses `async crash()` only, which is why the gap
       // survived.
       const ci = action.type.indexOf(":");
-      const cellId = ci > 0 ? action.type.slice(0, ci) : "";
+      // A listener's throw is the listener's error (method-rejection.ts).
+      const cellId = throwerOf(e) ?? (ci > 0 ? action.type.slice(0, ci) : "");
       if (cellId && cells.some((c) => c.__aio.id === cellId)) {
         countCellError(cellId);
       }
@@ -285,6 +314,7 @@ export function composeCells(
   };
   _errorCounters.set(composed, countCellError);
   _remoteSetters.set(composed, setRemote);
+  _keepDisablers.set(composed, disableKeepingState);
   _actionNoters.set(
     composed,
     (cell, type) => cellLastAction.set(cell, { type, at: Date.now() }),

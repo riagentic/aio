@@ -60,7 +60,7 @@ export type ShellConfig = {
    *  packaged app renders unstyled where dev renders themed, which is the
    *  exact shell-divergence class this whole file exists to prevent. */
   theme?: UiTheme;
-  themeName?: string;
+  themeName?: string | number;
   /** ui.layout — `false` drops the theme's LAYOUT defaults.
    *
    *  `aio-lifecycle.ts` has always SET this on the object it builds here; this
@@ -914,6 +914,8 @@ export function tmplBounds(async = false): string {
   // plain window filling the screen, and un-maximize had nowhere to return to
   // (measured on a nested display with a window manager). The key is written
   // only when true, so a non-maximized state file is byte-for-byte as before.
+  // A FULLSCREEN window likewise saves its normal rect (no flag: the next
+  // launch opens a normal window, not the screen-sized one).
   const payload = `__aioBoundsPayload(win)`;
   const save = async
     ? `  try { require('fs/promises').writeFile(stateFile, JSON.stringify(${payload})).catch(() => {}); } catch {}`
@@ -933,7 +935,7 @@ let __aioPlacedOn = null;
 
 function __aioBoundsPayload(win) {
   const max = win.isMaximized();
-  const r = max ? win.getNormalBounds() : win.getBounds();
+  const r = max || win.isFullScreen() ? win.getNormalBounds() : win.getBounds();
   const out = { x: r.x, y: r.y, width: r.width, height: r.height, declaredWidth: __aioDw, declaredHeight: __aioDh };
   if (max) out.maximized = true;
   // Windows: the rect in physical pixels too — where the splash, the
@@ -2456,6 +2458,9 @@ export function shellBridgePreload(
       : ""
   }contextBridge.exposeInMainWorld('__aioShell', {
   focus:  ()   => ipcRenderer.send('__aio:focus'),
+  // print(): window.print() is a silent no-op in Electron on Linux — the
+  // main process prints (both shells; the IPC bridge's print: the same channel).
+  print:  ()   => ipcRenderer.send('__aio:print'),
   onTray: (fn) => ipcRenderer.on('__aio:tray', (_e, item) => fn(item)),
   // Wipe a partition (a <webview>'s, or one given to openWindow): cookies,
   // storage, cache, HTTP auth. Resolves { ok, partition } or rejects with why.
@@ -2519,6 +2524,10 @@ export function tmplTray(
     if (verb === 'minimize') win.minimize();
     else if (verb === 'maximize') win.isMaximized() ? win.unmaximize() : win.maximize();
     else if (verb === 'close') win.close();
+  });
+  // print() (__aioShell.print / __aioIPC.print): what Ctrl+P does.
+  ipcMain.on('__aio:print', () => {
+    if (!win.isDestroyed()) win.webContents.print({ silent: false, printBackground: true });
   });
   const __aioShowWin = () => {
     if (win.isDestroyed()) return;

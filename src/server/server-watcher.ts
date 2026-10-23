@@ -1,7 +1,7 @@
 // Dev-only file watcher — debounced live reload on src/ changes
 // Extracted from createServer() closure to keep server.ts focused on HTTP/WS
 
-import { UI_ENTRY } from "./app-files.ts";
+import { APP_STYLE, UI_ENTRY } from "./app-files.ts";
 import { isServerOnlyFile } from "../entries.ts";
 import { enc } from "../protocol/envelope.ts";
 import {
@@ -30,7 +30,8 @@ import {
   sentinelName,
   sweepDeadSentinels,
 } from "./single-instance-lock.ts";
-import { log } from "../diagnostics/logger-api.ts";
+import { getLogger, log } from "../diagnostics/logger-api.ts";
+import { AioLogger, newLogGeneration } from "../diagnostics/logger-core.ts";
 
 /** File extensions that trigger live reload */
 const RELOAD_EXT = new Set([".ts", ".tsx", ".css", ".html", ".svg"]);
@@ -222,6 +223,14 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // is the step's own echo, not an edit — see `runCss` in WatcherDeps.
   const cssSelfWritten = new Set<string>();
   const { absBaseDir, debug } = deps;
+  // A reload is a new code generation: the log's repeat memo starts over, so
+  // an error the new code throws again is a fresh error.log line under this
+  // reload, not a "repeated" count `am errors --since=reload` cannot see.
+  const onReload = (signal: "reload" | "css") => {
+    const l = getLogger();
+    if (signal === "reload" && l instanceof AioLogger) newLogGeneration(l);
+    deps.onReload?.(signal);
+  };
 
   // --- Debounce state ---
   let reloadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -381,6 +390,13 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // here and went away" distinguishable from "it was never here" even when the
   // very first watch event is the deletion.
   _rootSeen = fileExists(join(absBaseDir, deps.uiEntry ?? UI_ENTRY));
+  /** The app stylesheet the shell links (`appHasStylesheet`), and whether it
+   *  existed at the last flush — see the css/reload decision. */
+  const appCssPath = join(absBaseDir, APP_STYLE);
+  let appCssHere = fileExists(appCssPath);
+  /** It flipped and no reload has gone out since — a flush superseded by a
+   *  newer one (`graphGeneration`) must not take the flip with it. */
+  let appCssFlipped = false;
   setUiRootProbe(() => {
     const at = join(absBaseDir, deps.uiEntry ?? UI_ENTRY);
     if (fileExists(at)) {
@@ -553,6 +569,9 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       // remove+create within the debounce window, and calling that a deletion
       // would be a lie in the far more common direction.
       const gone = changed.filter((p) => !fileExists(p));
+      const cssNow = fileExists(appCssPath);
+      if (cssNow !== appCssHere) appCssFlipped = true;
+      appCssHere = cssNow;
 
       (async () => {
         // Re-validate import graph on file change (dev mode only)
@@ -648,14 +667,22 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
             );
             log.warn("graph", `FIX: ${err.fix}`);
           }
-          deps.onReload?.("reload");
+          onReload("reload");
           graphWasRed = true;
         } else if (graphWasRed) {
-          // Was red, now green — tell clients to reload
+          // Was red, now green — tell clients to reload. SAID, like every
+          // other outcome: the red one printed an ERROR, and with nothing
+          // after it the terminal's last word on a fixed app was that error.
           graphWasRed = false;
-          debug("graph: ✓ all errors fixed — reloading");
+          appCssFlipped = false; // the reload below picks it up
           deps.broadcastWs(enc("graph-clear"));
-          deps.onReload?.("reload");
+          onReload("reload");
+          log.info(
+            "watch",
+            `✓ import graph fixed — reloaded ${describeChanged(changed)} (${
+              Date.now() - burstStartedAt
+            }ms)`,
+          );
         } else {
           // The app's CSS toolchain, before the reload — otherwise the browser
           // fetches the stylesheet from the PREVIOUS edit and the loop looks
@@ -685,7 +712,12 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           // reload, exactly as before.
           const patchable = wasFullReload && changed.length === 1 &&
             changed[0] === uiEntryAbs && fileExists(uiEntryAbs);
-          const signal = wasFullReload ? "reload" : "css";
+          // A css swap re-fetches the `<link>`s the page HAS. Creating (or
+          // deleting) `style.css` changes the shell itself — its link, and
+          // whether `ui.theme: "auto"` steps aside — so only a reload shows
+          // it; a swap printed "restyled" and changed nothing on screen.
+          const signal = wasFullReload || appCssFlipped ? "reload" : "css";
+          appCssFlipped = false;
           if (patchable) {
             // The version makes the browser's `import()` a cache miss. It is
             // the burst's own timestamp, so two edits in the same millisecond
@@ -701,7 +733,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
             debug(`${signal} → broadcasting to clients`);
             deps.broadcastWs(enc(signal));
           }
-          deps.onReload?.(signal);
+          onReload(signal);
           // …and SAY SO. A successful hot reload was the one dev-loop event
           // with no terminal line at all: every failure printed something,
           // success printed nothing, so the only way to tell "it reloaded"
@@ -779,7 +811,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   function watchRoots(): string[] {
     if (deps.watch === false) return [];
     const roots = Array.isArray(deps.watch) && deps.watch.length > 0
-      ? deps.watch.map((p) => resolve(absBaseDir, p))
+      ? listedRoots(deps.watch)
       : [absBaseDir];
     // …and the framework itself, when this app imports it by path. See
     // `frameworkWatchRoot`. An explicit `watch: [...]` is left alone: an app
@@ -790,6 +822,35 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       : frameworkWatchRoot(deps.importMapObj, absBaseDir);
     if (fw) roots.push(fw);
     return roots;
+  }
+
+  let _listed: string[] | null = null;
+  /** `watch: [...]` as paths: relative to the app directory (the documented
+   *  base) — or, where nothing is there, to the project root (the
+   *  directory above the app dir). `--watch=src/ui,src/style.css` is the CLI's
+   *  own example, typed from the project root of an app whose app dir IS
+   *  `src/`: it resolved to `src/src/ui`, and ONE missing path made the
+   *  watch fail whole — "live reload failed — hot reload disabled: NotFound:
+   *  No path was found", naming no path. A path found nowhere is now named
+   *  and skipped. Resolved once: this is asked per served module. */
+  function listedRoots(list: readonly string[]): string[] {
+    if (_listed) return _listed;
+    _listed = [];
+    for (const p of list) {
+      const hit = [absBaseDir, dirname(absBaseDir)]
+        .map((base) => resolve(base, p))
+        .find(fileExists);
+      if (hit) _listed.push(hit);
+      else {
+        log.warn(
+          "watch",
+          `watch path "${p}" does not exist (looked in ${absBaseDir} and ` +
+            `the folder above) — edits there will NOT reload. Paths ` +
+            `are relative to the app directory, ${absBaseDir}.`,
+        );
+      }
+    }
+    return _listed;
   }
 
   function _under(root: string, p: string): boolean {
@@ -876,7 +937,31 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       if (fw) {
         deps.debug(`watcher: also watching the framework checkout at ${fw}`);
       }
-      const paths = _sentinelOk ? [...roots, SENTINEL] : roots;
+      // A listed FILE (`--watch=src/style.css`) is not watched itself: a
+      // watch is on an inode, and every editor that saves atomically (write a
+      // temp file, rename it over — vim, VS Code, `sed -i`, formatters)
+      // replaces it, so the first save was heard and every later one was not.
+      // Its directory is watched non-recursively instead, reporting that
+      // file only — the served-module watcher, which works exactly so.
+      const files = roots.filter((r) => {
+        try {
+          return Deno.statSync(r).isFile;
+        } catch {
+          return false; // aio-ok: gone since it was listed — watched as given
+        }
+      });
+      for (const f of files) {
+        servedFiles.add(f);
+        servedFiles.add(realOrSelf(f));
+        servedDirs.add(dirname(realOrSelf(f)));
+      }
+      if (files.length > 0) openServedWatcher();
+      const dirs = roots.filter((r) => !files.includes(r));
+      const paths = _sentinelOk ? [...dirs, SENTINEL] : dirs;
+      if (paths.length === 0) {
+        startConfigWatcher();
+        return servedWatcher !== null;
+      }
       fsWatcher = Deno.watchFs(paths, { recursive: true });
       startConfigWatcher();
       watcherActive = true;
@@ -980,7 +1065,25 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       releaseSentinel();
       return false;
     }
-    log.info(`[aio] live reload watching ${absBaseDir}`);
+    // What IS watched: `--watch=src/App.tsx` printed the whole app dir, so an
+    // edit elsewhere that did not reload looked like a broken watcher.
+    const listed = Array.isArray(deps.watch) && deps.watch.length > 0
+      ? listedRoots(deps.watch)
+      : null;
+    if (listed && listed.length === 0) {
+      // Every listed path was missing (each named above): it printed
+      // "watching only " with nothing after it, as if reload were on.
+      log.warn(
+        `[aio] live reload watches NOTHING — none of the --watch paths ` +
+          `exist (named above). Fix them, or drop --watch to watch the app.`,
+      );
+    } else {
+      log.info(
+        `[aio] live reload watching ${
+          listed ? `only ${listed.join(", ")}` : absBaseDir
+        }`,
+      );
+    }
     // A save made before this watcher existed has no event. Only what runs
     // in THIS process is looked at: the page fetches its modules after this,
     // so it has the saved ones already.
@@ -1016,7 +1119,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           return;
         }
         log.warn(
-          `[aio] live reload — watcher unresponsive, restarting (${watcherRestarts}/${MAX_WATCHER_RESTARTS})`,
+          `live reload — watcher unresponsive, restarting (${watcherRestarts}/${MAX_WATCHER_RESTARTS})`,
         );
         try {
           fsWatcher?.close();

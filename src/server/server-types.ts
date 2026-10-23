@@ -54,6 +54,11 @@ export interface ServerConfig {
   key?: string; // PEM key string — required when cert is set
   users?: Record<string, AioUser>; // per-user token map (overrides token)
   resolveUser?: (token: string) => AioUser | null | Promise<AioUser | null>; // dynamic user resolution (AIO-171)
+  /** A PROVEN local aio app (`peer()` + `x-aio-peer`) → its user; absent =
+   *  peer proofs are ignored (peer-proof.ts). */
+  resolvePeer?: (
+    peer: import("./peer-proof.ts").PeerIdentity,
+  ) => AioUser | null | Promise<AioUser | null>;
   sessionResolver?: (token: string) => AioUser | null; // AUTH-1 session tokens — consulted first
   authFlows?: import("./auth-flows.ts").AuthFlows; // AUTH-2 login endpoints (/__aio/auth/*)
   /** Subscribe to anything that changes who an ALREADY-OPEN socket is: a
@@ -82,6 +87,7 @@ export interface ServerConfig {
   theme?: UiTheme; // ui.theme — how much of the default look is emitted
   layout?: boolean; // ui.layout — false drops the page-layout defaults
   themeName?: string; // identity the theme accent is derived from (appId)
+  hue?: number; // deno.json `hue` — overrides the hash of themeName
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   wire?: { omitTrailingUndefined?: boolean }; // sent to browser: it encodes
   /** Extra read-only DEV-server roots by URL prefix — see CellsConfig.serveDirs. */

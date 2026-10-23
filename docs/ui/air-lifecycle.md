@@ -581,6 +581,7 @@ handled, so a bug never closes the app.
 ```tsx
 import { onBackButton, onMount } from "aio/air";
 import { nav } from "./nav.ts";
+import { Screen } from "./Screen.tsx";
 
 function Reader() {
   // onMount runs the returned disposer at unmount.

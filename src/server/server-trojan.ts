@@ -52,6 +52,22 @@ import {
 import { generatePin, PIN_TTL_MS } from "./pairing.ts";
 import { mask as maskSql } from "../db/sql-shape.ts";
 
+/** The ids of the registered `scope: "client"` cells — the one producer of
+ *  "which cells live only in the browser" for every `am` reply. */
+export function clientScopedCells(): string[] {
+  return [...getRegisteredCells()]
+    .filter(([, def]) => def.__aio.scope === "client")
+    .map(([id]) => id)
+    .sort();
+}
+
+/** What `am` says about a client-scoped cell it was asked to `verb`. Pure. */
+export function clientScopedNote(cell: string, verb: string): string {
+  return `cell "${cell}" is client-scoped (scope: "client") — its state ` +
+    `lives in each browser tab, never on the server, so there is ` +
+    `nothing here to ${verb}.`;
+}
+
 /** Client info visible to trojan introspection endpoints */
 export interface TrojanClientInfo {
   /** The client's own proto hello (its aio / app version), when it said. */
@@ -585,6 +601,9 @@ function handleGet(
 
   // Cell id → method names — the surface for "run a method" buttons.
   if (route === "cells") return json(trojan.cellMethods?.() ?? {});
+  // The `scope: "client"` cell ids: registered here, stored only in browser
+  // tabs — so `am state` can say so instead of "not found".
+  if (route === "client-cells") return json(clientScopedCells());
   if (route === "fields") return json(trojan.cellFields?.() ?? {});
   if (route === "cell-versions") return json(trojan.cellVersions?.() ?? {});
 
@@ -822,6 +841,8 @@ async function handlePost(
       }
       // How many arguments this call is SHORT by, carried to the reply below.
       let _shortBy = 0;
+      /** Args passed beyond the method's required count (see `extra`). */
+      let _extra = 0;
       let _shortRequired = 0;
       if (sepIdx > 0 && Object.keys(methods).length > 0) {
         const cell = action.type.slice(0, sepIdx);
@@ -839,9 +860,8 @@ async function handlePost(
           // false answer that sent the user hunting for a boot bug.
           if (getRegisteredCells().get(cell)?.__aio.scope === "client") {
             return err(
-              `cell "${cell}" is client-scoped (scope: "client") — its state ` +
-                `lives in each browser tab, never on the server, so there is ` +
-                `nothing here to dispatch to. Drive it through the UI: ` +
+              clientScopedNote(cell, "dispatch to") +
+                ` Drive it through the UI: ` +
                 `\`am surface\` to find the element, then ` +
                 `\`am trigger "<path>" <action>\`. Dispatch does nothing.`,
               404,
@@ -906,6 +926,13 @@ async function handlePost(
           ) {
             _shortBy = Math.max(0, required - p.args.length);
           }
+          // More than it requires: maybe a default or a rest parameter takes
+          // them, maybe they are dropped — `am dispatch todo:add hello world`
+          // stored "hello" and lost "world" without a word. Said, never
+          // refused: "too many" is not knowably wrong (see below).
+          _extra = required !== undefined && Array.isArray(p?.args)
+            ? Math.max(0, p.args.length - required)
+            : 0;
         }
         if (required !== undefined && required > 0) {
           const p = action.payload as { args?: unknown } | undefined;
@@ -1065,6 +1092,18 @@ async function handlePost(
               _shortRequired,
               _shortRequired - _shortBy,
             ),
+          }
+          : {}),
+        ...(_extra > 0 && _shortRequired > 0
+          ? {
+            extra:
+              `${action.type} requires ${_shortRequired} argument${
+                _shortRequired === 1 ? "" : "s"
+              } and this call passed ${_shortRequired + _extra} — the rest ` +
+              `reach it only if it declares them (a default or a rest ` +
+              `parameter); otherwise they are dropped. Multi-word text is ` +
+              `ONE argument: quote it (\`am dispatch ${action.type} ` +
+              `"hello world"\`).`,
           }
           : {}),
         ...(owedUnsaved !== undefined
@@ -1395,9 +1434,12 @@ async function handlePost(
   if (route === "pair") {
     if (!deps.token) {
       return err(
-        "this app has no shared key, so there is nothing to pair — pairing " +
-          "hands out `key:`; per-user apps (`auth: true`, `users:`) issue " +
-          "credentials through their own login flow, and an open app needs none",
+        "this app has no shared key in force, so there is nothing to pair — " +
+          "pairing hands out `key:`, which is enforced only under --expose " +
+          "(a `key:` app started without it is loopback-only and open: " +
+          "restart it with --expose); per-user apps (`auth: true`, `users:`) " +
+          "issue credentials through their own login flow, and an open app " +
+          "needs none",
         400,
       );
     }

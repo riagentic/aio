@@ -26,6 +26,32 @@ export function isDomEvent(
     typeof e.stopPropagation === "function";
 }
 
+/** `args` with each DOM Event that lands PAST the parameters `fn` declares
+ *  replaced by what the wire makes of it anyway — `{ isTrusted }`, the
+ *  Event's one own enumerable property, so the frame is byte-identical.
+ *
+ *  For the browser stub's action creator. `onClick={counter.inc}` and the
+ *  kit's `<Input onInput={form.setName}>` (it passes `(value, e)`) hand the
+ *  method an Event it never reads; the wire's lossy check then warned, in dev
+ *  AND prod, that "the server receives DIFFERENT values than the caller
+ *  passed" — on the pattern this module's own hint recommends, while `testUI`
+ *  (which applies this same arity rule) stayed quiet. An Event in a DECLARED
+ *  parameter is left alone: that one is a real bug, and its warning stands.
+ *  Unchanged when the arity cannot be read (a rest parameter). Pure. */
+export function plainUnreadEvents(
+  fn: unknown,
+  args: unknown[],
+): unknown[] {
+  if (typeof fn !== "function" || !args.some(isDomEvent)) return args;
+  const declared = declaredArgCount(fn as (...a: never[]) => unknown);
+  if (declared === null) return args;
+  return args.map((a, i) =>
+    i >= declared && isDomEvent(a)
+      ? { isTrusted: (a as { isTrusted?: unknown }).isTrusted === true }
+      : a
+  );
+}
+
 /** The hint for `cell.key(...args)` when a DOM Event sits in a parameter
  *  `fn` declares, else null. Pure. */
 export function eventArgWarning(

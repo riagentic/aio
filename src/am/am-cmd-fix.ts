@@ -257,6 +257,19 @@ function normTask(v: string): string {
     .trim();
 }
 
+/** Pure: `k` carries a command some legacy scaffold table emitted under that
+ *  name (modulo the JSR pin) — an old-scaffold task, not the app's own task
+ *  that happens to share a common name like `build`. */
+function isPristineLegacy(
+  k: string,
+  v: string,
+  legacy: readonly Record<string, string>[],
+): boolean {
+  return legacy.some((t) =>
+    t[k] !== undefined && normTask(t[k]!) === normTask(v)
+  );
+}
+
 export interface MigrateTasksResult {
   tasks: Record<string, string>;
   /** old→new names of customized `*:service` tasks (value untouched). */
@@ -301,8 +314,7 @@ export function migrateTasks(
     kept: [],
   };
   const legacyNames = new Set(legacy.flatMap((t) => Object.keys(t)));
-  const pristine = (k: string, v: string) =>
-    legacy.some((t) => t[k] !== undefined && normTask(t[k]!) === normTask(v));
+  const pristine = (k: string, v: string) => isPristineLegacy(k, v, legacy);
   for (const [k, v] of Object.entries(current)) {
     if (k in expected) {
       if (pristine(k, v) && v !== expected[k]) {
@@ -1371,12 +1383,13 @@ export async function cmdFix(
       );
       // Old task vocabulary present? Point at the migration — plain fix stays
       // add-only, so it will never delete/rename these itself.
-      const legacyNames = new Set(
-        legacyTaskTables().flatMap((t) => Object.keys(t)),
-      );
-      const oldVocab = Object.keys(tasks).filter((k) =>
-        (legacyNames.has(k) && !(k in expected)) || k in SERVICE_RENAMES
-      );
+      // Matched by COMMAND, not name: an app's own `build`/`publish` task
+      // shares a legacy name and is none of the migration's business.
+      const legacy = legacyTaskTables();
+      const oldVocab = Object.entries(tasks).filter(([k, v]) =>
+        (!(k in expected) && isPristineLegacy(k, v, legacy)) ||
+        k in SERVICE_RENAMES
+      ).map(([k]) => k);
       if (oldVocab.length) {
         add(
           "task vocabulary",
@@ -1659,7 +1672,7 @@ export async function cmdFix(
     // to auto-fix — point at the linter rather than touching source.
     say(
       "  suggestions above aren't auto-applied (they touch your source/config). " +
-        "For code-level checks run the aio linter: `deno task lint:aio` (aiol).",
+        "For code-level checks run the linters: `deno task lint` (deno lint + aiol).",
     );
   }
   if (manual.length) Deno.exit(1);

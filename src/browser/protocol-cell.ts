@@ -2,7 +2,9 @@
 // cell() and aio stub — browser-side action creator factories.
 
 import { guardHiddenReplay, registerCell } from "../state/cell-reactive.ts";
+import { installPending } from "../state/cell-catalog.ts";
 import { isAsyncFunction } from "../state/cell-impl.ts";
+import { plainUnreadEvents } from "../state/event-arg.ts";
 import type { CellDef } from "../state/cell-types.ts";
 import { normalizeSyncConfig } from "../sync/types.ts";
 // The SERVER's normalizers, not copies of them. `__aio.ui` and `__aio.selectors`
@@ -105,8 +107,12 @@ export function cell(
     const cat: Record<string, unknown> = {};
     for (const key of allKeys) {
       const label = `${prefix}:${key}`;
+      const body = methods[key];
       const fn = Object.assign(
-        (...args: unknown[]) => ({ type: label, payload: { args } }),
+        (...args: unknown[]) => ({
+          type: label,
+          payload: { args: plainUnreadEvents(body, args) },
+        }),
         { type: label },
       );
       // `.action` self-reference — parity with the server catalog shape.
@@ -242,6 +248,7 @@ export function cell(
     for (const [key, value] of Object.entries(cat)) {
       def[key] = value;
     }
+    installPending(def as unknown as CellDef);
     registerCell(def as unknown as CellDef);
     return def;
   }

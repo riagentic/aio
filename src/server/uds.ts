@@ -5,6 +5,12 @@
 // (tt-state out, tt-cmd in — the Electron panel needs it); vitals stay
 // WS-only and are rejected loudly.
 
+import {
+  chunkFrame,
+  runCallStreamed,
+  runStreamed,
+  takeStreamFlag,
+} from "./call-stream.ts";
 import { doorRetryAfterMs } from "./door-refusal.ts";
 import { compactPatches } from "../state/patch-compact.ts";
 import { LARGE_STATE_DOC } from "../state/budgets.ts";
@@ -522,7 +528,19 @@ export function createUDSListener(
   /** Frames queued and not yet written, per connection — see `sendTo`. */
   const _writeDepth = new WeakMap<LocalConn, number>();
 
-  function sendTo(conn: LocalConn, msg: string, onSent?: () => void): void {
+  /** Queue `msg` for `conn`. `droppable` (a stream chunk): refused — false,
+   *  nothing queued — once the peer is gone or has stopped draining; every
+   *  other frame is always queued (see below). */
+  function sendTo(
+    conn: LocalConn,
+    msg: string,
+    onSent?: () => void,
+    droppable = false,
+  ): boolean {
+    if (
+      droppable &&
+      (!connSet.has(conn) || (_writeDepth.get(conn) ?? 0) >= WRITE_QUEUE_WARN)
+    ) return false;
     const encoded = new TextEncoder().encode(msg + "\n");
     if (costMeter) {
       try {
@@ -588,6 +606,7 @@ export function createUDSListener(
       if (left === 0) _writeBacklog.ok();
     });
     _writeQueues.set(conn, next);
+    return true;
   }
 
   /** THE snapshot builder for this listener: read state, apply the client's
@@ -991,7 +1010,12 @@ function _handleUDSConn(
    *  here: this handler used to carry its own copy of the subscription filter,
    *  which is the same fact decided twice. */
   fullJsonFor: (client: Pick<UDSClient, "subscriptions">) => string | undefined,
-  sendTo: (conn: LocalConn, msg: string, onSent?: () => void) => void,
+  sendTo: (
+    conn: LocalConn,
+    msg: string,
+    onSent?: () => void,
+    droppable?: boolean,
+  ) => boolean,
   syncHandler: ServerSyncHandler | null,
   tt?: {
     onCommand: (cmd: string, arg?: number) => void;
@@ -1608,7 +1632,25 @@ function _handleUDSConn(
               // `_source:"UI"` — ONE decider for all three network entry
               // points (sanitizeClientAction, server-ws.ts).
               sanitizeClientAction(action as Record<string, unknown>, "uds");
-              const result = _dialogCaller(() => onAction(action));
+              // Streamed calls: the WS server's rule (call-stream.ts).
+              const streamed = takeStreamFlag(
+                action as Record<string, unknown>,
+              );
+              const run = () => _dialogCaller(() => onAction(action));
+              const result = streamed
+                ? runCallStreamed((value) => {
+                  const frame = chunkFrame(
+                    action.cid as string,
+                    value,
+                    typeof action.type === "string" ? action.type : "?",
+                  );
+                  try {
+                    return sendTo(conn, frame, undefined, true);
+                  } catch {
+                    return false; // client gone
+                  }
+                }, run)
+                : runStreamed(undefined, run);
               // AIO-402 + return-value transport: per-action ack — parity with
               // the WS server. Settles the Promise of an awaited method call
               // over UDS+IPC, carrying the method's RETURN value. We wait for

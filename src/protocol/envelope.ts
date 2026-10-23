@@ -60,6 +60,7 @@ export type Kind =
   | "vitals-ping" // C→S — RTT probe {t1,ms}
   | "vitals-pong" // S→C — RTT reply {t1,t2,loop}
   | "ack" // S→C — per-action ack {cid,ok}
+  | "chunk" // S→C — one piece of a streamed call's result {cid,value}, before its ack
   | "action" // C→S — dispatch {type,payload?,cid?,_source?}
   | "state" // S→C — full-state snapshot
   | "patches" // S→C — Immer patch delta
@@ -107,6 +108,7 @@ export const FRAME_KINDS: readonly Kind[] = [
   "vitals-ping",
   "vitals-pong",
   "ack",
+  "chunk",
   "action",
   "state",
   "patches",
@@ -233,6 +235,7 @@ export const SERVES: Record<
     "ui-trigger",
     "vitals-pong",
     "ack",
+    "chunk",
     "state",
     "patches",
     "op",

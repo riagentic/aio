@@ -261,9 +261,13 @@ export type MethodsCellConfig<
    *  To SHAPE what is written rather than only filter it, see
    *  {@linkcode MethodsCellConfig.onPersist}.
    *
+   *  A segment of an `exclude` path may be `*` — any key in that place:
+   *  `"*.busy"` drops `busy` under every field, `"feeds.*.busy"` under every
+   *  entry of `feeds`. A whole segment only, never a pattern inside a name.
+   *
    *  @example
    *  ```ts
-   *  persist: { exclude: ["draft", "scrollTop"] },
+   *  persist: { exclude: ["draft", "scrollTop", "feeds.*.busy"] },
    *  ```
    */
   persist?: CellFieldFilter<keyof NoInfer<S> & string>;
@@ -412,6 +416,9 @@ export type MethodsCellConfig<
   /** Migration hook — called when persisted version < current version.
    *  Receives old state (after deepMerge with defaults) and old version number.
    *  Must return the migrated state.
+   *
+   *  Adding a new declared field needs no version bump or onMigrate — new
+   *  keys fill from defaults on restore. A rename or a type change does.
    *
    *  `NoInfer` is load-bearing here, and on the two hooks below: `state` must
    *  be the SOLE inference site for `S`. Without it, TypeScript infers `S`

@@ -133,6 +133,8 @@ export interface RootState {
   pendingMounts?: PendingMount[];
   /** Per-root counter for useId() while `_ssrIds` — the server's sequence. */
   _idCounter: number;
+  /** Per-root counter for `_useWireId()` while `_ssrIds`. */
+  _wireCounter?: number;
   /** True only during `hydrate()`'s pass over server markup: useId() then
    *  continues this root's SSR sequence so ids match. Otherwise ids come from
    *  the document-wide client sequence. */

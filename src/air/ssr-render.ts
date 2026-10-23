@@ -37,6 +37,9 @@ export interface SsrRender {
   /** The `useId()` sequence — `:r0:`, `:r1:`, … per render, so hydration
    *  (which restarts at 0 for the root) reproduces exactly these. */
   ids: number;
+  /** The `_useWireId()` sequence, apart from `ids` so the ui kit's own
+   *  wiring never shifts an app's `useId()` numbers. */
+  wireIds: number;
   /** The values of the `<select>` elements open around the cursor, innermost
    *  last, so an `<option>` knows which select it is being compared against. */
   readonly selects: unknown[];
@@ -123,6 +126,7 @@ export function _ssrRenderNew(kind: SsrRender["kind"]): SsrRender {
   return {
     kind,
     ids: 0,
+    wireIds: 0,
     selects: [],
     hasHead: false,
     collected: false,

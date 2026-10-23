@@ -219,6 +219,64 @@ Deno.test("window place: the Windows helpers carry the rule in PowerShell — sp
   );
 });
 
+/** Where the window REALLY is (a move): centred on it as it is, only its
+ *  screen chosen — as Electron's own splash and the GTK one do. */
+const onReal = (b: Bounds, c: typeof CASES[number], w: number, h: number) =>
+  centredOn(
+    {
+      x: b.x!,
+      y: b.y!,
+      width: b.width,
+      height: b.height,
+      screen: windowRect(b, c.screens, c.primary).screen,
+    },
+    w,
+    h,
+  );
+
+Deno.test("window place: a move centres the Cocoa and Windows helpers on where the window really is, never where windowRect would open it", () => {
+  // The move ticks pass the real flag.
+  assertStringIncludes(
+    MAC_SPLASH_JXA,
+    "aioPlace(JSON.parse(lastAt), win.frame.size.width, win.frame.size.height, true)",
+  );
+  assertStringIncludes(
+    WINDOWS_SPLASH_PS,
+    "AioPlace ($a2 | ConvertFrom-Json) $f.Width $f.Height (AioAll) (AioPrimary) $true",
+  );
+  let differs = 0;
+  for (const c of CASES) {
+    const b = boundsFromState(c.state, 800, 600);
+    if (b.x === undefined) continue;
+    const top = c.primary.y;
+    const sh = (r: Rect) => ({ ...r, y: r.y - top });
+    const $ = fakeCocoa(c.screens.map(sh), sh(c.primary));
+    const aioPlace = new Function("$", MAC_PLACE_JS + "\nreturn aioPlace;")(
+      $,
+    ) as (T: unknown, w: number, h: number, real?: boolean) => {
+      x: number;
+      y: number;
+    };
+    const bs = { ...b, y: b.y! - top };
+    const T = JSON.parse(placeArg(bs));
+    const want = onReal(
+      bs,
+      {
+        ...c,
+        screens: c.screens.map(sh),
+        primary: sh(c.primary),
+      },
+      460,
+      140,
+    );
+    const got = aioPlace(T, 460, 140, true);
+    assertEquals({ x: got.x, y: $.PH - got.y - 140 }, want, c.name);
+    const open = aioPlace(T, 460, 140);
+    if (open.x !== got.x || open.y !== got.y) differs++;
+  }
+  assert(differs > 0, "a case where the real window is not where it opens");
+});
+
 const pwsh = (() => {
   for (const n of ["pwsh", "powershell.exe", "powershell"]) {
     for (const d of (Deno.env.get("PATH") ?? "").split(/[:;]/)) {
@@ -245,6 +303,9 @@ Deno.test({
       script += `$o = AioPlace ('${T}' | ConvertFrom-Json) 460 140 @(${
         c.screens.map(rect).join(", ")
       }) ${rect(c.primary)}\n"$($o[0]),$($o[1])"\n`;
+      script += `$o = AioPlace ('${T}' | ConvertFrom-Json) 460 140 @(${
+        c.screens.map(rect).join(", ")
+      }) ${rect(c.primary)} $true\n"$($o[0]),$($o[1])"\n`;
     }
     const o = await new Deno.Command(pwsh!, {
       args: ["-NoProfile", "-Command", "-"],
@@ -267,7 +328,11 @@ Deno.test({
         c.primary,
       );
       const want = centredOn(r, 460, 140);
-      assertEquals(out[i], `${want.x},${want.y}`, c.name);
+      assertEquals(out[2 * i], `${want.x},${want.y}`, c.name);
+      // A move: where the window really is (no position: where it opens).
+      const b = boundsFromState(c.state, 800, 600);
+      const real = b.x === undefined ? want : onReal(b, c, 460, 140);
+      assertEquals(out[2 * i + 1], `${real.x},${real.y}`, `${c.name} (real)`);
     });
   },
 });

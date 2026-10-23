@@ -57,6 +57,9 @@ export const MAX_BUFFER_BYTES = 8 * 1024 * 1024;
  *  graceful degradation; `bufferUpTo` replays what it read, so nothing is
  *  ever truncated. */
 export const MAX_BUFFER_MS = 100;
+/** A gap this long with no chunk makes a body SLOW (see `bufferUpTo`): it is
+ *  sent as written, since gzip cannot flush a chunk on its own. */
+const IDLE_MS = 50;
 
 /** Brotli quality for on-the-fly compression. Measured on the real 162 KB
  *  counter bundle: q5 → 56.1 KB in 3.4 ms, gzip → 59.1 KB in 5.8 ms, q11 →
@@ -121,7 +124,9 @@ async function bufferUpTo(
   body: ReadableStream<Uint8Array>,
   max: number,
   maxMs: number = MAX_BUFFER_MS,
-): Promise<{ bytes: Bytes } | { stream: ReadableStream<Uint8Array> }> {
+): Promise<
+  { bytes: Bytes } | { stream: ReadableStream<Uint8Array>; slow: boolean }
+> {
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -150,25 +155,39 @@ async function bufferUpTo(
     });
   };
 
+  // `slow` = the body PAUSED (a log tail, a streaming render waiting on
+  // data): nothing arrived for IDLE_MS. A body that kept producing past the
+  // deadline (a CSV export from a cursor) is merely long — still compressed.
+  let lastAt = Date.now();
+  const paused = () => Date.now() - lastAt >= IDLE_MS;
   while (true) {
     const pending = reader.read();
     const left = deadline - Date.now();
-    if (left <= 0) return { stream: handOff(pending) };
+    if (left <= 0) return { stream: handOff(pending), slow: paused() };
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const raced = await Promise.race([
-      pending,
-      new Promise<"aio-timeout">((r) => {
-        timer = setTimeout(() => r("aio-timeout"), left);
-      }),
-    ]);
-    clearTimeout(timer);
-    if (raced === "aio-timeout") return { stream: handOff(pending) };
+    let raced: ReadableStreamReadResult<Uint8Array> | "aio-timeout";
+    try {
+      raced = await Promise.race([
+        pending,
+        new Promise<"aio-timeout">((r) => {
+          timer = setTimeout(() => r("aio-timeout"), left);
+        }),
+      ]);
+    } finally {
+      // A body that errors rejects the race: its timer went on running for
+      // up to MAX_BUFFER_MS after the request was answered.
+      clearTimeout(timer);
+    }
+    if (raced === "aio-timeout") {
+      return { stream: handOff(pending), slow: paused() };
+    }
     const { done, value } = raced;
     if (done) break;
     if (!value) continue;
+    lastAt = Date.now();
     chunks.push(value);
     total += value.byteLength;
-    if (total > max) return { stream: handOff(null) };
+    if (total > max) return { stream: handOff(null), slow: false };
   }
   const out = new Uint8Array(total) as Bytes;
   let at = 0;
@@ -444,7 +463,10 @@ export interface EncodeOptions {
  *  JS, XML, fonts and WASM — app assets, where arriving sooner is the whole
  *  point — and never `application/octet-stream`, video or an archive, which
  *  are the things a person actually watches a progress bar for. */
-function streamCompressed(resp: Response, req: Request): Response | null {
+async function streamCompressed(
+  resp: Response,
+  req: Request,
+): Promise<Response | null> {
   const body = resp.body;
   if (!body) return null;
   if (typeof CompressionStream === "undefined") return null;
@@ -460,10 +482,107 @@ function streamCompressed(resp: Response, req: Request): Response | null {
   headers.set("Content-Encoding", "gzip");
   headers.delete("Content-Length");
   headers.set("Vary", mergeVary(headers.get("Vary"), "Accept-Encoding"));
+  const zlib = await nodeZlib();
   return new Response(
-    body.pipeThrough(new CompressionStream("gzip")),
+    zlib
+      ? flushingGzip(body, zlib)
+      : body.pipeThrough(new CompressionStream("gzip")),
     { status: 200, statusText: resp.statusText, headers },
   );
+}
+
+type Zlib = typeof import("node:zlib");
+let _zlib: Promise<Zlib | null> | undefined;
+function nodeZlib(): Promise<Zlib | null> {
+  return _zlib ??= import("node:zlib").catch((e) => {
+    log.debug(
+      `http: node:zlib unavailable (${e}) — streamed gzip cannot flush`,
+    );
+    return null;
+  });
+}
+
+/** Gzip a stream, FLUSHING whenever the source goes quiet for IDLE_MS.
+ *
+ *  `CompressionStream` has no flush, so a body that was still producing at
+ *  the buffering deadline and paused LATER (a streaming SSR render whose
+ *  shell came in a burst, then a slow query; a progress feed) held every
+ *  chunk after the pause until ~32 KB or the end — measured: a 100 ms burst
+ *  then a 3 s wait reached the client as a 10-byte gzip header for 3 s. A
+ *  sync flush on idle sends what was written; a source that never pauses (a
+ *  file, a cursor export) is never flushed, so its ratio is unchanged.
+ *  Pull-driven: it reads only while the queue wants more, so backpressure
+ *  holds. */
+function flushingGzip(
+  body: ReadableStream<Uint8Array>,
+  zlib: Zlib,
+): ReadableStream<Uint8Array> {
+  const z = zlib.createGzip();
+  const reader = body.getReader();
+  const step = (f: (cb: () => void) => void) => new Promise<void>((r) => f(r));
+  // SYNC, not the default FULL: a full flush also resets the dictionary
+  // (~4.5% bigger over a chatty feed, measured).
+  const flush = () => step((cb) => z.flush(zlib.constants.Z_SYNC_FLUSH, cb));
+  /** When the oldest byte the compressor holds unflushed was written. */
+  let heldSince: number | null = null;
+  return new ReadableStream<Uint8Array>({
+    start(c) {
+      z.on("data", (b: Uint8Array) => c.enqueue(new Uint8Array(b)));
+      z.on("error", (e: Error) => c.error(e));
+    },
+    // Until the queue has something: a chunk the compressor kept (most of
+    // them) enqueues nothing, and a pull that resolves empty-handed is never
+    // called again — the response would stall right there.
+    async pull(c) {
+      while ((c.desiredSize ?? 0) > 0) {
+        const next = reader.read();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const idle = await Promise.race([
+            next.then(() => false, () => false),
+            new Promise<boolean>((r) => {
+              timer = setTimeout(() => r(true), IDLE_MS);
+            }),
+          ]);
+          if (idle && heldSince !== null) {
+            await flush();
+            heldSince = null;
+          }
+        } finally {
+          clearTimeout(timer);
+        }
+        let r: ReadableStreamReadResult<Uint8Array>;
+        try {
+          r = await next;
+        } catch (e) {
+          z.destroy(); // the source failed: the response errors with it
+          throw e;
+        }
+        const { done, value } = r;
+        if (done) {
+          await step((cb) => {
+            z.once("end", cb);
+            z.end();
+          });
+          return c.close();
+        }
+        if (value) {
+          await step((cb) => z.write(value, () => cb()));
+          heldSince ??= Date.now();
+          // A feed that never pauses IDLE_MS (a 30 ms tick) was never
+          // flushed, so nothing reached the client: bytes held this long go.
+          if (Date.now() - heldSince >= IDLE_MS) {
+            await flush();
+            heldSince = null;
+          }
+        }
+      }
+    },
+    cancel(reason) {
+      z.destroy();
+      return reader.cancel(reason);
+    },
+  });
 }
 
 /**
@@ -566,7 +685,8 @@ export async function encodeResponse(
     // A HEAD is never streamed: that drops the Content-Length it exists to report.
     if (isHead) return resp;
     // Too big to BUFFER is not too big to COMPRESS — see `streamCompressed`.
-    return (opts.compress !== false && streamCompressed(resp, req)) || resp;
+    return (opts.compress !== false && await streamCompressed(resp, req)) ||
+      resp;
   }
 
   const read = await bufferUpTo(resp.body, MAX_BUFFER_BYTES);
@@ -578,8 +698,13 @@ export async function encodeResponse(
       statusText: resp.statusText,
       headers: resp.headers,
     });
-    if (isHead) return replayed;
-    return (opts.compress !== false && streamCompressed(replayed, req)) ||
+    // A SLOW body is a stream (see `MAX_BUFFER_MS`) and goes out as written.
+    // `CompressionStream` has no per-chunk flush: gzipping a log tail or a
+    // streaming SSR render held every chunk until ~32 KB had piled up or the
+    // body ended — for any client that sends `Accept-Encoding: gzip`, i.e.
+    // every browser — the exact hang the time bound exists to prevent.
+    if (isHead || read.slow) return replayed;
+    return (opts.compress !== false && await streamCompressed(replayed, req)) ||
       replayed;
   }
   const bytes = read.bytes;

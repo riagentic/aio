@@ -66,6 +66,7 @@ export function buildDBStateGetter(
   composed: ComposedCells,
 ): (s: unknown) => unknown {
   const cellPersistFilters = new Map<string, CellFieldFilter>();
+  const declaredOf = new Map<string, unknown>();
   const cellPersistTransforms = new Map<
     string,
     (state: Record<string, unknown>) => Record<string, unknown>
@@ -75,6 +76,7 @@ export function buildDBStateGetter(
     const resolved = persistFilterOf(f);
     if (persisting.has(f.__aio.id)) {
       cellPersistFilters.set(f.__aio.id, resolved);
+      declaredOf.set(f.__aio.id, f.__aio.state);
       const t = f.__aio.persistTransform;
       if (t) cellPersistTransforms.set(f.__aio.id, t);
     }
@@ -88,6 +90,9 @@ export function buildDBStateGetter(
       const filtered = applyCellFieldFilter(
         filter,
         cellState as Record<string, unknown>,
+        // `persist.exclude: ["*.busy"]`; whether `"*"` is a literal key is
+        // the declaration's to say, never the data's.
+        { wildcard: true, declared: declaredOf.get(cellName) },
       );
       if (!filtered) continue;
       // `persist: { transform }` — the app SHAPES what goes to disk (report 9 §8.4).
@@ -145,6 +150,8 @@ export function unpersistedFromBase(
   filter: CellFieldFilter,
   base: Record<string, unknown>,
   now: Record<string, unknown>,
+  /** The cell's declared state — decides a literal `"*"` key (state-filter). */
+  declared?: unknown,
 ): Record<string, unknown> {
   if (filter === "all") return now;
   if (filter === "none") return base;
@@ -185,7 +192,13 @@ export function unpersistedFromBase(
     // never wrote is the same divergence this function exists to close.
     revert(path);
     if (path.includes(".")) {
-      slice = restoreExcluded(slice, was, path.split(".")) as Record<
+      slice = restoreExcluded(
+        slice,
+        was,
+        path.split("."),
+        true,
+        declared,
+      ) as Record<
         string,
         unknown
       >;

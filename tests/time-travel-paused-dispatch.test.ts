@@ -70,6 +70,11 @@ Deno.test("paused: a dispatched action REJECTS instead of resolving", async () =
     /paused/i.test(msg),
     `the rejection must name the real reason, got: ${msg}`,
   );
+  // …and the way out a CLI caller (`am dispatch`) can actually type.
+  assert(
+    msg.includes("am timetravel resume"),
+    `the rejection must name \`am timetravel resume\`, got: ${msg}`,
+  );
 });
 
 Deno.test("paused: resuming restores normal dispatch", async () => {

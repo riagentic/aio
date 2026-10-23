@@ -263,6 +263,15 @@ export function endpointOf(
   return { hostnames, port: l.port };
 }
 
+/** Does this instance serve TLS? A `trojanPort` is the plain-HTTP control
+ *  port TLS leaves beside the listener; `discovery.tls` is set on an exposed
+ *  boot. Either says https. Pure. */
+export function servesTls(
+  lock?: { trojanPort?: number; discovery?: { tls: boolean } } | null,
+): boolean {
+  return lock?.trojanPort !== undefined || lock?.discovery?.tls === true;
+}
+
 /** The OS steps of {@linkcode probeEndpoint}. `value`-style seam: replaced
  *  by its test, to answer as a machine without an IPv6 loopback does. */
 export const _probeDeps = {

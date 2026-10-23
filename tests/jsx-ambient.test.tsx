@@ -41,3 +41,41 @@ testUI(Typed, "JSX.Element from `aio` compiles and renders", (ui) => {
 testUI(Explicit, "aio/jsx-runtime names the same types", (ui) => {
   assertEquals(ui.explicit.text, "both");
 });
+
+// A component annotated `JSX.Node` (which admits null) is a valid JSX tag —
+// `JSX.ElementType`. Without it TS checked the return against `JSX.Element`
+// alone and refused the tag (TS2786 "cannot be used as a JSX component").
+function Maybe(p: { on: boolean }): JSX.Node {
+  return p.on ? <b t="maybe">on</b> : null;
+}
+function Wrap(): JSX.Element {
+  return (
+    <div>
+      <Maybe on />
+      <Maybe on={false} />
+    </div>
+  );
+}
+// `JSX.Element` itself stays non-nullable.
+// @ts-expect-error null is not a JSX.Element
+const notElement: JSX.Element = null;
+void notElement;
+// Electron's `<webview>` attributes are typed, not just admitted. Read off
+// the index signature (what `<webview>` reaches): another test file in the
+// same check graph declares its own `webview` entry, which would shadow a
+// `<webview …>` written here.
+type Unlisted = JSX.IntrinsicElements[string];
+const webviewAttrs: Unlisted = {
+  src: "https://a.test/",
+  partition: "persist:x",
+  httpreferrer: "https://example.com/",
+  useragent: "ua",
+  allowpopups: true,
+  preload: "file:///p.cjs",
+  webpreferences: "contextIsolation=yes",
+};
+void webviewAttrs;
+
+testUI(Wrap, "a component returning JSX.Node (or null) is a JSX tag", (ui) => {
+  assertEquals(ui.maybe.text, "on");
+});

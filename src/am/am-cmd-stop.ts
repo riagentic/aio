@@ -24,7 +24,12 @@ import { controlKeyPath } from "../server/app-key.ts";
 import { STOP_REFUSED } from "../server/server-auth.ts";
 import { join, resolve } from "@std/path";
 import { cwdIsProject, isUnder, projectRoot } from "./am-project.ts";
-import { appDirs, appHome } from "../server/app-dirs.ts";
+import {
+  appDirs,
+  appHome,
+  appsDirEnv,
+  instanceOfAppsDir,
+} from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError, sayErr } from "./am-output.ts";
 import {
@@ -54,7 +59,6 @@ import { logMtime, noLockMessage } from "./am-cmd-start.ts";
 import {
   POLL_INTERVAL_MS,
   QUICK_TIMEOUT_MS,
-  stdoutLogPath,
   STOP_WAIT_DEFAULT_S,
 } from "./am-launch.ts";
 import { ENDED_HARD } from "./am-cmd-kill.ts";
@@ -245,6 +249,17 @@ export function alreadyRunningLine(
 export const ALREADY_RUNNING_FIX =
   "for a private copy beside it (own data, own lock): " +
   "am start --instance=<name>";
+
+/** {@linkcode ALREADY_RUNNING_FIX} for the scope this `am` runs in: inside an
+ *  `--instance` the private copy is ANOTHER name — "--instance=<name>" told
+ *  `am start --instance=a` to pass the flag it had passed. Pure over the env. */
+export function alreadyRunningFix(): string {
+  const own = instanceOfAppsDir(appsDirEnv());
+  return own === undefined
+    ? ALREADY_RUNNING_FIX
+    : `for another private copy beside it (own data, own lock): ` +
+      `am start --instance=<a name other than ${own}>`;
+}
 
 /** What `am start` and `am status` say about an instance that is alive, has
  *  a listener, and does not answer: ONE story — it is running, it is not
@@ -809,7 +824,9 @@ export async function cmdStop(
         const t = resolveLockTarget(flags);
         return t.kind === "target" ? t.target.pf : null;
       },
-      () => logMtime(stdoutLogPath(appId)),
+      // The path only: `stdoutLogPath` CREATES the folder, and a stop of an
+      // app that is not running (a typo'd --app) left ~/.<id>/logs behind.
+      () => logMtime(join(appDirs(appId).logs, "stdout.log")),
     );
     if (pf) {
       sayErr(`am: note: ${appId} was restarting — stopping its new process`);

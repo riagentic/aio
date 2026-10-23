@@ -84,16 +84,18 @@ async function run(real: boolean, seed: number) {
   const health = () => cells.health().find((h) => h.name === "wdiff")!;
   const slice = () => JSON.stringify((srv.state() as { wdiff: unknown }).wdiff);
   const initial = slice();
-  // A worker cell's reset lands one round trip later, by design: the owner
-  // resets its copy on the worker's `disabled` reply. So a disabled cell (by
-  // `disable` or by the breaker's trip) is read once that reset is SEEN — a
-  // fixed 5 ms was the round trip on an idle machine and not on a loaded one.
-  // Bounded: a reset that never lands is reported by the comparison below.
-  const resetLanded = async () => {
+  // A worker cell's disable lands one round trip later, by design: the owner
+  // settles it (and resets its copy) on the worker's `disabled` reply. So a
+  // disabled cell (by `disable` or by the breaker's trip) is read once that is
+  // SEEN — a fixed 5 ms was the round trip on an idle machine and not on a
+  // loaded one. The breaker's trip keeps the state, so only an explicit
+  // `disable` waits for the reset. Bounded: a disable that never lands is
+  // reported by the comparison below.
+  const resetLanded = async (reset: boolean) => {
     const end = Date.now() + 5_000;
     while (
       !health().enabled && Date.now() < end &&
-      (slice() !== initial || health().lastAction !== undefined)
+      ((reset && slice() !== initial) || health().lastAction !== undefined)
     ) await tick(1);
   };
   for (let i = 0; i < 80; i++) {
@@ -112,7 +114,7 @@ async function run(real: boolean, seed: number) {
       const x = e as Error & { code?: unknown };
       out = { err: x.message, name: x.name, code: x.code };
     }
-    await resetLanded();
+    await resetLanded(m === "disable");
     const h = health();
     trace.push({
       i,

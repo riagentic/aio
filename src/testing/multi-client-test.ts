@@ -33,6 +33,7 @@ import type { CliApp } from "../server/cli-client.ts";
 import { composeCellsWiring } from "../server/aio-composition.ts";
 import { _armTestStrict } from "./test-strict.ts";
 import { testServer, type TestServerConfig } from "./server-test.ts";
+import { predicateVerdict } from "./test-format.ts";
 
 /** One connected surface. */
 export interface TestClient {
@@ -332,7 +333,9 @@ export async function testMultiClient(
         pred: (p: Patch) => boolean,
         opts?: { timeoutMs?: number },
       ): Promise<Patch> => {
-        const hit = patches.find(pred);
+        const test = (p: Patch) =>
+          predicateVerdict(pred(p), "testMultiClient: waitForPatch");
+        const hit = patches.find(test);
         if (hit) return Promise.resolve(hit);
         return new Promise<Patch>((resolve, reject) => {
           const timer = setTimeout(() => {
@@ -348,7 +351,14 @@ export async function testMultiClient(
             );
           }, opts?.timeoutMs ?? 2000);
           const off = onPatch((batch) => {
-            const p = batch.find(pred);
+            let p: Patch | undefined;
+            try {
+              p = batch.find(test);
+            } catch (e) {
+              clearTimeout(timer);
+              off();
+              return reject(e);
+            }
             if (!p) return;
             clearTimeout(timer);
             off();

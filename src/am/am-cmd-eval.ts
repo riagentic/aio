@@ -55,6 +55,9 @@ export function evalWindowIndex(
     : parseNumArg(raw, "--window", { min: 0, integer: true });
 }
 
+/** What {@link wrapExpression} puts before the user's expression. */
+const WRAP_PREFIX = "Promise.resolve((";
+
 /** What `Runtime.evaluate` answers with. */
 type EvalReply = {
   result?: { type?: string; value?: unknown; description?: string };
@@ -86,8 +89,12 @@ export function evalOutcome(
         ? String(ex.exception.value)
         : undefined) ??
       ex.text ?? "evaluation threw";
+    // Line 0 of what ran starts with {@link WRAP_PREFIX}, which the user never
+    // typed: their column is the engine's minus it.
+    const col = (ex.columnNumber ?? 0) -
+      (ex.lineNumber === 0 ? WRAP_PREFIX.length : 0);
     const at = ex.lineNumber !== undefined
-      ? ` (at ${ex.lineNumber}:${ex.columnNumber ?? 0})`
+      ? ` (at ${ex.lineNumber}:${Math.max(0, col)})`
       : "";
     return { ok: false, error: `${desc}${at}` };
   }
@@ -135,7 +142,7 @@ export function evalErrorHint(error: string): string {
  *  for both a synchronous throw and a rejected promise — so `evalOutcome` can
  *  tell "it threw" from "it returned undefined". */
 export function wrapExpression(expr: string): string {
-  return `Promise.resolve((${expr})).then(function(v){` +
+  return `${WRAP_PREFIX}${expr})).then(function(v){` +
     `if(v===undefined)return undefined;` +
     `if(v&&typeof v==="object"&&typeof v.nodeType==="number")` +
     `return{node:v.nodeName,id:v.id||undefined,class:v.className||undefined,` +

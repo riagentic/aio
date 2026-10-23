@@ -6,7 +6,6 @@ import {
   instances,
   isLockOwnerAlive,
   isSocketAlive,
-  liveInstancesUnder,
   otherAppsRootOf,
   probeEndpoint,
   replaceLockIf,
@@ -14,13 +13,13 @@ import {
 import type { InstanceInfo } from "../server/single-instance-lock.ts";
 import { join, resolve } from "@std/path";
 import {
+  appDirs,
   appHome,
   appsDirEnv,
   instanceAppsDir,
   instanceOfAppsDir,
   profileOfHome,
 } from "../server/app-dirs.ts";
-import { homedir } from "../server/paths.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { HEY } from "../diagnostics/fmt.ts";
 import { VERSION } from "../server/aio-cli.ts";
@@ -44,12 +43,15 @@ import {
 } from "./am-output.ts";
 import {
   holderSince,
+  inInstancesHint,
+  liveInInstances,
   liveLock,
   MAINTENANCE_STATUS,
   maintenanceOp,
   removePid,
   resolveAmAppId,
   runningApps,
+  runningInstancesOf,
   sayOtherRoot,
 } from "./am-utils.ts";
 import { processPlan } from "./am-components.ts";
@@ -178,6 +180,10 @@ export async function cmdStatus(
         i.profile ?? (i.home ? profileOfHome(appId, i.home) : undefined)
       )
       .filter((p): p is string => !!p);
+    // Running in an `--instance` is not "stopped" to the reader who forgot
+    // the flag: told only "stopped", an agent starts a second copy on other
+    // data (jot §8). Named, with the flag. The exit code stays "not here".
+    const inInstances = runningInstancesOf(appId);
     out(
       {
         appId,
@@ -185,6 +191,9 @@ export async function cmdStatus(
         running: others.map((i) =>
           i.profile ? `${i.appId}@${i.profile}` : i.appId
         ),
+        ...(inInstances.length
+          ? { instances: inInstances, hint: inInstancesHint(inInstances) }
+          : {}),
         ...(profiles.length
           ? {
             profiles: profiles.map((p) => ({
@@ -198,6 +207,13 @@ export async function cmdStatus(
       () =>
         stack(
           `${mark("warn")} ${style.bold(appId)}  ${style.dim("stopped")}`,
+          inInstances.length > 0 &&
+            block(
+              "info",
+              `"${appId}" is ${inInstancesHint(inInstances)}.`,
+              undefined,
+              `am status --app=${appId} --instance=${inInstances[0]}`,
+            ),
           profiles.length > 0 &&
             block(
               "info",
@@ -487,25 +503,25 @@ export function listedInstances(): (InstanceInfo & {
   startedBy: StartedBy;
 })[] {
   const own = instanceOfAppsDir(appsDirEnv()) ?? null;
-  const all = instances().map((i) => ({ ...i, instance: own }));
-  if (appsDirEnv() === undefined) {
-    let names: string[] = [];
-    try {
-      names = [...Deno.readDirSync(join(homedir(), ".aio-instances"))]
-        .filter((e) => e.isDirectory).map((e) => e.name).sort();
-    } catch { /* aio-ok: no instance was ever made — none to list */ }
-    for (const name of names) {
-      for (const i of liveInstancesUnder(instanceAppsDir(name))) {
-        all.push({ ...i, instance: name });
-      }
-    }
-  }
+  const all: (InstanceInfo & { instance: string | null })[] = instances()
+    .map((i) => ({ ...i, instance: own }));
+  if (appsDirEnv() === undefined) all.push(...liveInInstances());
   return all.map((i) => ({ ...i, startedBy: startedByInstance(i) }));
 }
 
 export function cmdInstances(_args: string[], flags: GlobalFlags): void {
   const mode = detectMode(flags);
-  const all = listedInstances();
+  // `--app=X` (and `X@profile`) narrows the list: it was ignored, so
+  // `am instances --app=X --json | jq '.[0].pid'` read ANOTHER app's pid.
+  // The home `--profile` / `--home` bound (am.ts `targetHome`): that one.
+  const wantHome = flags.profile !== undefined || flags.home !== undefined
+    ? resolve(appDirs(resolveAmAppId(flags.app)).home)
+    : undefined;
+  const all = listedInstances().filter((i) =>
+    (flags.app === undefined || i.appId === flags.app) &&
+    (wantHome === undefined ||
+      (i.home !== undefined && resolve(i.home) === wantHome))
+  );
   const anyInstance = all.some((i) => i.instance !== null);
 
   if (all.length === 0) {

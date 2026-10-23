@@ -13,6 +13,7 @@ import { loadDevChunk } from "../air/dev-hooks.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import { bindShellTray } from "./tray-actions.ts";
 import { installProfileGlobal } from "../air/component-profile.ts";
+import { _liveRoots } from "../air/renderer-state.ts";
 import { installConsoleIntercept } from "./console-intercept.ts";
 import { _coreGetConnectedSignal } from "./browser-protocol.ts";
 import { routeCommand } from "./browser-air-commands.ts";
@@ -1801,3 +1802,7 @@ _takeReloadCarry();
 // add up `_dtRenders` by hand. Counts are always collected; only the clock is
 // opt-in, and calling this turns it on — see air/component-profile.ts.
 installProfileGlobal();
+// …and `__aioMounted()`, the live-root count `am shot` waits on before it
+// vouches for a frame: right after a reload the page has rAFs but no UI yet,
+// and a capture then is black.
+(globalThis as Record<string, unknown>).__aioMounted = () => _liveRoots.size;

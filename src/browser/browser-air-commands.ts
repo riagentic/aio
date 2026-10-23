@@ -162,6 +162,12 @@ export function routeCommand(
       }
       return true;
 
+    // A piece of a STREAMED call's result. Only a caller that asks for a
+    // stream (`stream: true`, which `peer().stream()` sends) is ever sent
+    // one, and this client never asks — so there is nothing to route it to.
+    case "chunk":
+      return true;
+
     // AIO-2.2: per-action ack — settles the Promise returned by an awaited
     // cell method (registered in browser-ack).
     case "ack": {

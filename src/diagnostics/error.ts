@@ -515,9 +515,12 @@ export function generateTip(err: AioError): string | undefined {
     case "REDUCE_ERROR": {
       const msg = err.message;
       // AIO-60: Better hints for proxy/state errors
+      // A clone refusal already carries its own fix (`draftCloneError`) —
+      // and the word "proxy", which put this generic tip beside it.
       if (
-        msg.includes("ownKeys") || msg.includes("non-extensible") ||
-        msg.includes("proxy")
+        !msg.includes("structuredClone refuses") &&
+        (msg.includes("ownKeys") || msg.includes("non-extensible") ||
+          msg.includes("proxy"))
       ) {
         const method = err.context.actionType?.includes(":__set")
           ? err.context.actionType.replace(/.*:__set/, "").replace(
@@ -527,7 +530,7 @@ export function generateTip(err: AioError): string | undefined {
           : err.context.actionType?.split(":")[1] ?? "?";
         return `Tip: Proxy state error in method "${method}" of cell "${
           err.context.cellName ?? "?"
-        }". Avoid .map()/.spread/Object.keys() on live proxy state — use explicit property access or snapshot first: \`const items = [...s.items]\``;
+        }". Avoid .map()/Object.keys() on live proxy state — use explicit property access or snapshot first: \`const items = [...s.items]\``;
       }
       return `Tip: Reducer for "${
         err.context.actionType ?? "?"

@@ -623,8 +623,9 @@ aio.run()
   ├─ createDB(path)          // create DB handle (worker not spawned yet)
   ├─ initSchema(db, schema)  // worker spawns; CREATE TABLE IF NOT EXISTS
   ├─ loadKV()                // restore scalar UI state from the aio_kv table
-  ├─ onRestore(state)        // optional user hook
-  └─ loadTables(db, schema)  // SELECT * → populate state arrays (tables win over the snapshot)
+  ├─ loadTables(db, schema)  // SELECT * → populate state arrays (tables win over the snapshot)
+  ├─ onMigrate / onRestore   // optional user hooks — they see the rows
+  └─ place tables again      // a hook's change to a bound array is replaced (and warned)
 ```
 
 ## Default pragmas

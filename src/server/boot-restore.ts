@@ -37,6 +37,10 @@ function sameDocument(a: unknown, b: unknown): boolean {
   return JSON.stringify(canon(a)) === JSON.stringify(canon(b));
 }
 
+/** The store row naming the layout (`"single"` | `"multi"`) the app booted
+ *  on when the store holds the document in BOTH, with different contents. */
+export const storedLayoutKey = (appId: string): string => `${appId}:__layout`;
+
 /** Load the persisted snapshot and bring it to the current persistence
  *  schema (A4). Alpha-era snapshots have no `<appId>:__schema` stamp and
  *  read as version 0; snapshots from a NEWER schema throw `PERSIST_SCHEMA`
@@ -64,14 +68,32 @@ export async function loadAndMigrateSnapshot(
     else await kvDb.setMulti(persistKey, {}, Object.keys(other));
   };
 
-  let persisted = await readCurrent();
+  // A stored document is an object of cells. Anything else (a hand-edited or
+  // foreign `42`) used to boot on defaults without a word, and the first
+  // save replaced it: refused here, with the malformed-store advice the boot
+  // wraps every restore failure in.
+  const asDocument = (v: unknown, layout: string) => {
+    if (v == null || _isObj(v)) return v as Record<string, unknown> | null;
+    throw new Error(
+      `persist: the stored "${layout}" document is ${
+        Array.isArray(v) ? "an array" : `a ${typeof v}`
+      } (${
+        JSON.stringify(v).slice(0, 80)
+      }), not an object of cells — refusing to boot over it, which would ` +
+        `replace it at the first save`,
+    );
+  };
+  let persisted = asDocument(await readCurrent(), persistMode);
   // `persistMode` decides the LAYOUT of the stored document (one JSON blob vs
   // one row per cell). Reading only the current layout meant that flipping the
   // mode — which docs/persistence/auto-persist.md actively recommends —
   // silently looked like a fresh install: the app booted EMPTY over a full
   // store (and, the other way round, resurrected the stale pre-switch blob).
   // Nothing is "not there" until BOTH layouts have been asked.
-  const other = await readOther();
+  const other = persisted ? await readOther() : asDocument(
+    await readOther(),
+    otherMode,
+  );
 
   if (!persisted && other) {
     // Adopt: copy into the current layout, verify it reads back, and only THEN
@@ -124,7 +146,12 @@ export async function loadAndMigrateSnapshot(
   } else if (persisted && other) {
     // Both layouts hold data — an older aio, or a hand-edited store. Never
     // guess which is newer; boot on the configured one and say what is being
-    // ignored, byte for byte still on disk.
+    // ignored, byte for byte still on disk. The store records which one, so
+    // a reader without the app's config (`am state --offline`,
+    // `readStoredState`) reads the copy the app runs on.
+    if (await kvDb.get(storedLayoutKey(appId)) !== persistMode) {
+      await kvDb.set(storedLayoutKey(appId), persistMode);
+    }
     log.warn(
       `persist: stored state exists in BOTH layouts. Booting on the ` +
         `"${persistMode}" one (persistMode); the "${otherMode}" copy (${
@@ -247,7 +274,10 @@ export function detectNewFields(
     if (storedCell === undefined) continue;
     const filter = opts.persist?.[cellId];
     const persisted = filter && isPlainObj(declState)
-      ? applyCellFieldFilter(filter, declState)
+      ? applyCellFieldFilter(filter, declState, {
+        wildcard: true,
+        declared: declState,
+      })
       : declState;
     if (persisted === undefined) continue; // persist: "none" stores nothing
     walk(cellId, persisted, storedCell, "", 0);
