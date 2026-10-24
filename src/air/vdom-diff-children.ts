@@ -60,7 +60,7 @@ export function diffChildren(
   // (air/dev-keys.ts). A duplicate is also a defect, and `diffKeyed` says
   // that half in production.
   if (isDevMode() && nextChildren.length > 1) {
-    devHooks.checkKeys?.(parent, nextChildren, hasKeys);
+    devHooks.checkKeys?.(parent, nextChildren, hasKeys, oldChildren);
   }
 
   // The keyed path whenever EITHER side has keys. On `next` alone, a keyed
@@ -252,10 +252,42 @@ function _placeSpan(
     // The anchor skips exiting nodes: a row still fading out is not a slot in
     // the list, and treating it as one is what sent it to the bottom.
     const anchor: Node | null = placed ? _nextLive(placed) : _firstLive(parent);
-    if (node !== anchor) parent.insertBefore(node, anchor);
+    if (node !== anchor) _move(parent, node, anchor);
     placed = node;
   }
   return placed;
+}
+
+type Caret = Element & {
+  selectionStart?: number | null;
+  selectionEnd?: number | null;
+  selectionDirection?: string | null;
+  setSelectionRange?(s: number, e: number, d?: string): void;
+  focus(o?: { preventScroll?: boolean }): void;
+};
+
+/** Move a node that is ALREADY `parent`'s child, keeping focus and caret.
+ *
+ *  `insertBefore` of a connected node is a remove + insert, and the remove
+ *  BLURS a focused control inside it (Chromium, measured): typing into a row of
+ *  a keyed list that reorders lost the focus mid-word. `moveBefore` is the
+ *  DOM's atomic move (no blur, no restarted animation) where it exists; where
+ *  it does not, the focus and the selection are put back. */
+function _move(parent: Node, node: Node, anchor: Node | null): void {
+  const p = parent as Node & { moveBefore?(n: Node, a: Node | null): void };
+  // Connected only: a detached tree holds no focus, and the first shipped
+  // `moveBefore` threw on a disconnected parent.
+  if (p.moveBefore && parent.isConnected) return p.moveBefore(node, anchor);
+  const a = (node.getRootNode() as { activeElement?: Caret | null })
+    .activeElement;
+  if (!a || !node.contains(a)) return void parent.insertBefore(node, anchor);
+  const { selectionStart: s, selectionEnd: e, selectionDirection: d } = a;
+  parent.insertBefore(node, anchor);
+  if ((node.getRootNode() as { activeElement?: unknown }).activeElement === a) {
+    return;
+  }
+  a.focus({ preventScroll: true });
+  if (s != null && e != null) a.setSelectionRange?.(s, e, d ?? undefined);
 }
 
 /** The positions of `seq` that form one longest strictly increasing

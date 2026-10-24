@@ -296,7 +296,7 @@ Deno.test("cli progress: TTY redraws one line; non-TTY prints plain lines at 10%
   p.tick(2);
   p.done();
   p.done(); // idempotent
-  const frames = tty.stdout.split("\r\x1b[2K").filter(Boolean);
+  const frames = tty.stderr.split("\r\x1b[2K").filter(Boolean);
   assertEquals(frames, [
     "copy [----] 0/4 0%",
     "copy [#---] 1/4 25%",
@@ -307,12 +307,13 @@ Deno.test("cli progress: TTY redraws one line; non-TTY prints plain lines at 10%
   const q = progress(100, { io: pipe, label: "copy" });
   for (let i = 0; i < 100; i++) q.tick();
   q.done();
-  const lines = pipe.stdout.trimEnd().split("\n");
+  const lines = pipe.stderr.trimEnd().split("\n");
   assertEquals(lines.length, 11, "0%..100% at every decile, nothing per tick");
   assertEquals(lines[0], "copy 0/100 (0%)");
   assertEquals(lines.at(-1), "copy 100/100 (100%)");
-  assertEquals(pipe.stdout.includes("\x1b"), false, "no escapes in a pipe");
-  assertEquals(pipe.stdout.includes("\r"), false);
+  assertEquals(pipe.stderr.includes("\x1b"), false, "no escapes in a pipe");
+  assertEquals(pipe.stderr.includes("\r"), false);
+  assertEquals(tty.stdout + pipe.stdout, "", "progress never on stdout");
 });
 
 Deno.test("cli spinner: non-TTY is two plain lines; TTY animates and clears; timer never holds the process", async () => {
@@ -321,13 +322,14 @@ Deno.test("cli spinner: non-TTY is two plain lines; TTY animates and clears; tim
   s.update("still loading");
   s.stop("loaded");
   s.stop(); // idempotent
-  assertEquals(pipe.stdout, "loading...\nstill loading...\nloaded\n");
+  assertEquals(pipe.stderr, "loading...\nstill loading...\nloaded\n");
   const tty = testIO({ tty: true });
   const t = spinner("x", { io: tty, intervalMs: 5 });
   await new Promise((r) => setTimeout(r, 30));
   t.stop("done");
-  assert(tty.stdout.split("\r\x1b[2K").length > 3, "animated");
-  assert(tty.stdout.endsWith("\r\x1b[2Kdone\n"));
+  assert(tty.stderr.split("\r\x1b[2K").length > 3, "animated");
+  assert(tty.stderr.endsWith("\r\x1b[2Kdone\n"));
+  assertEquals(tty.stdout + pipe.stdout, "", "spinner never on stdout");
   // (the interval is unref'd + cleared: this test process exits — the leak
   // sanitizer would fail it otherwise)
 });

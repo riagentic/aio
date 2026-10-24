@@ -6,6 +6,8 @@ import type { HLC, SyncOp } from "./types.ts";
 import type { OpBufferStorage } from "./op-buffer.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { degraded } from "../diagnostics/degraded.ts";
+import { SYNC_STORAGE_PREFIX } from "./storage-prefix.ts";
+export { SYNC_STORAGE_PREFIX, syncStoragePrefix } from "./storage-prefix.ts";
 
 type CellMeta = { lastHlc: HLC | null; lastServerTs?: number };
 type CellDoc = {
@@ -20,26 +22,6 @@ type CellDoc = {
   q?: string[];
   snapshot?: { state: unknown; hlc: HLC; serverTs?: number };
 };
-
-/** The unscoped namespace every build before app-scoping wrote under, and the
- *  fallback for a client that was never told which app it is. */
-export const SYNC_STORAGE_PREFIX = "__aio_sync";
-
-/** The localStorage namespace for ONE app's offline queue.
- *
- *  `localStorage` is per ORIGIN, and an app id is not part of an origin: two
- *  aio apps served from the same host:port (a pinned port, a shared host, or
- *  simply one app replacing another on the dev port) shared the queue of every
- *  cell whose NAME they had in common — app B's first `requestSync` flushed
- *  app A's unsent ops into B's server, as B's user, silently. The app id is
- *  the only thing that separates them, so it is part of the key. */
-export function syncStoragePrefix(appId?: string | null): string {
-  if (!appId) return SYNC_STORAGE_PREFIX;
-  // The key format is `<prefix>:<cell>`; an id carrying the separator (or
-  // anything else exotic) must not be able to reshape a key into another
-  // app's. Slugified server-side already — this is the belt.
-  return `${SYNC_STORAGE_PREFIX}.${appId.replace(/[^A-Za-z0-9._-]/g, "_")}`;
-}
 
 /** One-time adoption of a queue written under the unscoped prefix by a build
  *  from before {@linkcode syncStoragePrefix} existed.

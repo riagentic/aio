@@ -195,7 +195,10 @@ const Modal = () =>
   );
 ```
 
-Portals are skipped during SSR.
+During SSR a Portal emits no markup and does not render its content (there is no
+target, and portal content may read `document`/`window` at render). The content
+first renders on the client; a throw there falls back to the nearest
+`ErrorBoundary`'s own region, and the rest of the server page is kept.
 
 ---
 

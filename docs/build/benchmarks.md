@@ -8,6 +8,7 @@ throughput, persistence writes, patch compute, and memory are tracked, and
 
 ```sh
 deno task bench          # measure → table + bench-results.json (gitignored)
+deno task bench --only=boot,patch-10k   # those metrics alone, merged into bench-results.json
 deno task check:bench    # run bench, then gate against scripts/bench-baselines.json
 deno task check:bench --cached   # gate the last bench-results.json, no re-run
 ```
@@ -20,15 +21,18 @@ Each timing metric runs a warmup pass, then N iterations, and reports **p10**,
 the **median** and **p95** (`scripts/bench.ts`). **p10 is what the gate reads**
 — see [Noise policy](#noise-policy) for why a median could not be.
 
-| metric            | unit  | what                                                                                                                                   |
-| ----------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `boot`            | ms    | `aio.run()` resolve time — libraryMode, server-only, no persist — then clean `app.close()`                                             |
-| `dispatch-sync`   | ms/op | sync method calls on a bound cell (10k increments per batch, awaiting the last)                                                        |
-| `dispatch-async`  | ms/op | async method full round-trips, awaited individually (1k per batch)                                                                     |
-| `persist-write`   | ms/op | `sqliteKv().set()` — the SkvInstance SQLite path, in-memory DB, real snapshot payloads                                                 |
-| `patch-10k`       | ms/op | the pure compute half of broadcast: Immer `produceWithPatches` for a 1k-key mutation on a 10k-key cell + `compactPatches` (no sockets) |
-| `memory-boot-1k`  | MB    | heap delta (`Deno.memoryUsage().heapUsed`) after boot + 1k dispatches, GC-forced via `--expose-gc`                                     |
-| `proxy-array-10k` | ms/op | an async method crunching a 10k-item array through the live proxy (reduce + filter-reassign + length) — the hot-cell commit cost       |
+| metric                 | unit  | what                                                                                                                                              |
+| ---------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `boot`                 | ms    | `aio.run()` resolve time — libraryMode, server-only, no persist — then clean `app.close()`                                                        |
+| `dispatch-sync`        | ms/op | sync method calls on a bound cell (10k increments per batch, awaiting the last)                                                                   |
+| `dispatch-async`       | ms/op | async method full round-trips, awaited individually (1k per batch)                                                                                |
+| `persist-write`        | ms/op | `sqliteKv().set()` — the SkvInstance SQLite path, in-memory DB, real snapshot payloads                                                            |
+| `patch-10k`            | ms/op | the pure compute half of broadcast: Immer `produceWithPatches` for a 1k-key mutation on a 10k-key cell + `compactPatches` (no sockets)            |
+| `memory-boot-1k`       | MB    | heap delta (`Deno.memoryUsage().heapUsed`) after boot + 1k dispatches, GC-forced via `--expose-gc`                                                |
+| `proxy-array-10k`      | ms/op | an async method crunching a 10k-item array through the live proxy (reduce + filter-reassign + length) — the hot-cell commit cost                  |
+| `encode-hit-256k`      | ms/op | a tagged 256 KB JS response gzipped through `encodeResponse` once, then served from the compressed-body memo (a miss is ~2.5 ms)                  |
+| `encode-admit-64k`     | ms/op | an UNTAGGED 64 KB JSON body on its third sighting — admitted to the memo on the second, so a hit (a miss is ~0.6 ms)                              |
+| `dispatch-mixed-queue` | ms/op | one call's first frame queues 200 async writers + 200 sync calls while the loop drains: each async first-frame write-set lands ahead of the queue |
 
 Results go to stdout (compact table) and `bench-results.json` (gitignored).
 

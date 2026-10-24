@@ -36,9 +36,11 @@ Deno.test("trojan: the rate limit says its cap, its count, and that it self-clea
     dbPath: ":memory:",
   } as never);
   try {
-    // Past the 100/sec cap, in one second, on purpose.
-    let limited: { error?: string } | null = null;
-    for (let i = 0; i < 140 && !limited; i++) {
+    // Past the 100/sec cap, in one second, on purpose — in batches sent at
+    // once: one after another, 140 requests took over a second on a loaded
+    // Windows VM and never met the cap; 300 at once ran out of sockets on
+    // macOS (256 open files by default). A batch of 50 is ~100 sockets.
+    const one = async () => {
       const res = await fetch(
         `http://127.0.0.1:${port}/__aio/trojan/dispatch`,
         {
@@ -48,9 +50,14 @@ Deno.test("trojan: the rate limit says its cap, its count, and that it self-clea
         },
       );
       const body = await res.json() as { error?: string };
-      if (res.status === 429) limited = body;
+      return res.status === 429 ? body : null;
+    };
+    let limited: { error?: string } | null = null;
+    for (let batch = 0; batch < 20 && !limited; batch++) {
+      const answers = await Promise.all(Array.from({ length: 50 }, one));
+      limited = answers.find((a) => a !== null) ?? null;
     }
-    assert(limited, "140 requests in a second must trip the 100/sec cap");
+    assert(limited, "batches of 50 at once must trip the 100/sec cap");
     const msg = limited.error ?? "";
     // the cap itself — the number an operator needs to space their calls by
     assertStringIncludes(msg, "100 requests/sec");

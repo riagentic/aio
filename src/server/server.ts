@@ -1,6 +1,11 @@
 // HTTP + WebSocket server with live TSX transpilation (dev) or static serving (prod)
 // Thin orchestrator — delegates to server-*.ts modules
-import { APP_STYLE, appHasStylesheet, UI_ENTRY } from "./app-files.ts";
+import {
+  APP_STYLE,
+  appHasStylesheet,
+  BUNDLE_JS,
+  UI_ENTRY,
+} from "./app-files.ts";
 import { declaresOverLimit, readBounded } from "./read-body.ts";
 import { answerPinProof } from "./pin-proof.ts";
 import {
@@ -52,12 +57,13 @@ import {
   mountOutsideMessage,
 } from "./paths.ts";
 import { PIN_TTL_MS, verifyPin } from "./pairing.ts";
+import { pakePairRoute } from "./pair-pake-route.ts";
 import { BLOB_URL_PREFIX } from "./blobs.ts";
 import {
   PEER_HEADER,
   PEER_UPLOAD_PATH,
   peerUpload,
-  verifyPeer,
+  provePeer,
 } from "./peer-proof.ts";
 export type { ServerConfig, ServerHandle } from "./server-types.ts";
 export { _timingSafeEqual } from "./server-auth.ts";
@@ -90,6 +96,7 @@ import {
   _isPresented,
   _shapeChecked,
   _timingSafeEqual,
+  _userShapeFault,
   armLocalControl,
   authFailBudgetExceeded,
   bearerToken,
@@ -98,20 +105,27 @@ import {
   crossOriginRefusal,
   hostRefusal,
   localControlAuthorized,
+  originVerdict,
   rawStateControlAllowed,
   recordAuthFail,
+  requestHost,
+  sessionCookieFrom,
   sessionCookieNameFor,
   TROJAN_PREFIX,
   trojanDenialForUserMode,
+  VIEW_PATH,
   WEAK_TOKEN_MIN_BITS,
   WEAK_TOKEN_MIN_CHARS,
   weakStaticTokenUsers,
 } from "./server-auth.ts";
-import { handleAuthFlow } from "./auth-flows.ts";
+import { handleAuthFlow, servedOverHttps } from "./auth-flows.ts";
 import { stopEsbuild } from "./server-transpile.ts";
 import { createWsManager, isPeerGone } from "./server-ws.ts";
+import { readBuildStamp } from "./app-version.ts";
+import { VERSION } from "./aio-cli.ts";
 import { createBroadcaster } from "./server-broadcast.ts";
 import {
+  aioMethodDenial,
   createStaticHandler,
   isShellAsset,
   noteReload,
@@ -125,7 +139,7 @@ import {
 } from "./server-dev-checks.ts";
 import type { TrojanDeps } from "./server-trojan.ts";
 import { resetTrojanRateLimit } from "./server-trojan.ts";
-import { encodeResponse } from "./http-encoding.ts";
+import { encodeResponse, etagOf } from "./http-encoding.ts";
 import {
   contentSecurityPolicy,
   cspNonce,
@@ -145,7 +159,6 @@ function _warnTokenInUrl(): void {
     "[aio] security: authenticated via ?token= in the URL — tokens leak via " +
       "browser history, proxy logs, and Referer. Prefer the Authorization: " +
       "Bearer header. Query-param auth is a fallback for header-less contexts.",
-    { detail: String() },
   );
 }
 
@@ -220,6 +233,7 @@ function _warnProxyHeaderUnbacked(
 }
 
 /** Test isolation — re-arm the one-shot security warnings. @internal */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetSecurityWarnings(): void {
   _proxyCollapseWarned = false;
   _proxyUnbackedWarned = false;
@@ -381,6 +395,47 @@ export function keyCookieHeader(
   }; Path=/; HttpOnly; SameSite=Strict${secure}`;
 }
 
+/** The `boot` frame's id. One rule, dev and prod: a page reloads when the
+ *  code it holds may be stale.
+ *
+ *  • A BUILT app (prod, serving `dist/`) knows its code exactly: the id is the
+ *    served bundle's hash plus the build stamp's `builtAt` (which also covers
+ *    what the bundle does not carry, e.g. a CSS-only rebuild). A restart of
+ *    the same build — crash-restart, `am restart` — keeps every open tab and
+ *    its unsaved input; a new build reloads them. One file read, no walk: a
+ *    binary started from any cwd pays ~0 ms.
+ *  • A SOURCE run (dev) cannot know cheaply: the page's code spans files
+ *    outside the app dir (shared cells, a linked framework, the import map
+ *    in deno.json). So it is conservative — a fresh id per boot, and every
+ *    restart reloads. Dev reloads MORE than prod, never less: not a
+ *    behavioural divergence, the same rule with less knowledge. */
+function _bootId(distDir: string | null, prod: boolean): string {
+  if (prod && distDir) {
+    try {
+      const bundle = Deno.readFileSync(join(distDir, BUNDLE_JS));
+      const located = appDenoJsonLocated();
+      const builtAt = located ? readBuildStamp(located.dir)?.builtAt : "";
+      return etagOf(
+        new TextEncoder().encode(
+          `${VERSION}\0${builtAt ?? ""}\0${etagOf(bundle)}`,
+        ),
+      ).slice(1, -1);
+    } catch (e) {
+      // No bundle = no pages (a cli / server-only app): nothing to reload,
+      // nothing to say. Only a bundle that exists and cannot be read is.
+      if (e instanceof Deno.errors.NotFound) {
+        return crypto.randomUUID().slice(0, 8);
+      }
+      log.warn(
+        `boot id: the served bundle could not be read (${
+          e instanceof Error ? e.message : String(e)
+        }) — every restart will reload open pages`,
+      );
+    }
+  }
+  return crypto.randomUUID().slice(0, 8);
+}
+
 /** The appId the cookie name is derived from, set once per server. */
 let _cookieAppId: string | undefined;
 
@@ -415,6 +470,9 @@ export function createServer(config: ServerConfig): ServerHandle {
       // The POST flows' Origin check reads the same list the server-wide gate
       // does — see `sameOrigin` in auth-flows.ts.
       allowedOrigins: config.allowedOrigins,
+      // …and the proxy it trusts, whose X-Forwarded-Proto tells the flows the
+      // browser is on https — see `servedOverHttps` in auth-flows.ts.
+      trustProxyHeader: config.trustProxyHeader,
     }
     : undefined;
 
@@ -458,6 +516,24 @@ export function createServer(config: ServerConfig): ServerHandle {
         "the environment.",
     );
   }
+  // A static map is known at boot, so its malformed entries are said HERE —
+  // not on the first login, where dev refuses that token as "names nobody".
+  // By position, never by token: this is a log line.
+  if (config.users && !config.resolveUser) {
+    Object.values(config.users).forEach((u, i) => {
+      const bad = _userShapeFault(u);
+      if (!bad) return;
+      log.warn(
+        "auth",
+        `users: entry #${i + 1} is ${bad.fault} — expected { id: "<non-empty ` +
+          `string or finite number>", role: "<string>" }.` +
+          (bad.identity
+            ? ` Its token names nobody: a dev boot refuses every login with ` +
+              `it, a production build admits it with no identity.`
+            : ""),
+      );
+    });
+  }
   // The local control plane: mint an owner-only, per-boot credential so `am`
   // and amui can reach /__aio/trojan/* on an auth-enabled app. Without it the
   // trojan's (correct) admin gate locks the developer out of inspecting their
@@ -466,6 +542,8 @@ export function createServer(config: ServerConfig): ServerHandle {
   // signal is a hard kill). No-op for an app with no appId.
   armLocalControl(config);
   const _sessionResolver = config.sessionResolver;
+  /** One login-CSRF warning per app (see the `/ws` `viaLink` branch). */
+  let _linkSessionWarned = false;
   // A LOGIN SESSION does not authenticate an HTTP request from the URL.
   //
   // `?token=` is a deliberate fallback for header-less contexts, and those
@@ -496,6 +574,69 @@ export function createServer(config: ServerConfig): ServerHandle {
    *  login flows) — the mode where a collapsed abuse bucket hurts users. */
   const _perUserAuth = !!_userResolver || !!config.authFlows;
 
+  /** `GET /__aio/view` (VIEW_PATH) — called ONLY after this request's
+   *  credential passed its gate, with the identity it resolved to. The answer
+   *  is the view a WebSocket with that credential gets, by the same function
+   *  (`getUIState(user)`), so it can never hold more than that socket does.
+   *  Refused beyond the credential exactly where the socket would be: a
+   *  foreign Origin (the WS upgrade's own decider). And one place stricter:
+   *  an exposed app with NO credential at all (`key: false`) answers the
+   *  machine it runs on only — a network scanner gets nothing new. */
+  const viewAnswer = (
+    req: Request,
+    user: AioUser | undefined,
+    local: boolean,
+  ): Response => {
+    const badMethod = aioMethodDenial(VIEW_PATH, req.method, prod);
+    if (badMethod) return badMethod;
+    const origin = req.headers.get("origin");
+    const verdict = origin
+      ? originVerdict(origin, {
+        hostHeader: requestHost(req),
+        secure: !!config.cert,
+        allowedOrigins: config.allowedOrigins,
+      })
+      : null;
+    if (verdict) {
+      return new Response(
+        `Forbidden — ${verdict.reason}. ${VIEW_PATH} answers what a ` +
+          `WebSocket with this credential receives, and a WebSocket from ` +
+          `that origin is refused the same way — add it to allowedOrigins ` +
+          `if it is meant to read this app.`,
+        { status: verdict.status },
+      );
+    }
+    if (!local && !config.token && !_perUserAuth) {
+      return new Response(
+        `Forbidden — ${VIEW_PATH} on an exposed app with no credential ` +
+          `(key: false) answers this machine only. Give the app a key ` +
+          `(key: true) and present it as \`Authorization: Bearer <key>\`, ` +
+          `or run the probe on the app's own machine.`,
+        { status: 403 },
+      );
+    }
+    let view: unknown;
+    try {
+      view = getUIState(user);
+    } catch (e) {
+      log.error(
+        "http",
+        `${VIEW_PATH}: the client view could not be built — ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+      // Fixed text: the exception may quote app data, and the caller may be
+      // remote. The detail is in the log line above.
+      return Response.json(
+        { error: "the view could not be built — see the app log" },
+        { status: 500 },
+      );
+    }
+    return Response.json(view ?? null, {
+      headers: { "Cache-Control": "no-store" },
+    });
+  };
+
   // Boot-time half of the bucket-collapse warning (the runtime half fires on
   // the first request that actually carries a forwarding header). An exposed
   // per-user app is the deployment the docs prescribe a reverse proxy for, so
@@ -508,7 +649,6 @@ export function createServer(config: ServerConfig): ServerHandle {
         "a reverse proxy every client shares ONE abuse bucket and one " +
         "attacker throttles everybody. Behind a proxy set trustProxyHeader: " +
         '"x-forwarded-for" (and have the proxy OVERWRITE that header).',
-      { detail: String() },
     );
   }
 
@@ -699,7 +839,8 @@ export function createServer(config: ServerConfig): ServerHandle {
   const noCache = prod
     ? { "Cache-Control": "no-cache" } as Record<string, string>
     : { "Cache-Control": "no-store" } as Record<string, string>;
-  const bootId = crypto.randomUUID().slice(0, 8);
+  // The `boot` frame's id — a page reloads when it changes (see `_bootId`).
+  const bootId = _bootId(absDistDir, prod);
   const syncIntervalMs = config.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
 
   // ── Dev startup checks ──
@@ -747,6 +888,8 @@ export function createServer(config: ServerConfig): ServerHandle {
   const wsMgr = createWsManager({
     dispatch,
     getUIState,
+    // Late-bound: the broadcaster is made below, before any socket opens.
+    iconReplay: () => broadcaster.iconReplay(),
     debug,
     prod,
     appVersion: config.appVersion,
@@ -761,8 +904,10 @@ export function createServer(config: ServerConfig): ServerHandle {
     // only thing that knows a session died (see `_revalidate` in server-ws).
     revalidateSession: _sessionResolver
       ? (tok: string) => {
-        const info = _sessionResolver(tok);
-        return info ? { id: info.id, role: info.role } : null;
+        // The WHOLE record, as the handshake adopted it: rebuilt as
+        // `{ id, role }`, every hook after the socket's first frame saw a
+        // different shape than `onConnect` did (`expiresAt` gone).
+        return _sessionResolver(tok);
       }
       : undefined,
     // Not only sessions die: an API key is deleted, a JWT expires. The same
@@ -814,6 +959,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     getTTBroadcast: config.getTTBroadcast,
     udsBroadcastRef: config.udsBroadcastRef,
     udsClientCount: config.udsClientCount,
+    iconReplay: config.iconReplay,
   });
 
   // Forward diagnostic bus events to all connected dev clients via WS.
@@ -886,7 +1032,8 @@ export function createServer(config: ServerConfig): ServerHandle {
   }
 
   // ── Static handler — HTTP routes, transpilation, trojan API ──
-  const _served = _servedAssets(config.assets, absBaseDir);
+  const runAssets = _runMounts("assets", config.assets);
+  const _served = _servedAssets(runAssets, absBaseDir);
   const staticHandler = createStaticHandler({
     prod,
     debug,
@@ -896,7 +1043,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     // DEV ONLY: prod serves the bundle, which already followed these imports
     // at build time. Gating it here means a production server cannot be made
     // to read outside its own root by a config key at all.
-    serveDirs: prod ? undefined : config.serveDirs,
+    serveDirs: prod ? undefined : _runMounts("serveDirs", config.serveDirs),
     // …and `assets` in BOTH. That is the entire difference between the two:
     // `serveDirs` exists so the DEV server can resolve a module that lives
     // outside baseDir (prod bundles follow the import themselves), while
@@ -905,10 +1052,10 @@ export function createServer(config: ServerConfig): ServerHandle {
     // deno.json's mounts are served too (`_servedAssets`): the build reads
     // that declaration, so the server must.
     assets: _served,
-    assetsFill: _mountsDenoJsonOnly(config.assets, _served),
+    assetsFill: _mountsDenoJsonOnly(runAssets, _served),
     // …and a compiled binary falls back, per file, to the copy it EMBEDDED —
     // see assetDirCandidates.
-    assetFallbacks: _assetFallbacks(config.assets),
+    assetFallbacks: _assetFallbacks(runAssets),
     // The shell's own CSP, when the app turned a nonce on. `securityHeaders`
     // computes the server-wide one from the same inputs; this is the same
     // function with a nonce threaded through, so the two cannot drift.
@@ -951,6 +1098,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     noCache,
     showStatus: config.showStatus,
     uiEntry: config.uiEntry,
+    headless503: config.headless503,
     viewport: config.viewport,
     headExtra: config.headExtra,
     chrome: config.chrome,
@@ -988,7 +1136,12 @@ export function createServer(config: ServerConfig): ServerHandle {
         payloadStats: wsMgr.payloadStats,
         clientBackpressure: clientBP,
         udsClients: config.udsClientCount?.() ?? 0,
-        broadcastTotals: broadcaster.lifetimeBroadcast(),
+        // The meter's, when there is one: it sees BOTH transports' sends and
+        // is always on. The broadcaster's own totals are WS-only and counted
+        // only with a vitals system — a desktop app (all clients on the
+        // socket) or `vitals: false` scraped a confident 0 forever.
+        broadcastTotals: config.costMeter?.lifetime() ??
+          broadcaster.lifetimeBroadcast(),
         rawState: config.trojan
           ? config.trojan.getState() as Record<string, unknown>
           : undefined,
@@ -1040,6 +1193,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       token: config.token,
       certPem: config.cert,
       expose: config.expose,
+      pairingPake: config.pairingPake,
       trojan: config.trojan!,
       authInfo: {
         mode: _userResolver
@@ -1331,6 +1485,35 @@ export function createServer(config: ServerConfig): ServerHandle {
       }
       try {
         const body = JSON.parse(raw) as { pin?: unknown };
+        // ONE builder for both exchanges' profile.
+        const profile = () =>
+          JSON.stringify({
+            aio: 1,
+            name: config.appId ?? title,
+            title,
+            port: livePort(),
+            tls: !!config.cert,
+            cert: config.cert ?? null,
+            key: config.token,
+          });
+        // `pairing: { pake: true }` (cpace.ts): the CPace exchange, and the
+        // refusals that keep the two modes apart — null is the plain path.
+        const pake = await pakePairRoute(
+          body && typeof body === "object"
+            ? body as Record<string, unknown>
+            : null,
+          url,
+          {
+            pake: config.pairingPake === true,
+            token: config.token,
+            cert: config.cert,
+            profile,
+            clientKey,
+            budgetExceeded: authFailBudgetExceeded,
+            recordFail: recordAuthFail,
+          },
+        );
+        if (pake) return pake;
         // A pin that is not a string is a malformed REQUEST, not a wrong
         // guess: 400 naming the field, and no charge to the PIN budget — the
         // "invalid or expired" reply it used to get sent people to `am pair`
@@ -1373,16 +1556,15 @@ export function createServer(config: ServerConfig): ServerHandle {
           );
         }
         return new Response(
-          JSON.stringify({
-            aio: 1,
-            name: config.appId ?? title,
-            title,
-            port: livePort(),
-            tls: !!config.cert,
-            cert: config.cert ?? null,
-            key: config.token,
-          }),
-          { headers: { "Content-Type": "application/json" } },
+          profile(),
+          {
+            // The reply IS the app key: no cache, proxy or service worker
+            // may hold it (the auth flows' rule for identity-bearing bodies).
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "no-store",
+            },
+          },
         );
       } catch {
         return new Response(JSON.stringify({ error: "invalid request" }), {
@@ -1455,8 +1637,13 @@ export function createServer(config: ServerConfig): ServerHandle {
         )
         ? "a peer proof from off this machine"
         : null;
+      // THE decider — the local socket's identity hello asks the same one.
       const proven = why === null
-        ? await verifyPeer(req.headers.get(PEER_HEADER)!, config.appId ?? "")
+        ? await provePeer(
+          req.headers.get(PEER_HEADER)!,
+          config.appId ?? "",
+          _peerResolver,
+        )
         : { ok: false as const, why };
       if (!proven.ok) {
         recordAuthFail(clientKey, `peer: ${proven.why}`);
@@ -1467,7 +1654,7 @@ export function createServer(config: ServerConfig): ServerHandle {
           ? new Response("Too Many Requests", { status: 429 })
           : new Response("Unauthorized", { status: 401 });
       }
-      const user = await _peerResolver(proven.peer);
+      const user = proven.user;
       if (user && pathname === "/ws") {
         return wsMgr.handleWs(req, user, clientKey);
       }
@@ -1482,6 +1669,22 @@ export function createServer(config: ServerConfig): ServerHandle {
       }
       // null: this app admits no identity for that peer — the paths below
       // decide, as for any other caller.
+    }
+    // The upload door is a proven peer's only; anyone else fell through to
+    // the static 404, which read as "this app has no such door" — say why.
+    if (pathname === PEER_UPLOAD_PATH) {
+      return new Response(
+        JSON.stringify({
+          error: !_peerResolver
+            ? "this app admits no peer uploads — it sets no resolvePeer"
+            : !req.headers.has(PEER_HEADER)
+            ? "no peer identity sent — peer() proves one only from inside a " +
+              "running aio app, over loopback TCP or its local HTTP socket, " +
+              "without a token"
+            : "resolvePeer admitted no identity for this caller",
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } },
+      );
     }
 
     // Auth path 1: per-user auth — resolveUser hook or static users map (AIO-171)
@@ -1577,6 +1780,28 @@ export function createServer(config: ServerConfig): ServerHandle {
           user = nextUser;
         }
       }
+      // …and a URL SESSION that is valid does not outrank this browser's own
+      // sign-in either. A URL is a link anyone can craft; the cookie is what
+      // THIS browser logged in as. The client builds its socket URL from the
+      // page's `?token=`, so `https://app/?token=<attacker's session>` sent
+      // to a signed-in victim opened the victim's socket AS THE ATTACKER —
+      // their tab wrote into the attacker's account while `/me` (cookie)
+      // still named the victim. Only a session token yields: a static
+      // `users:`/`resolveUser` share link is a credential the URL was meant
+      // to carry, and keeps its old precedence.
+      if (user && urlTok && pathname === "/ws" && _sessionResolver?.(token!)) {
+        const own = sessionCookieFrom(req, sessionCookieName);
+        const ownUser = own && own.token !== token
+          ? _sessionResolver(own.token)
+          : null;
+        if (own && ownUser) {
+          token = own.token;
+          fromUrl = false;
+          source = "cookie";
+          legacyCookie = own.legacy;
+          user = ownUser;
+        }
+      }
       if (!user) {
         // Only a DELIBERATELY presented credential is an attack signal. An
         // ambient cookie is attached by the browser to every subresource, so
@@ -1607,7 +1832,7 @@ export function createServer(config: ServerConfig): ServerHandle {
             headers: extra,
           });
         }
-        if (!shellIsPublic || pathname === "/ws") {
+        if (!shellIsPublic || pathname === "/ws" || pathname === VIEW_PATH) {
           return new Response("Unauthorized", { status: 401, headers: extra });
         }
         // public shell: fall through to static serving as anonymous
@@ -1710,12 +1935,40 @@ export function createServer(config: ServerConfig): ServerHandle {
         // …and a `users:`/`resolveUser` token is kept for the same reason:
         // an API key or a JWT dies too (see `_revalidateResolved`).
         const resolverToken = sessionToken ? undefined : token!;
+        // LOGIN CSRF, said out loud (never refused: `?token=` is the
+        // documented session channel). A BROWSER socket (it sent `Origin`)
+        // signed in from a URL session with no cookie of its own may be a
+        // link someone else crafted: the tab writes into THEIR account. One
+        // warn per app, and the tab is told whose account it is in.
+        // Only where a cookie login EXISTS (`authFlows`: auth: true / OIDC):
+        // a `sessions: true`-only app has no other way in, so there the
+        // link is simply how its users connect.
+        const viaLink = !!config.authFlows && !!sessionToken &&
+          source === "url" && !!req.headers.get("origin");
+        if (viaLink && !_linkSessionWarned) {
+          _linkSessionWarned = true;
+          log.warn(
+            "auth",
+            `a browser socket signed in from a ?token= session link as ` +
+              `"${user.id}" — a link can sign a browser into someone else's ` +
+              `account. Use the session cookie: sign in normally (the login ` +
+              `flow sets it) instead of sharing a session link.`,
+          );
+        }
         return wsMgr.handleWs(
           req,
           user,
           clientKey,
           sessionToken,
           resolverToken,
+          viaLink,
+        );
+      }
+      if (pathname === VIEW_PATH) {
+        return viewAnswer(
+          req,
+          user,
+          _isLocalRequest(addr, req, config.trustProxyHeader),
         );
       }
       // Snapshot dumps/overwrites RAW state — it bypasses ui include/exclude
@@ -1810,7 +2063,16 @@ export function createServer(config: ServerConfig): ServerHandle {
       // app A handed out `aio_key_<B>` — a cookie A itself never reads, and
       // the browser's follow-up assets 401'd exactly as before the cookie.
       if (validQ && !validC) {
-        setKeyCookie = keyCookieHeader(url, config.token, keyCookieName);
+        // Secure when the BROWSER is on https — behind a trusted TLS proxy
+        // this socket is http, and the request URL alone said "not secure".
+        const pageUrl = new URL(url);
+        if (
+          servedOverHttps(req, {
+            secure: !!config.cert,
+            trustProxyHeader: config.trustProxyHeader,
+          })
+        ) pageUrl.protocol = "https:";
+        setKeyCookie = keyCookieHeader(pageUrl, config.token, keyCookieName);
       }
     }
 
@@ -1832,6 +2094,13 @@ export function createServer(config: ServerConfig): ServerHandle {
     // A 101 upgrade carries no useful Set-Cookie, and a socket authenticated
     // by its own query token needs none.
     if (pathname === "/ws") return wsMgr.handleWs(req, undefined, clientKey);
+    if (pathname === VIEW_PATH) {
+      return viewAnswer(
+        req,
+        undefined,
+        _isLocalRequest(addr, req, config.trustProxyHeader),
+      );
+    }
     debug(`http: ${req.method} ${pathname}`);
     // ── Custom user routes (uploads, webhooks, API endpoints) ──
     const routed = await tryRoutes(req, pathname, undefined, clientKey);
@@ -2239,6 +2508,8 @@ export function createServer(config: ServerConfig): ServerHandle {
       return harden(await staticHandler.serveStatic(url.pathname, req));
     }
     // Authenticate trojan requests on localhost — same rules as main server
+    /** The identity this request proved (per-user mode), for VIEW_PATH. */
+    let viewUser: AioUser | undefined;
     if (config.token) {
       const qToken = url.searchParams.get("token");
       // THE reader — "same rules as main server" has to mean the same
@@ -2309,8 +2580,12 @@ export function createServer(config: ServerConfig): ServerHandle {
       }
       const denied = trojanDenialForUserMode(url.pathname, user);
       if (denied) return harden(denied);
+      viewUser = user;
     }
     const { pathname } = url;
+    if (pathname === VIEW_PATH) {
+      return harden(viewAnswer(req, viewUser, true));
+    }
     if (pathname.startsWith("/__aio/")) {
       return harden(await staticHandler.serveStatic(pathname, req));
     }
@@ -2392,6 +2667,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     broadcastRaw: (msg, exclude) => broadcaster.broadcastRaw(msg, exclude),
     broadcastTT: () => broadcaster.broadcastTT(),
     broadcastUi: (raw) => broadcaster.broadcastUi(raw),
+    iconReplay: () => broadcaster.iconReplay(),
     clientCount: () => wsMgr.connections.size,
     trojanPort,
     boundPort,
@@ -2472,6 +2748,46 @@ export function _shareRoots(absBaseDir: string) {
   const raw = (dj.config as { share?: unknown }).share;
   if (raw === undefined) return undefined;
   return resolveShare(fromFileUrl(dj.dir), raw);
+}
+
+/** `aio.run({ assets | serveDirs })` as the static handler matches it — THE
+ *  normalizer, for every reader of those keys: each prefix with its leading
+ *  `/` (deno.json's `"media"` has always been `/media`, while the same
+ *  spelling here never matched a pathname and served nothing, silently).
+ *  A non-string dir crashed the boot inside `resolve` ("Path must be a
+ *  string") naming neither key nor prefix — refused here, naming both. A
+ *  blank dir resolved to the process CWD and SERVED it; it booted through
+ *  1.0.24, so it still boots — said through `warn`, and that mount skipped.
+ *  @internal */
+export function _runMounts(
+  label: "assets" | "serveDirs",
+  mounts: Record<string, string> | undefined,
+  warn: (msg: string) => void = (m) => log.warn("server", m),
+): Record<string, string> | undefined {
+  if (!mounts) return mounts;
+  const out: Record<string, string> = {};
+  for (const [prefix, dir] of Object.entries(mounts)) {
+    if (typeof dir !== "string") {
+      throw new Error(
+        `[aio] ${label}[${JSON.stringify(prefix)}] is ${
+          JSON.stringify(dir)
+        } — not a directory path. Map each URL prefix to a directory: ` +
+          `${label}: { "/media": "./media" }`,
+      );
+    }
+    if (dir.trim() === "") {
+      warn(
+        `${label}[${JSON.stringify(prefix)}] is ${
+          JSON.stringify(dir)
+        } — an empty path would serve the whole working directory, so ` +
+          `NOTHING is served there. Name the directory: ` +
+          `${label}: { "/media": "./media" }`,
+      );
+      continue;
+    }
+    out[prefix.startsWith("/") ? prefix : `/${prefix}`] = dir;
+  }
+  return out;
 }
 
 /** The `assets` mounts the server serves: deno.json's, under

@@ -20,9 +20,10 @@ export type Rect = { x: number; y: number; width: number; height: number };
 // So each is SELF-CONTAINED: it calls no other function of this module (the
 // minifier renames them) and declares no named function inside (keepNames
 // wraps one in a global neither process has); the emitter binds each to its
-// name (`const windowRect = ` and then its source). Kept whole on its
-// screen is `Math.max(lo, Math.min(v, lo + Math.max(0, span - n)))`: `v`
-// inside `[lo, lo + span - n]`, `lo` when wider than the screen. Pinned by
+// name (`const windowRect = ` and then its source). Kept whole inside its
+// screen's margin is `Math.max(lo, Math.min(v, lo + Math.max(0, span - n)))`
+// with `lo`/`span` the area EDGE_MARGIN inside it: `v` inside
+// `[lo, lo + span - n]`, `lo` when wider. Pinned by
 // tests/emitted-source-minified.test.ts.
 
 /** A window's size, and its position when one was saved. */
@@ -66,89 +67,127 @@ export function boundsFromState(
   return { width: dw, height: dh, maximized: false };
 }
 
+/** How far inside its screen's work area every window aio places stays, on
+ *  each side (logical pixels; less on a screen under 8× that).
+ *
+ *  A window manager draws its FRAME outside the rect a client asks for:
+ *  muffin (Cinnamon) adds an invisible 10 px resize border and a 37 px title
+ *  bar, so a window placed at x = 0 has its frame at x = -10, y = -45; a
+ *  frameless Electron window grows by its own shadow edge instead (-16, -10;
+ *  32 below). Measured on the GPU lab (scripts/gpu-lab.sh). An NVIDIA X
+ *  driver (595, 610) handed that off-screen frame faults (Xid 69, 2D engine,
+ *  destination X = -10) and 595 then takes Xorg — the whole desktop — down
+ *  (feedback/critical.md). aio does not rely on a driver or a window manager
+ *  to bounds-check: nothing it places reaches the edge. 64 covers the largest
+ *  measured overhang (45) with room for a taller title bar. The functions
+ *  below carry it as a literal (they are emitted as their own source);
+ *  tests/window-place.test.ts pins the two together. */
+export const EDGE_MARGIN = 64;
+
 /** Where the window opens, and on which screen. A saved position inside a
  *  screen is kept; one that is not (a display gone, or smaller now) moves
- *  into the screen it overlaps most — the first when it overlaps none — and
- *  a window larger than that screen sits at its top-left (the title bar is
- *  what must stay reachable). No saved position: centred on the primary,
- *  kept inside it the same way. No screens: the primary alone. Pure and
- *  self-contained: the Electron main script runs this very source. */
+ *  into the screen it overlaps most — the first when it overlaps none. No
+ *  saved position: centred on the primary. No screens: the primary alone.
+ *  Whatever it was, the result lies {@linkcode EDGE_MARGIN} inside the
+ *  screen's work area on every side, in whole pixels — a window larger than
+ *  that is made smaller, and `fills` says so (the window opens maximized:
+ *  what a window as big as the screen was). A size or position that is not
+ *  a finite number is no value. Pure and self-contained: the Electron main
+ *  script runs this very source. */
 export function windowRect(
   b: Bounds,
   screens: Rect[],
   primary: Rect,
-): Rect & { screen: Rect } {
-  const w = b.width, h = b.height;
-  if (typeof b.x !== "number" || typeof b.y !== "number") {
-    const s = primary;
-    return {
-      x: Math.max(
-        s.x,
-        Math.min(
-          s.x + Math.floor((s.width - w) / 2),
-          s.x + Math.max(0, s.width - w),
-        ),
-      ),
-      y: Math.max(
-        s.y,
-        Math.min(
-          s.y + Math.floor((s.height - h) / 2),
-          s.y + Math.max(0, s.height - h),
-        ),
-      ),
-      width: w,
-      height: h,
-      screen: s,
-    };
-  }
-  const x = b.x, y = b.y;
+): Rect & { screen: Rect; fills: boolean } {
+  // Number.isFinite is false for anything not a number (no helper function:
+  // see the note above the module's functions).
+  const w0 = Number.isFinite(b.width) && b.width >= 1
+    ? Math.round(b.width)
+    : 800;
+  const h0 = Number.isFinite(b.height) && b.height >= 1
+    ? Math.round(b.height)
+    : 600;
+  const placed = Number.isFinite(b.x) && Number.isFinite(b.y);
   const all = screens.length ? screens : [primary];
-  for (const s of all) {
-    if (
-      x >= s.x && y >= s.y && x + w <= s.x + s.width &&
-      y + h <= s.y + s.height
-    ) return { x, y, width: w, height: h, screen: s };
-  }
-  let s = all[0]!, best = -1;
-  for (const k of all) {
-    const ix = Math.max(0, Math.min(x + w, k.x + k.width) - Math.max(x, k.x));
-    const iy = Math.max(0, Math.min(y + h, k.y + k.height) - Math.max(y, k.y));
-    if (ix * iy > best) {
-      best = ix * iy;
-      s = k;
+  let s = primary;
+  if (placed) {
+    const x = b.x!, y = b.y!;
+    let found = false;
+    for (const k of all) {
+      if (
+        x >= k.x && y >= k.y && x + w0 <= k.x + k.width &&
+        y + h0 <= k.y + k.height
+      ) {
+        s = k;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      let best = -1;
+      s = all[0]!;
+      for (const k of all) {
+        const ix = Math.max(
+          0,
+          Math.min(x + w0, k.x + k.width) - Math.max(x, k.x),
+        );
+        const iy = Math.max(
+          0,
+          Math.min(y + h0, k.y + k.height) - Math.max(y, k.y),
+        );
+        if (ix * iy > best) {
+          best = ix * iy;
+          s = k;
+        }
+      }
     }
   }
+  // EDGE_MARGIN, as a literal (this function is emitted as its own source).
+  const mx = Math.min(64, Math.floor(s.width / 8));
+  const my = Math.min(64, Math.floor(s.height / 8));
+  const iw = Math.max(1, s.width - 2 * mx), ih = Math.max(1, s.height - 2 * my);
+  const w = Math.min(w0, iw), h = Math.min(h0, ih);
+  const lx = s.x + mx, ly = s.y + my;
   return {
-    x: Math.max(s.x, Math.min(x, s.x + Math.max(0, s.width - w))),
-    y: Math.max(s.y, Math.min(y, s.y + Math.max(0, s.height - h))),
+    x: placed
+      ? Math.max(lx, Math.min(Math.round(b.x!), lx + iw - w))
+      : lx + Math.floor((iw - w) / 2),
+    y: placed
+      ? Math.max(ly, Math.min(Math.round(b.y!), ly + ih - h))
+      : ly + Math.floor((ih - h) / 2),
     width: w,
     height: h,
     screen: s,
+    fills: w0 >= iw && h0 >= ih,
   };
 }
 
 /** The top-left of a `w`×`h` window centred on another: the splash, the
  *  download window and the question on the app's window (`windowRect`),
- *  kept inside that window's screen. Pure and self-contained. */
+ *  kept {@linkcode EDGE_MARGIN} inside that window's screen (one wider than
+ *  that sits at the margin). Pure and self-contained. */
 export function centredOn(
   r: Rect & { screen: Rect },
   w: number,
   h: number,
 ): { x: number; y: number } {
   const s = r.screen;
+  // EDGE_MARGIN, as a literal (this function is emitted as its own source).
+  const mx = Math.min(64, Math.floor(s.width / 8));
+  const my = Math.min(64, Math.floor(s.height / 8));
   return {
     x: Math.max(
-      s.x,
+      s.x + mx,
       Math.min(
         Math.round(r.x + r.width / 2 - w / 2),
-        s.x + Math.max(0, s.width - w),
+        s.x + mx + Math.max(0, s.width - 2 * mx - w),
       ),
     ),
     y: Math.max(
-      s.y,
+      s.y + my,
       Math.min(
         Math.round(r.y + r.height / 2 - h / 2),
-        s.y + Math.max(0, s.height - h),
+        s.y + my + Math.max(0, s.height - 2 * my - h),
       ),
     ),
   };

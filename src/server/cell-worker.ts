@@ -13,7 +13,7 @@
 // ordering guarantee for async methods, and there still isn't.
 
 import type { CellFieldFilter } from "../state/cell-types.ts";
-import { noteScheduleOwner } from "../state/schedule.ts";
+import { noteScheduleOwner, PERMANENT_REFUSAL } from "../state/schedule.ts";
 import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import {
@@ -66,10 +66,13 @@ export function _workerCrash(
       }s: a crash loop — respawn stopped)`;
     }
   }
-  return {
-    err: new Error(`[aio] cell worker "${name}" crashed: ${why}${tail}`),
-    respawn,
-  };
+  const err = new Error(`[aio] cell worker "${name}" crashed: ${why}${tail}`);
+  // No respawn: the calls this crash rejects are as permanent as every later
+  // one (`closedWorkerCall`). Unmarked, a schedule tick in flight at the crash
+  // logged "dispatch failed" before the next tick said "stopped" — two errors
+  // where the schedule promises one (seen on a slow machine).
+  if (!respawn) Object.assign(err, { [PERMANENT_REFUSAL]: true });
+  return { err, respawn };
 }
 
 /** The live hosted workers' crash doors, by cell — for `crashWorker`. */
@@ -166,6 +169,9 @@ export type CellWorker = {
   terminate(reason: string): void;
 };
 
+/** `cell\0type` pairs whose drop by a closed worker cell was already said. */
+const _droppedSaid = new Set<string>();
+
 /** How a CLOSED worker cell answers a call — by name, never applied. Module
  *  level and plain-data in: a closed app's cells keep answering this way after
  *  the app is released (`_tombstoneCells`), holding nothing of the worker.
@@ -191,8 +197,28 @@ export function closedWorkerCall(
   // tick. Once a worker cell's ticks reached its worker, every clean stop of
   // an app polling one printed that error from inside its own shutdown. A
   // crash keeps no code: it is not a shutdown.
+  // A DEAD cell's drop is said once per action type, as the main loop's own
+  // "dispatch after close()" is: a fire-and-forget caller never sees the
+  // rejection (the route's B-4 guard), so without this line it was silent. A
+  // plain close is shutdown — schedules still tick into it until they stop,
+  // and a clean stop must not print — so that one stays at debug.
+  const said = `${name}\0${action.type}`;
+  if (crash === null) {
+    log.debug(`cell worker "${name}" is closed — '${action.type}' dropped`);
+  } else if (!_droppedSaid.has(said)) {
+    _droppedSaid.add(said);
+    log.warn(
+      "cell-worker",
+      `${crash} — '${action.type}' dropped, not applied (further drops of ` +
+        `this type suppressed)`,
+    );
+  }
   if (crash === null) {
     (err as Error & { code?: string }).code = "DISPATCH_CLOSED";
+  } else {
+    // Dead for the life of the process: a schedule polling it stops with one
+    // error instead of one per tick (schedule.ts `safeDispatch`).
+    (err as Error & { [PERMANENT_REFUSAL]?: true })[PERMANENT_REFUSAL] = true;
   }
   // An ASYNC method's caller awaits the REGISTRY promise (`_callId`), not
   // this one — so rejecting only the transport left that caller hanging
@@ -681,6 +707,8 @@ export function createCellWorker(
         // Deadline-bounded like the main isolate's own drain (shutdown.ts): a
         // method that ignores its signal cannot hold the process open.
         let t: ReturnType<typeof setTimeout> | undefined;
+        let done = false;
+        void acked.then(() => done = true);
         await Promise.race([
           acked,
           // aiol-ok: shutdown's drain deadline — a bare timer racing the ack
@@ -688,6 +716,30 @@ export function createCellWorker(
           new Promise<void>((r) => t = setTimeout(r, WORKER_CLOSE_DEADLINE_MS)),
         ]);
         if (t !== undefined) clearTimeout(t);
+        if (!done) {
+          // The worker's own drain is bounded under this deadline
+          // (WORKER_CLOSE_DRAIN_MS), so no ack means its loop never ran the
+          // close: the thread is inside synchronous code. Deno's terminate() does not stop that, so the
+          // thread — and the process, when aio does not own it (libraryMode,
+          // `testServer()`, an embedder) — lives until the code returns. aio
+          // cannot end a process it does not own; a process it owns exits at
+          // the end of its own shutdown as always.
+          const busy = [
+            ...new Set([...inflight.values()].map((e) => e.action.type)),
+          ];
+          log.warn(
+            "cell-worker",
+            `⚠ ${name}: the worker did not finish closing within ` +
+              `${WORKER_CLOSE_DEADLINE_MS}ms — its thread is stuck in ` +
+              `synchronous code (a loop, a *Sync or FFI call)${
+                busy.length ? ` in ${busy.join(", ")}` : ""
+              }. Deno cannot stop a busy thread: it keeps running, and keeps ` +
+              `this process alive, until that code returns. Its writes up to ` +
+              `now are home; yield inside long work (await between chunks) ` +
+              `so a close can stop it. A host that owns this process can end ` +
+              `it (Deno.exit) once close() resolves.`,
+          );
+        }
       } catch { /* already gone */ }
       // A clean close is a shutdown: DISPATCH_CLOSED, which a schedule stops
       // on quietly (see `closedWorkerCall`). Code-less, a call still running

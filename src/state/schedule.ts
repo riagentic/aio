@@ -13,7 +13,7 @@ import { log } from "../diagnostics/logger-api.ts";
 import { isDevMode } from "./dev-flag.ts";
 import { nearestOf } from "./cell-helpers.ts";
 import { callTimeoutFor, registerCall, resolveCall } from "./cell-impl.ts";
-import { pendingCount } from "../protocol/pending-calls.ts";
+import { onPendingChange, pendingCount } from "../protocol/pending-calls.ts";
 import { randomUuid } from "../rand.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -150,6 +150,30 @@ function describeValue(v: unknown): string {
 /** The characters a schedule id may hold — ONE home, shared by the config
  *  validator and the runtime's own `validateId`. */
 export const VALID_SCHEDULE_ID = /^[\w\-:.]+$/;
+
+/** Marks a refusal that will repeat for the life of the process — a worker
+ *  cell whose thread died for good (cell-worker.ts `closedWorkerCall`). A
+ *  repeating schedule that meets one stops with ONE error instead of logging
+ *  the same refusal on every tick forever (20 lines a second at `every: 50`).
+ *  @internal */
+export const PERMANENT_REFUSAL: unique symbol = Symbol.for(
+  "aio.permanentRefusal",
+);
+
+/** `e`, or an error it wraps (`AioError.original`, `cause`: what a reduce
+ *  threw arrives wrapped), is a `PERMANENT_REFUSAL`. */
+function isPermanentRefusal(e: unknown): boolean {
+  for (let x = e, depth = 0; x && depth < 8; depth++) {
+    const o = x as {
+      [PERMANENT_REFUSAL]?: unknown;
+      original?: unknown;
+      cause?: unknown;
+    };
+    if (o[PERMANENT_REFUSAL] === true) return true;
+    x = o.original ?? o.cause;
+  }
+  return false;
+}
 
 export function validateSchedules(defs: readonly unknown[]): void {
   // Not an array: `schedules: {}` has no `length`, so a call site guarding on
@@ -1548,6 +1572,15 @@ export function createScheduleManager(
         log.debug(`schedule: '${id}' dropped — the dispatch loop is closed`);
         cancelTimer(id);
         return;
+      } else if (
+        isPermanentRefusal(e)
+      ) {
+        // Every later tick would be refused the same way: say it once, stop.
+        log.error(
+          `schedule: '${id}' stopped — its target can never run again: ${e}`,
+        );
+        cancelTimer(id);
+        return;
       }
       if (!paused) log.error(`schedule: dispatch '${id}' failed: ${e}`);
       if (kind === "every" || kind === "cron") {
@@ -1648,17 +1681,28 @@ export function createScheduleManager(
     afterDispatch: (id: string, release: () => void) => void;
   } {
     const p = action.payload;
-    // `_callId` rides the framework's own `{ args }` envelope. A payload that
-    // is not a plain object is not a method call at all — nothing to track.
+    // `_callId` rides the framework's own `{ args }` envelope, which a
+    // hand-written payload that is not a plain object (`payload: 5`) cannot
+    // carry. Releasing at the dispatch's settle — the async method's first
+    // `await` — let every tick run on top of the last; such a tick holds the
+    // guard until no call of its method is in flight.
     if (
       p !== undefined &&
       (p === null || typeof p !== "object" || Array.isArray(p))
     ) {
+      let off = (): void => {};
       return {
         action,
         refuse: () => {},
-        drop: () => {},
-        afterDispatch: (_id, release) => release(),
+        drop: () => off(),
+        afterDispatch: (_id, release) => {
+          if (pendingCount(action.type) === 0) return release();
+          off = onPendingChange((key, n) => {
+            if (key !== action.type || n !== 0) return;
+            off();
+            release();
+          });
+        },
       };
     }
     const callId = randomUuid();

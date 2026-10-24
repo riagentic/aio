@@ -8,6 +8,7 @@ import { buildAll } from "../src/build-all.ts";
 import {
   applicationIdChangeNotes,
   type BuildManifest,
+  shipOutputEntries,
   strayOutEntries,
   versionRegressionNote,
 } from "../src/build/build-manifest.ts";
@@ -44,6 +45,26 @@ Deno.test("strayOutEntries: what no build put there, and nothing else", () => {
     ),
     ["a.md", "export"],
   );
+});
+
+Deno.test("strayOutEntries: what `aio ship` wrote beside the release is ship output, not a stray", () => {
+  const m = prev("0.1.1", {
+    targets: [{ target: "cli", artifacts: [{ file: "notes-0.1.1" }] }],
+  });
+  const names = [
+    "manifest.json",
+    "notes-0.1.1",
+    "notes-0.1.1.ship.json",
+    "linux-x86_64.json",
+    "other.ship.json",
+  ];
+  assertEquals(strayOutEntries(m, names, keepInDistStaging), [
+    "other.ship.json",
+  ]);
+  assertEquals(shipOutputEntries(m, names), [
+    "linux-x86_64.json",
+    "notes-0.1.1.ship.json",
+  ]);
 });
 
 Deno.test("applicationIdChangeNotes: a changed derived id names the pin", () => {

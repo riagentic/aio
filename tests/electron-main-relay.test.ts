@@ -157,6 +157,7 @@ module.exports = {
     on: (e, fn) => { (appH[e] = appH[e] || []).push(fn); if (e === 'ready') setTimeout(fn, 0); },
     getPath: () => process.env.AIO_STUB_DIR,
     commandLine: { appendSwitch: () => {} },
+    setDesktopName: () => {},
     quit: () => {},
     name: 'stub',
     whenReady: () => new Promise((r) => setTimeout(r, 0)),
@@ -1337,7 +1338,8 @@ Deno.test("electron aio://: a route response streams through the socket, headers
       );
 
       const r = await main.proto("aio://app/nft-image/abc");
-      assertEquals(r.status, 200);
+      // A 502 carries the relay's own sentence (unreachable, or truncated).
+      assertEquals(r.status, 200, new TextDecoder().decode(r.bytes));
       assertEquals(r.headers["content-type"], "image/png");
       assertEquals(
         r.headers["x-content-type-options"],

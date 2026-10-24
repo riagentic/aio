@@ -14,6 +14,7 @@ import {
   slowStartReason,
   startWaitMs,
 } from "../src/am/am-cmd-process.ts";
+import { FETCH_STALL_MS, fetchStallNote } from "../src/am/am-cmd-start.ts";
 import { childEnv, makeApp } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
@@ -181,4 +182,21 @@ Deno.test({
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },
+});
+
+Deno.test("fetchStallNote: a still fetch line names both readings, only after the stall", () => {
+  const why = slowStartReason("Download https://jsr.io/x/meta.json");
+  assertEquals(fetchStallNote(why, FETCH_STALL_MS - 1), null);
+  const note = fetchStallNote(why, FETCH_STALL_MS);
+  assertEquals(note?.includes("still coming"), true, String(note));
+  assertEquals(note?.includes("fetch is done"), true, String(note));
+  // Not a Deno fetch (the Electron download prints its own progress).
+  assertEquals(
+    fetchStallNote(
+      "first run: the app is downloading the Electron runtime",
+      1e9,
+    ),
+    null,
+  );
+  assertEquals(fetchStallNote(null, 1e9), null);
 });

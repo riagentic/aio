@@ -7,6 +7,8 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { dirname, join, toFileUrl } from "@std/path";
 import {
+  alignShortcutAumid,
+  appUserModelId,
   ensureSfxShortcut,
   LNK_REFUSED,
   SFX_SHORTCUT_RECORD,
@@ -623,6 +625,98 @@ Deno.test({
       });
       assertEquals(lnk, sfxShortcutPaths(install, appData, "My App").lnk);
       assert(await exists(lnk!));
+    } finally {
+      await dropTempDir(tmp);
+    }
+  },
+});
+
+Deno.test("appUserModelId: the app and the one-click .exe give one title the same id (shortcut-names.json)", async () => {
+  const ids: [string, string][] = JSON.parse(
+    await Deno.readTextFile(join(windowsSfxStubDir(), "shortcut-names.json")),
+  ).ids;
+  assert(ids.length > 5);
+  for (const [title, id] of ids) assertEquals(appUserModelId(title), id, title);
+});
+
+// The window runs under an AppUserModelID (its title); a Start-menu shortcut
+// without the same one is another app to the shell. Measured on Windows 11
+// (2026-10-24): the running window's taskbar button read "Electron - 1
+// running window" — and a pin of it starts bare Electron; with the id on the
+// shortcut, "<title> - 1 running window".
+Deno.test("alignShortcutAumid: the recorded shortcut gets the window's id; nothing else is touched", async () => {
+  const tmp = await tempDir("sfx-aumid-");
+  try {
+    const install = join(tmp, "aio-sfx", "my-app", "win-x64");
+    await Deno.mkdir(install, { recursive: true });
+    const seen: { lnk: string; o: unknown }[] = [];
+    const link = ((lnk: string, o: unknown) => (
+      seen.push({ lnk, o }), { before: "", saved: true }
+    )) as never;
+    const align = (title: string | undefined, os = "windows") =>
+      alignShortcutAumid({ install, title, os, appData: tmp, link });
+    // Off Windows, no title, or no shortcut there: nothing.
+    assertEquals(align("My App", "linux"), "kept");
+    assertEquals(align("  \n "), "kept");
+    assertEquals(align("My App"), "kept");
+    assertEquals(seen, []);
+    // The shortcut where the `.exe` puts it.
+    const { lnk } = sfxShortcutPaths(install, tmp, "My App");
+    await Deno.mkdir(dirname(lnk), { recursive: true });
+    await Deno.writeTextFile(lnk, "");
+    assertEquals(align("My\tApp "), "kept", "named after another title");
+    assertEquals(align("My App"), "set");
+    assertEquals(seen, [{ lnk, o: { load: true, aumid: "My App" } }]);
+    // The one on record wins over the default place.
+    const moved = join(tmp, "elsewhere.lnk");
+    await Deno.writeTextFile(moved, "");
+    await Deno.writeTextFile(install + SFX_SHORTCUT_RECORD, `${moved}\n`);
+    assertEquals(align("My App"), "set");
+    assertEquals(seen[1]!.lnk, moved);
+    // A failure is said, never thrown.
+    const broken = alignShortcutAumid({
+      install,
+      title: "My App",
+      os: "windows",
+      link: (() => {
+        throw new Error("Load failed (0x80070002)");
+      }) as never,
+    });
+    assertEquals(broken, `${moved}: Load failed (0x80070002)`);
+    // One id, the window's: mainScriptAumid's rule.
+    assertEquals(appUserModelId(" a\u0001b "), "a b");
+    assertEquals(appUserModelId("x".repeat(400)).length, 128);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test({
+  name:
+    "Windows: a shortcut written without an AppUserModelID is given the window's, keeping where it points",
+  ignore: Deno.build.os !== "windows",
+  async fn() {
+    const tmp = await tempDir("sfx-aumid-real-");
+    try {
+      const install = join(tmp, "aio-sfx", "my-app", "win-x64");
+      await Deno.mkdir(install, { recursive: true });
+      const lnk = join(tmp, "Start", "My App.lnk");
+      await Deno.mkdir(dirname(lnk));
+      writeLnk(lnk, join(install, "my-app.exe"), install);
+      await Deno.writeTextFile(install + SFX_SHORTCUT_RECORD, `${lnk}\n`);
+      const align = () => alignShortcutAumid({ install, title: "My App" });
+      assertEquals(align(), "set");
+      // Read back by the shell: the second look finds it already there.
+      assertEquals(align(), "kept");
+      assertEquals(await readLnk(lnk), {
+        target: join(install, "my-app.exe"),
+        dir: install,
+      });
+      assertEquals(
+        alignShortcutAumid({ install, title: "Renamed" }),
+        "set",
+        "a new title is a new id",
+      );
     } finally {
       await dropTempDir(tmp);
     }

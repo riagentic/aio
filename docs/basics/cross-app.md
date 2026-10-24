@@ -102,12 +102,22 @@ if (p) {
   rejects at once and is **never sent later**: a service answer (a translation,
   a price) is worth having now or not at all. `peer(id, { offline: "queue" })`
   keeps `connectCli`'s hold-and-replay for user intent.
-- `token` (its auth), `readyTimeoutMs` (default 5 s — a wrong token or address
-  throws, never hangs), `ackTimeoutMs` (`0` for long jobs) as `connectCli`.
+- `token` (its auth), `readyTimeoutMs` (default 5 s — a wrong address throws,
+  never hangs; a token the app refuses throws at once, with its status),
+  `ackTimeoutMs` (`0` for long jobs) as `connectCli`. For a `stream()` every
+  piece restarts that clock: it bounds the silence, not the length of the
+  answer.
+- **Another `--instance`.** An appId is looked up in this app's own instance
+  scope: one started with `--instance=agent1` does not see a service running as
+  the default instance (`null`, "not running"). `peer(id, { instance: null })`
+  looks in the default scope, `peer(id, { instance: "svc1" })` in that
+  instance's. An identity (`as`) is proven within one scope only — across scopes
+  it throws; give the service a token instead.
 - **`onStatus(up => …)`** fires `true` when the connection delivers the other
   app's state, `false` when it drops (never for your own `close()`) — the moment
-  to re-register with a service that restarted on the same address. One that
-  comes back on a NEW port is not followed: open a new `peer()`.
+  to re-register with a service that restarted. A restarted app usually binds a
+  new port; a `peer(appId)` re-reads the lock files on every reconnect and
+  follows it (same bind address). A URL target stays on its URL.
 - `state`, `subscribe`, `connected`, `close()` (or `using p = …`).
 
 #### Results in pieces — `stream` + `emitChunk`
@@ -180,8 +190,10 @@ await (await p.blob(img)).pipeTo((await Deno.create("cat.png")).writable);
   route the app wrote
   ([the recipe](../persistence/big-data.md#tier-3--binaries-appblobs)); reads
   follow the app's own auth.
-- Over HTTP on the same port — not for an app reached over its local socket
-  alone.
+- Over HTTP on the same port — or, for an app with no TCP port (the Electron
+  default), its local HTTP socket, with the same proof. Not on Windows there (a
+  named pipe), nor for a production app that serves no HTTP at all (no
+  `routes`): start it with a port.
 
 #### Which app is calling — `resolvePeer`
 
@@ -219,9 +231,13 @@ From then on that connection IS that user: `access` rules, `visible.forUser` and
 - **Who sends it:** `peer(appId)` from inside a running aio app, as that app
   (two apps in one process: `{ as: "<appId>" }`). A URL target, a plain script
   and `am` send none. With a `token`, none is sent either: the token decides.
-- **Loopback TCP only:** an app reached over its local socket alone, or bound to
-  a non-loopback address, sees no identity. Ask for one there with `{ as }` and
-  `peer()` throws, saying why — it is never dropped quietly.
+- **Loopback TCP or the local socket** (unix socket or Windows named pipe — the
+  Electron default): over the socket the proof is the connection's first frame,
+  judged once, and the connection is then that user, exactly as over TCP. A
+  refused proof fails `peer()` (and any call behind it) — it never falls back to
+  anonymous; a sealed prod Electron app refuses it, naming the lockdown. An app
+  bound to a non-loopback address sees no identity; `{ as }` there throws,
+  saying why — it is never dropped quietly.
 - Same-OS-user code is trusted by construction (it can read the app's data
   directly); this proves which app is calling, it does not wall one of your own
   programs off from another.

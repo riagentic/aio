@@ -34,20 +34,20 @@
       "It's $HOME `cmd` %PATH% & (x) ; 'q'"
     ],
     [
-      "Don\u2019t \u2018quote\u2019",
-      "Don\u2019t \u2018quote\u2019"
+      "Don’t ‘quote’",
+      "Don’t ‘quote’"
     ],
     [
-      "\u00dcn\u00ef \u2014 \u65e5\u672c\u8a9e \u2603",
-      "\u00dcn\u00ef \u2014 \u65e5\u672c\u8a9e \u2603"
+      "Ünï — 日本語 ☃",
+      "Ünï — 日本語 ☃"
     ],
     [
-      "Rocket \ud83d\ude80 App",
-      "Rocket \ud83d\ude80 App"
+      "Rocket 🚀 App",
+      "Rocket 🚀 App"
     ],
     [
-      "\u007f del stays",
-      "\u007f del stays"
+      " del stays",
+      " del stays"
     ],
     [
       "?",
@@ -66,12 +66,59 @@
       ""
     ],
     [
-      "a\u00a0",
-      "a\u00a0"
+      "a ",
+      "a "
     ],
     [
       "CON",
       "CON"
+    ]
+  ],
+  "comment_ids": "App titles and the AppUserModelID each gives, shared by app_user_model_id (src/format.rs, the one-click .exe's shortcut) and appUserModelId (src/server/sfx-shortcut.ts, the app's window and shortcut).",
+  "ids": [
+    [
+      "My App",
+      "My App"
+    ],
+    [
+      "  padded\t",
+      "padded"
+    ],
+    [
+      "a\u0001b",
+      "a b"
+    ],
+    [
+      " nbsp　",
+      "nbsp"
+    ],
+    [
+      "﻿bom",
+      "bom"
+    ],
+    [
+      "tab\tinside",
+      "tab inside"
+    ],
+    [
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    ],
+    [
+      "Zürich Notes",
+      "Zürich Notes"
+    ],
+    [
+      "日本語アプリ",
+      "日本語アプリ"
+    ],
+    [
+      "",
+      ""
+    ],
+    [
+      "\n\r",
+      ""
     ]
   ]
 }

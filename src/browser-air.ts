@@ -198,7 +198,13 @@ export {
 export { renderToStream } from "./air/ssr-stream.ts";
 
 // ── Shared utilities (AIO-47) ──────────────────────────────────────
-export { msg, notify, own, schedule } from "./browser/browser-shared.ts";
+export {
+  appIcon,
+  msg,
+  notify,
+  own,
+  schedule,
+} from "./browser/browser-shared.ts";
 // `self("m")` is how a cell schedules its own method (docs/state/scheduling.md)
 // and a cell module is in the client graph, so the name has to resolve HERE —
 // mod.ts exporting it alone type-checked the doc example and then refused it at
@@ -223,7 +229,7 @@ export {
   type UntilOptions,
   UntilTimeoutError,
 } from "./state/async-helpers.ts";
-export { errorCode } from "./protocol/envelope.ts";
+export { errorCode, errorSummary } from "./protocol/envelope.ts";
 export { createSelector, type Selector } from "./selector.ts";
 export { authClient, createAuthClient } from "./browser/auth-client.ts";
 export {

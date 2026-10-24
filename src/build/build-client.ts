@@ -16,6 +16,7 @@ import {
   toolCacheDir,
   writeDefaultIcon,
 } from "./build-helpers.ts";
+import { APPIMAGE_EXTRACTED_PARENT } from "./build-electron.ts";
 import type { BuildConfig } from "./build-config.ts";
 import {
   electronMissingHint,
@@ -86,7 +87,7 @@ export async function buildClient(cfg: BuildConfig): Promise<void> {
   // AppRun — launches electron directly (no Deno binary)
   const appRun = `#!/bin/bash -p
 HERE="$(dirname "$(readlink -f "$0")")"
-exec "$HERE/electron/electron" "$HERE/main.cjs" "$@"
+${APPIMAGE_EXTRACTED_PARENT}exec "$HERE/electron/electron" "$HERE/main.cjs" "$@"
 `;
   await Deno.writeTextFile(join(appDir, "AppRun"), appRun);
   await chmodIfSupported(join(appDir, "AppRun"), 0o755);
@@ -110,11 +111,17 @@ exec "$HERE/electron/electron" "$HERE/main.cjs" "$@"
   }
 
   // .desktop file
+  // StartupWMClass: the window's own class (windowClassName), so a panel
+  // matches the window to this entry by either rule.
+  const { CLIENT_WINDOW_CLASS } = await import(
+    "../electron/electron-client-script.ts"
+  );
   const desktop = `[Desktop Entry]
 Type=Application
 Name=aio
 Exec=aio-client
 Icon=aio-client
+StartupWMClass=${CLIENT_WINDOW_CLASS}
 Categories=Utility;
 `;
   await Deno.writeTextFile(join(appDir, "aio-client.desktop"), desktop);

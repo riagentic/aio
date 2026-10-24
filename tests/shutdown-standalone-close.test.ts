@@ -136,12 +136,20 @@ Deno.test({
     // not wait for it. It stops on a flag the TEST flips once the claim is
     // made, so its timers and its call registration end inside the test.
     let stop = false;
+    // close() answers the caller at its deadline (failStuckCalls), so the
+    // caller's promise no longer tells when the BODY ended — this does.
+    let ended!: () => void;
+    const bodyEnded = new Promise<void>((r) => ended = r);
     const deaf = cell("sadeaf", {
       state: { chunks: [] as string[], status: "idle" } as Doc,
       methods: {
         async grind(s: Doc) {
-          while (!stop) await sleep(5);
-          s.status = "done";
+          try {
+            while (!stop) await sleep(5);
+            s.status = "done";
+          } finally {
+            ended();
+          }
         },
       },
     });
@@ -164,7 +172,8 @@ Deno.test({
         `close() waited ${elapsed}ms on a method that ignores its signal`,
       );
       stop = true;
-      await call; // the deaf method is the test's — it ends here
+      await call;
+      await bodyEnded; // the deaf method is the test's — it ends here
     } finally {
       sa._reset();
       storage.clear();

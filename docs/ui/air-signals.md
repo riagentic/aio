@@ -203,6 +203,10 @@ components; `computed()` is the right answer for a single derived value.
 
 ```ts
 function effect(fn: () => void | (() => void)): () => void;
+function effect(
+  fn: () => void | (() => void),
+  opts: { rerunOnSelfWrite?: boolean },
+): () => void;
 ```
 
 Run a function when its tracked signals change. Returns a dispose function.
@@ -227,6 +231,12 @@ dispose(); // stops tracking, runs cleanup
 - Runs immediately on creation.
 - Cleanup function (if returned) runs before each re-run and on dispose.
 - Auto-tracks: no dependency array.
+- A write the body makes to a signal it read does NOT re-run it, so
+  `log.set([...log.value, x.value])` cannot loop. Pass
+  `effect(fn, { rerunOnSelfWrite: true })` to re-run it after such a write
+  (Preact/Solid behaviour) — e.g. a clamp, `if (n.value > max) n.set(max)`. It
+  re-runs until its writes change nothing; one that never settles is stopped by
+  the flush guard (warned).
 
 ---
 

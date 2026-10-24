@@ -96,7 +96,7 @@ export {
  *  built from `windows-sfx-stub/` by the command in its README — update this
  *  line with every rebuild. */
 export const SFX_STUB_SHA256 =
-  "08cfb24b73a83a54201a38fd5a70f5780839c176968ce37d7c4fb7bcb90d8b9f";
+  "6ae21df0351152255c2a80298ccad075a40d7203271a31796e3886d423584f31";
 
 /** SHA-256 over the stub's SOURCES (`src/*.rs`, `Cargo.toml`, `Cargo.lock`) as
  *  they were when {@link SFX_STUB_SHA256} was built. Rebuilding needs Rust,
@@ -105,7 +105,7 @@ export const SFX_STUB_SHA256 =
  *  (`tests/build-windows-sfx-stub.test.ts` prints the value to put here). */
 // aio-ok: a test-only seam — the pin a gate without Rust compares the sources with.
 export const SFX_STUB_SOURCE_SHA256 =
-  "393d92e29dbe0b9353b38f58ff3e271ad9354cda92015a89332f71080cef6838";
+  "c6227c864a7580d507e9b284a7306e336d28df0e1fddaadcdfc7baea98f97286";
 
 /** The self-contained exe's file name — the zip's name with `.exe`, so the
  *  two Windows desktop artifacts sort together and neither is mistaken for

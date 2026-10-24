@@ -16,6 +16,8 @@ import { resolveSdk } from "./build/build-helpers.ts";
 import { resolveEntry } from "./build/build-config.ts";
 import { apkApplicationId } from "./build/build-android.ts";
 import { soleArtifact } from "./build/build-manifest.ts";
+import { type Device, parseDevices } from "./android-install.ts";
+import { devTarget } from "./build/android-devices.ts";
 
 const dec = new TextDecoder();
 
@@ -46,15 +48,22 @@ function freePort(): number {
   return port;
 }
 
-/** True once a booted, non-offline device is attached. */
-async function deviceReady(adb: string): Promise<boolean> {
-  const { out } = await run(adb, ["devices"]);
-  const online = out.split(/\r?\n/).slice(1).some((l) =>
-    /\tdevice$/.test(l.trim())
+/** The booted device to use, or null while none is (see `devTarget`). */
+async function deviceReady(adb: string): Promise<Device | null> {
+  const t = devTarget(
+    parseDevices((await run(adb, ["devices", "-l"])).out),
+    Deno.env.get("ANDROID_SERIAL") || undefined,
   );
-  if (!online) return false;
-  const boot = await run(adb, ["shell", "getprop", "sys.boot_completed"]);
-  return boot.out.trim() === "1";
+  if (!t) return null;
+  if ("error" in t) fail(t.error, t.hint);
+  const boot = await run(adb, [
+    "-s",
+    t.device.serial,
+    "shell",
+    "getprop",
+    "sys.boot_completed",
+  ]);
+  return boot.out.trim() === "1" ? t.device : null;
 }
 
 /** Spawn the emulator, capturing its output so a boot failure is visible
@@ -140,7 +149,8 @@ async function main(): Promise<void> {
   // 1) Boot the emulator early (slow) unless one is already running.
   await run(adb, ["start-server"]);
   let emu: ReturnType<typeof spawnEmulator> | undefined;
-  if (!(await deviceReady(adb))) {
+  let device = await deviceReady(adb);
+  if (!device) {
     console.log(
       `[dev:android] booting emulator "${avd}" — first boot can take a minute...`,
     );
@@ -153,7 +163,11 @@ async function main(): Promise<void> {
       "-no-snapshot-save",
     ]);
   } else {
-    console.log("[dev:android] using the already-running emulator");
+    console.log(
+      `[dev:android] using the attached ${
+        device.emulator ? "emulator" : "device"
+      } ${device.model || device.serial} (${device.serial})`,
+    );
   }
 
   // 2) Build the dev APK (in parallel with the emulator booting).
@@ -218,7 +232,7 @@ async function main(): Promise<void> {
   //    timeout with the emulator's own output — never hang silently.
   console.log("[dev:android] waiting for the emulator to finish booting...");
   const deadline = Date.now() + 180_000;
-  while (!(await deviceReady(adb))) {
+  while (!(device = await deviceReady(adb))) {
     if (emu?.exited() != null) {
       console.error(emu.log());
       try {
@@ -242,10 +256,22 @@ async function main(): Promise<void> {
   // Tunnel device localhost:PORT → host localhost:PORT (VPN/NAT-proof, and the
   // only thing that works on real USB devices). Retried once — the device is
   // freshly booted.
-  let rev = await run(adb, ["reverse", `tcp:${port}`, `tcp:${port}`]);
+  let rev = await run(adb, [
+    "-s",
+    device.serial,
+    "reverse",
+    `tcp:${port}`,
+    `tcp:${port}`,
+  ]);
   if (rev.code !== 0) {
     await new Promise((r) => setTimeout(r, 1000));
-    rev = await run(adb, ["reverse", `tcp:${port}`, `tcp:${port}`]);
+    rev = await run(adb, [
+      "-s",
+      device.serial,
+      "reverse",
+      `tcp:${port}`,
+      `tcp:${port}`,
+    ]);
   }
   if (rev.code !== 0) {
     console.error(rev.out + rev.err);
@@ -256,7 +282,7 @@ async function main(): Promise<void> {
   }
 
   console.log(`[dev:android] installing ${apk}...`);
-  const inst = await run(adb, ["install", "-r", apkPath]);
+  const inst = await run(adb, ["-s", device.serial, "install", "-r", apkPath]);
   if (inst.code !== 0) {
     console.error(inst.out + inst.err);
     try {
@@ -265,6 +291,8 @@ async function main(): Promise<void> {
     fail("adb install failed (see above)");
   }
   const start = await run(adb, [
+    "-s",
+    device.serial,
     "shell",
     "am",
     "start",

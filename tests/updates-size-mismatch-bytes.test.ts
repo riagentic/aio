@@ -54,3 +54,30 @@ Deno.test("updates: an oversize download names the exact promised byte count", a
     await dropTempDir(dir);
   }
 });
+
+Deno.test("updates: a size under 1 MB is said once, not twice", async () => {
+  const bytes = new Uint8Array(20743);
+  const port = freePort();
+  const server = Deno.serve(
+    { port, hostname: "127.0.0.1", onListen: () => {} },
+    () => new Response(bytes),
+  );
+  const dir = await tempDir("aio-upd-size-bytes-");
+  try {
+    const r = await downloadArtifact({
+      url: `http://127.0.0.1:${port}/app`,
+      dest: join(dir, "app.new"),
+      expectSha256: "0".repeat(64),
+      expectSize: bytes.byteLength - 1,
+    });
+    assert(!r.ok);
+    assertStringIncludes(
+      r.error,
+      `more than the ${bytes.byteLength - 1} bytes the manifest`,
+    );
+    assert(!r.error.includes(`(${bytes.byteLength - 1} bytes)`), r.error);
+  } finally {
+    await server.shutdown();
+    await dropTempDir(dir);
+  }
+});

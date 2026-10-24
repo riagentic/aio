@@ -100,3 +100,24 @@ Deno.test({
     }
   },
 });
+
+// A fresh `--template=cli` scaffold has no UI entry, and its `check` task ran
+// `am check` anyway — which printed "NOTHING CHECKED" on every run. `am check`
+// belongs in the task exactly when the scaffold writes the entry it checks.
+Deno.test("scaffold: `check` runs `am check` exactly when there is a UI entry", () => {
+  let checked = 0;
+  for (const t of TEMPLATES) {
+    for (const target of TARGETS) {
+      const f = scaffold(`p-${t}`, t, true, target);
+      const check = String(JSON.parse(f["deno.json"]!).tasks.check);
+      assertEquals(
+        /am\.ts check\b/.test(check),
+        "src/App.tsx" in f,
+        `${t}/${target}: ${check}`,
+      );
+      checked++;
+    }
+  }
+  assertEquals(checked, TEMPLATES.length * TARGETS.length);
+  assert(checked > 0, "nothing to check");
+});

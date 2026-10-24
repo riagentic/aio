@@ -11,7 +11,7 @@
 import { createDB } from "../db/async-db.ts";
 import { sqliteKv } from "./skv-sqlite.ts";
 import { migrateSchema } from "./persist-schema.ts";
-import { storedLayoutKey } from "./boot-restore.ts";
+import { storedLayoutKey, storedPersistKeyKey } from "./boot-restore.ts";
 
 /** The multi-layout row separator (skv-sqlite.ts). */
 const SEP = "\x1f";
@@ -56,9 +56,13 @@ export async function readStoredState(
     );
     if (!hasKv.rows[0]?.n) return null;
     const { rows } = await db.query<{ k: string }>(`SELECT k FROM aio_kv`);
-    const key = _storedPersistKey(rows.map((r) => r.k));
-    if (key === null) return null;
     const kv = sqliteKv(db);
+    // The key this app's own saves stamped beats any guess from the rows.
+    const stamped = await kv.get<string>(storedPersistKeyKey(appId));
+    const key = typeof stamped === "string"
+      ? stamped
+      : _storedPersistKey(rows.map((r) => r.k));
+    if (key === null) return null;
     const single = await kv.get<Record<string, unknown>>(key);
     const multi = await kv.getMulti<Record<string, unknown>>(key);
     // Key order aside (one blob vs rows ordered by key), the same document

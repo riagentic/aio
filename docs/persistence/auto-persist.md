@@ -52,8 +52,9 @@ persist: { include: ["count", "name"] },
 persist: { exclude: ["cache", "htmlCache"] },
 
 // A `*` segment is any key in that place: `busy` under every field,
-// and under every entry of the `feeds` map
-persist: { exclude: ["*.busy", "feeds.*.busy"] },
+// under every entry of the `feeds` map, and under every element of the
+// `jobs` list (an array's index is the key in its place)
+persist: { exclude: ["*.busy", "feeds.*.busy", "jobs.*.busy"] },
 ```
 
 The `*` is a whole path segment, never a pattern inside a name, and it is

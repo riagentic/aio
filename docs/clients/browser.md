@@ -38,8 +38,10 @@ export default function App() {
   automatically and sent to the server as a `subs` frame
   (`{"subs":["path1",…]}`) so only relevant deltas are broadcast back
 - `send(action)` — sends action to server via WebSocket. Actions sent before the
-  initial connect are queued and flushed. Actions sent while disconnected are
-  **dropped** — a "Reconnecting..." indicator tells the user why
+  initial connect, or while disconnected, are queued in memory (up to 100, the
+  oldest dropped first) and replayed on reconnect — a "Reconnecting..."
+  indicator tells the user why nothing happened yet. `send` returns no outcome;
+  a cell method's promise does (see [Offline queue](#offline-queue))
 - **A connection that dies without a close event** (airplane mode, a sleeping
   device, a changed network) is noticed by the heartbeat: when pings this
   connection used to answer go unanswered for about 5 s and a plain HTTP request
@@ -80,11 +82,17 @@ Rejection happens on:
 
 - **Server reject** — the dispatch was refused (validation, routing guard,
   etc.). The promise rejects with the server's error message.
-- **Timeout** — 15 seconds elapse without an ack. The promise rejects with
-  `method not acknowledged in 15000ms — server overloaded or disconnected`.
+- **Timeout** — no ack within the server's method ceiling (`effectTimeoutMs`,
+  default 30 s, or that method's `perfBudget.methods[…].timeout`) plus a 5 s
+  grace for the ack's trip back — 35 s by default. The promise rejects with
+  `no response for 'cell:method' after 35000ms — the server never confirmed the
+  call: …`.
+  A ceiling of `0` waits indefinitely.
 - **Disconnect** — the WebSocket closes while the action is in flight. The
-  promise rejects with `connection lost`. (Fire-and-forget callers don't see
-  this because of the internal `.catch()`.)
+  promise rejects with `connection lost`, `errorCode(e) === "CONNECTION_LOST"`:
+  its fate is UNKNOWN (the server may have run it and lost only the ack), so
+  re-check state before retrying — it is not resent. (Fire-and-forget callers
+  don't see this because of the internal `.catch()`.)
 
 ## `useLocal<T>(initial)`
 
@@ -215,15 +223,17 @@ Rate limits (server-enforced, `wsLimits`):
 
 The client paces itself to the budget the server advertises in its hello: every
 frame the page writes (method calls, `send()`, sync ops, `serverFn`, forwarded
-logs) leaves through one writer held to 80% of `messagesPerSec`. A burst —
-`Promise.all` over 1000 `cell.method()` calls — queues and resolves late, never
-refused. A frame the server still drops over a per-second budget is answered
-with `retryAfterMs`; the client holds that call and re-sends it (up to 8 times,
-then the caller gets the server's refusal). A frame refused for what it is (too
-large, not allowed, or bigger than the whole `bytesPerSec` — no re-send could
-ever fit) rejects at once, without holding the calls behind it; a refused frame
-is not charged to the byte window. A server whose `maxMessageBytes` exceeds its
-`bytesPerSec` says so at startup.
+logs) leaves through one writer held to 80% of `messagesPerSec` and, by size, to
+80% of `bytesPerSec` (a frame larger than the writer's burst allowance waits for
+a full one and goes — slowed, never starved). A burst — `Promise.all` over 1000
+`cell.method()` calls — queues and resolves late, never refused. A frame the
+server still drops over a per-second budget is answered with `retryAfterMs`; the
+client holds that call and re-sends it (up to 8 times, then the caller gets the
+server's refusal). A frame refused for what it is (too large, not allowed, or
+bigger than the whole `bytesPerSec` — no re-send could ever fit) rejects at
+once, without holding the calls behind it; a refused frame is not charged to the
+byte window. A server whose `maxMessageBytes` exceeds its `bytesPerSec` says so
+at startup.
 
 A peer that ignores all of that — 50 dropped frames in a row — is closed with
 `1008` and its address refused (HTTP 429, `Retry-After`) for 5 s, doubling per
@@ -254,7 +264,7 @@ compression as WebSocket.
 
 ## UI state filtering
 
-Use cell-level `ui` config to control what the browser sees:
+Use the cell-level `visible` option to control what the browser sees:
 
 ```ts
 const myCell = cell("myCell", {
@@ -328,9 +338,9 @@ addressed by NAME, never a CSS selector. See
 [UI testing](../testing/ui-testing.md).
 
 ```sh
-am surface <clientIdx>                      # every component + triggerable element, by name
-am trigger <clientIdx> App:SubmitButton click       # drive it: the Component:name path + action
-am trigger <clientIdx> App:Name type "Alice"
+am surface                                  # every component + triggerable element, by name
+am trigger App:SubmitButton click           # drive it: the Component:name path + action
+am trigger App:Name type "Alice"
 ```
 
 **Actions:** `click`, `type`, `select`, `focus`, `blur`, `scroll`, `hover`,
@@ -349,8 +359,9 @@ Server sends **delta patches** (only changed keys). The browser merges patches
 and reuses object references for unchanged slices — `memo()` and selectors work
 correctly without extra wrappers.
 
-Full state is sent on first connect or when >50% of keys changed (configurable
-via `fullStateThreshold`). Deltas are computed one level deep per cell slice.
+Full state is sent on first connect, or when a patch's JSON would exceed half
+the size of the full state's JSON (configurable via `fullStateThreshold`, a byte
+ratio).
 
 The **Render Meter** tracks staleness against `renderBudget` and reports it to
 the server on a one-second heartbeat, which adapts the broadcast rate via
@@ -358,6 +369,6 @@ backpressure and lists the client in `/__aio/vitals`. See
 [Delta](../persistence/delta.md) for compression details and
 [Vitals](../debugging/vitals.md) for diagnostics.
 
-The CRDT sync engine (`sync: true` cells) is loaded on demand: the runtime
-imports it the first time a booted cell declares `sync`, and an app without a
-sync cell never requests it.
+The CRDT sync engine (`sync: true` cells) boots on demand: the runtime starts it
+the first time a booted cell declares `sync`, and an app without a sync cell
+never starts it. Its code is part of the one-file bundle either way.

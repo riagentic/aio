@@ -21,6 +21,8 @@ Deno.test("ws: the ordinary end of a session is not a fault", () => {
       "Connection reset by peer (os error 104)",
       "Broken pipe (os error 32)",
       "connection closed before message completed",
+      // Deno's WebSocket write to a vanished peer (a page reloading away)
+      "Failed to send frame",
     ]
   ) {
     assertEquals(isPeerGone(msg), true, `should be a disconnect: ${msg}`);

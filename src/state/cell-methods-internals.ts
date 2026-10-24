@@ -8,9 +8,15 @@ import {
   trackCall,
   trackPending,
 } from "./method-cancel.ts";
-import { _isTTPausedRefusal, markInflight } from "./dispatch.ts";
-import { isOwnEffect, type OwnEffect } from "./own.ts";
+import {
+  _isTTPausedRefusal,
+  flushUnflushedWrites,
+  markInflight,
+} from "./dispatch.ts";
+import type { OwnEffect } from "./own.ts";
 import { isNotifyEffect } from "./notify.ts";
+import { isAppIconEffect } from "./app-icon.ts";
+import { isFrameworkEffect } from "./route-effect.ts";
 import type { AsyncMethod, Method, Mutation, SyncMethod } from "./cell-impl.ts";
 import {
   applyMutations,
@@ -52,6 +58,8 @@ import {
   setQueueTail,
 } from "./method-policy.ts";
 import { isDeliberateRejection, rejectionLine } from "./method-rejection.ts";
+import { describeThrown, thrownText } from "../diagnostics/fmt.ts";
+import { runWithCallSignal } from "./call-signal.ts";
 
 // ── The effect channel: s.$do (alpha52) ────────────────────────────────
 
@@ -158,7 +166,7 @@ function refuseUncloneableEffect<T>(
         `the method (prod logs and drops it; dev and tests refuse it here). ` +
         `Effects — and a scheduled action's payload — must be plain data: no ` +
         `functions, class instances or DOM nodes. Original: ${
-          e instanceof Error ? e.message : String(e)
+          describeThrown(e)
         }`,
     );
   }
@@ -211,10 +219,10 @@ function toDoneEffect(
   hasMethod: (m: string) => boolean,
   knownMethods: () => string[],
 ): Effect {
-  if (!isScheduleEffect(v) && !isOwnEffect(v) && !isNotifyEffect(v)) {
+  if (!isFrameworkEffect(v)) {
     throw new Error(
       `[${cellName}] ${methodKey}(): s.$do(...) only takes effects ` +
-        `(schedule.* / own.* / notify()) — got ${
+        `(schedule.* / own.* / notify() / appIcon()) — got ${
           describeNonEffect(v)
         }. To run another ` +
         `method, call it directly (or schedule it: ` +
@@ -227,7 +235,7 @@ function toDoneEffect(
   // The public union names two of the three framework effects; the third
   // rides the same channel (route-effect.ts decides) and cannot be named here
   // without reshaping a frozen type. Nothing below applies to it.
-  if (isNotifyEffect(v)) return v as unknown as Effect;
+  if (isNotifyEffect(v) || isAppIconEffect(v)) return v as unknown as Effect;
   if (isScheduleEffect(v) && v.kind !== "cancel") {
     const action = resolveSelfAction(
       v.action,
@@ -357,7 +365,7 @@ export function classifyReturnedArray(
 ): "effects" | "value" {
   let effects = 0;
   for (const v of value) {
-    if (isScheduleEffect(v) || isOwnEffect(v) || isNotifyEffect(v)) effects++;
+    if (isFrameworkEffect(v)) effects++;
   }
   if (effects === 0) return "value";
   if (effects === value.length) return "effects";
@@ -579,7 +587,11 @@ export function buildMethodsReducer(
         // message read "[] method 'foo' …". The one diagnostic whose whole
         // job is to say WHICH cell was mis-transpiled did not say it.
         `[${prefix}] method '${key}' returned a Promise but was classified sync — ` +
-          `your build transpiled async functions. Wrap it: ` +
+          `it is not an \`async\` function, so it ran as a reducer and its ` +
+          `writes were discarded. If it returns a promise on purpose ` +
+          `(\`${key}(s) { return api.save(s.x) }\`), declare it \`async\` ` +
+          `and await the work. If it IS written \`async\`, your build ` +
+          `transpiled async functions — wrap it: ` +
           `${key}: markAsync(async (s) => {...})`,
       );
     }
@@ -604,7 +616,7 @@ export function buildMethodsReducer(
       return captured.length > 0 ? captured : undefined;
     }
     if (
-      isScheduleEffect(result) || isOwnEffect(result) || isNotifyEffect(result)
+      isFrameworkEffect(result)
     ) {
       refuseReturnedEffects(prefix, key);
       return [
@@ -1240,8 +1252,26 @@ export function buildMethodsExecutor(
             // Capture the write-set before flush clears it, then dispatch the
             // real atomic commit.
             const muts = batcher.pending().slice();
-            const pre = app.getState() as Record<string, unknown>;
-            batcher.flush();
+            // A new epoch starts at the state this write-set LANDS on: reads
+            // after `$commit` see it, and conflict detection is pinned to it.
+            // The dispatch loop says when, whether it applies inline or
+            // queued behind a drain we are running inside. Guessing it from
+            // identity (has the state object moved since the flush?) was
+            // wrong both ways: a write-set that changed nothing
+            // (`s.who = s.who`) left the object as it was, so the epoch stayed
+            // open and the next FOREIGN commit was adopted as our own — its
+            // write then passed the conflict check, a lost update; and a
+            // re-base on the next microtask took in whatever the loop had
+            // committed after ours.
+            if (muts.length > 0) {
+              rebasePre = app.getState() as Record<string, unknown>;
+            }
+            batcher.flush(() => {
+              const cur = app.getState() as Record<string, unknown>;
+              snap.s = cur;
+              origin = cur;
+              rebasePre = null;
+            });
             // What the method scheduled so far is published with what it
             // wrote so far — the same boundary.
             publishTxEffects();
@@ -1254,18 +1284,13 @@ export function buildMethodsExecutor(
               watch.reads.clear();
               watch.writes.clear();
             }
-            if (muts.length === 0) return;
-            // A new epoch starts here: reads after `$commit` see the committed
-            // state, and conflict detection is pinned to it.
-            rebasePre = pre;
-            if (!rebase() && snap.s) {
+            if (rebasePre !== null && snap.s) {
               // Our write-set is queued behind the dispatch loop we are inside.
               // Advance the LOCAL snapshot by the same mutations so reads see
-              // them NOW, without waiting for the round-trip; `rebase` swaps in
-              // the real committed objects on the next microtask (the loop is
-              // synchronous, so it has drained by then) — and `guardCommit`
-              // settles it too, so no commit point can ever validate against a
-              // half-published epoch.
+              // them NOW, without waiting for it to land; the landing swaps in
+              // the real committed objects (the loop is synchronous, so it
+              // has drained by the next microtask). `rebase` stays as the
+              // fallback for a dispatch that never reports one.
               const next = snapshotForRead(snap.s) as Record<string, unknown>;
               applyMutations(next, muts);
               snap.s = next;
@@ -1273,7 +1298,11 @@ export function buildMethodsExecutor(
             }
           }
           : undefined;
-        const live = () => app.getState() as Record<string, unknown>;
+        // Another call's pending writes commit before this call reads.
+        const live = () => {
+          flushUnflushedWrites(batcher.flush);
+          return app.getState() as Record<string, unknown>;
+        };
         // `s.$do(effect, ...)` — the effect channel (alpha52). Outside a
         // transaction it is dispatched IMMEDIATELY (not buffered to method
         // return): the effect rides the cell's `__effects` bridge in the same
@@ -1410,11 +1439,15 @@ export function buildMethodsExecutor(
         // inside this body is still the server calling itself. See
         // call-origin.ts.
         return inServerOrigin(() =>
-          inBody(() =>
-            (method as AsyncMethod<Record<string, unknown>>)(
-              proxy as Parameters<AsyncMethod<Record<string, unknown>>>[0],
-              ..._args,
-            )
+          runWithCallSignal(
+            controller.signal,
+            () =>
+              inBody(() =>
+                (method as AsyncMethod<Record<string, unknown>>)(
+                  proxy as Parameters<AsyncMethod<Record<string, unknown>>>[0],
+                  ..._args,
+                )
+              ),
           )
         )
           .then(async (value) => {
@@ -1520,8 +1553,7 @@ export function buildMethodsExecutor(
             // classifier as the sync path (classifyReturnedArray): all
             // effects → effects, none → value, mixed → throws into the
             // .catch below, which rejects the caller.
-            const retEffects = isScheduleEffect(value) || isOwnEffect(value) ||
-                isNotifyEffect(value)
+            const retEffects = isFrameworkEffect(value)
               ? [value as ScheduleEffect | OwnEffect]
               : Array.isArray(value) && value.length > 0 &&
                   classifyReturnedArray(name, _method, value) === "effects"
@@ -1584,16 +1616,30 @@ export function buildMethodsExecutor(
             // `structuredClone(s.x)` on the live view: name the fix (sync
             // twin: cell-compose-reduce.ts `methodThrew`).
             e = draftCloneError(e) ?? e;
-            // Asked BEFORE the abort below empties the batch: did any of this
-            // call's writes commit? Never for a transaction (discarded), yes
-            // for an async method that wrote before it threw.
-            const committed = !transactional && batcher.wrote();
+            // `throw null` / `throw undefined` (or a rejected promise with no
+            // reason): every "did it fail?" test below is truthiness, so the
+            // caller RESOLVED as if the method had succeeded — and a `ttl`
+            // cached that as a success. A failure must reach the caller.
+            if (e == null) {
+              e = new Error(
+                `[${name}:${_method}] threw ${
+                  thrownText(e)
+                } — the call failed with no ` +
+                  `reason. Throw an Error (\`throw new Error("why")\`) so ` +
+                  `the caller can tell what went wrong.`,
+              );
+            }
             // Transactional abort: a throw/cancel discards the whole
             // buffered write-set — no partial commit.
             if (transactional) {
               batcher.discard();
               dropTxEffects();
             }
+            // Did any of this call's writes commit? Asked AFTER the discard:
+            // an async method's earlier write-sets did, and so did what a
+            // transaction already published with `s.$commit()`.
+            const committed: boolean | "tx" = batcher.wrote() &&
+              (transactional ? "tx" : true);
             // Same instant, the failing way out: the call is over, so the
             // view is sealed before its caller hears about it.
             batcher.close();
@@ -1644,7 +1690,10 @@ export function buildMethodsExecutor(
                 rejectionLine(`${prefix}:${_method}`, e, committed),
               );
             } else {
-              log.error("cell", `${name} ${_method}() threw: ${e}`);
+              log.error(
+                "cell",
+                `${name} ${_method}() threw: ${thrownText(e)}`,
+              );
             }
             app.dispatch(markInflight({
               type: `${prefix}:__error`,
@@ -1655,7 +1704,7 @@ export function buildMethodsExecutor(
               // too — the count above is that line (logger-observe.ts).
               payload: {
                 _method,
-                error: String(e),
+                error: thrownText(e),
                 _callId,
                 ...(overflow ? { _overflow: true } : {}),
               },
@@ -1696,6 +1745,10 @@ export function buildMethodsExecutor(
       // promise still deferred the start a microtask, so a call dispatched
       // right after this one (a sync method) ran FIRST (field report
       // a desktop map app §2).
+      const pendingCall = {
+        key: `${prefix}:${_method}`,
+        answer: (e: Error) => resolveCall(_callId, undefined, e),
+      };
       if (transactional && serialize) {
         const mine = serializeTail
           ? serializeTail.then(runOnce, runOnce)
@@ -1706,7 +1759,7 @@ export function buildMethodsExecutor(
         };
         onSettled = free;
         mine.then(free, free);
-        trackPending(mine, prefix, appScope);
+        trackPending(mine, prefix, appScope, pendingCall);
       } else if (decision.kind === "queue") {
         // `concurrency: "queue"` — one at a time, per METHOD. Reuses the same
         // chaining the transactional serialize mutex uses, because it is the
@@ -1716,9 +1769,9 @@ export function buildMethodsExecutor(
           : runOnce();
         setQueueTail(prefix, _method, next, policyStore);
         onSettled = () => releaseQueueTail(prefix, _method, next, policyStore);
-        trackPending(next, prefix, appScope);
+        trackPending(next, prefix, appScope, pendingCall);
       } else {
-        trackPending(runOnce(), prefix, appScope);
+        trackPending(runOnce(), prefix, appScope, pendingCall);
       }
       return;
     }
@@ -1749,7 +1802,10 @@ export function buildMethodsExecutor(
                 effectType: effect.type as string,
               }));
             } else {
-              log.error("cell", `${name} ${key}() execute threw: ${e}`);
+              log.error(
+                "cell",
+                `${name} ${key}() execute threw: ${thrownText(e)}`,
+              );
             }
           });
         }

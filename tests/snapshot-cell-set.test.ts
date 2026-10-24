@@ -45,6 +45,15 @@ Deno.test("snapshotCellsError: the wrong app's file names BOTH halves", () => {
   assertStringIncludes(e, '"nosuchcell"'); // not declared here
 });
 
+Deno.test("snapshotCellsError: the way past names BOTH doors' spelling", () => {
+  // The HTTP door has no `--force`: telling a `POST /__aio/snapshot` caller
+  // to pass one left them no way forward.
+  const e = snapshotCellsError({ nosuchcell: {} }, ["todo"]);
+  assert(e);
+  assertStringIncludes(e, "am snapshot load <file> --force");
+  assertStringIncludes(e, "POST /__aio/snapshot?force=1");
+});
+
 Deno.test("snapshotCellsError: a non-object is left to snapshotShapeError", () => {
   assertEquals(snapshotCellsError(null, ["todo"]), null);
   assertEquals(snapshotCellsError([1, 2], ["todo"]), null);

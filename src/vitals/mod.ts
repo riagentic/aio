@@ -23,6 +23,7 @@ import { evaluateHints } from "./hints.ts";
 import { generateCorrelationId } from "../diagnostics/error.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { type BudgetLedger, budgetsFor } from "../state/budgets.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -165,7 +166,10 @@ export function createVitalsSystem(
         try {
           fn(clientId);
         } catch (e) {
-          log.error("vitals", `a client-recovered listener threw — ${e}`);
+          log.error(
+            "vitals",
+            `a client-recovered listener threw — ${thrownText(e)}`,
+          );
         }
       }
       fireAlert("transport", "recovered", 0, 0);
@@ -260,7 +264,7 @@ export function createVitalsSystem(
     try {
       reporter?.onAlert(alert, unit);
     } catch (e) {
-      log.error("vitals", `reporter.onAlert threw — ${e}`);
+      log.error("vitals", `reporter.onAlert threw — ${thrownText(e)}`);
     }
     diagEmit({
       type: "vitals-alert",

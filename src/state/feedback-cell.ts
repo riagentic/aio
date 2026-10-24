@@ -119,6 +119,7 @@ const REPORT_WINDOW_MS = 60_000;
 const _reportTimes: number[] = [];
 
 /** Test isolation — forget the window. @internal */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetFeedbackRate(): void {
   _reportTimes.length = 0;
 }

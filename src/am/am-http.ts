@@ -30,7 +30,8 @@ import {
   controlKeyPath,
   readControlKey,
 } from "../server/app-key.ts";
-import { udsRequest } from "./am-uds.ts";
+import { type UdsReply, udsRequest } from "./am-uds.ts";
+import { VIEW_PATH } from "../server/server-auth.ts";
 import { waitingMessage, waitingOf, waitingSaid } from "./am-cmd-start.ts";
 
 /** `am`'s transport timeout. Strictly LONGER than the server's own wait for a
@@ -269,6 +270,7 @@ const _verified = new Map<string, PortIdentity>();
  *  refresh cost ten TCP connections instead of six. One probe per port at a
  *  time — the others await the same answer. */
 const _inflight = new Map<string, Promise<PortIdentity>>();
+// aio-ok(dead-wiring): test seam — clears the per-port identity cache between cases
 export function _resetInstanceVerify(): void {
   _verified.clear();
   _inflight.clear();
@@ -366,6 +368,7 @@ function identityMismatch(
   };
 }
 
+// aio-ok(dead-wiring): test seam — the UNCACHED identity check; the product goes through the cached gate below
 export async function verifyInstance(
   ctrl: number,
   expectedAppId: string,
@@ -570,7 +573,9 @@ function prodDiagnosis(status: number, body: string): string {
     // trojan too — both were listed here as working in production and both
     // answer 404 there. A list of what works has to be a list of what works.
     "Against a production app, these work: am status, am health, am logs, " +
-    "am data, am installed, am pin.\n" +
+    "am data, am installed, am pin — and am state --prod [path], the " +
+    "read-only client view (what a WebSocket with the app's credential " +
+    "receives).\n" +
     "To inspect or drive state, run the app in dev (deno task dev) and point " +
     "am at it — or, if this app IS a dev build, it was started with " +
     "--prod/NODE_ENV=production.";
@@ -906,6 +911,146 @@ export async function trojanGet(
   } catch (e) {
     return fetchError(e, ctrl, appId);
   }
+}
+
+/** `GET /__aio/view` — the read-only CLIENT view (`am state --prod`): what a
+ *  WebSocket opened with the same credential receives, so it works against a
+ *  production app, whose trojan does not exist. The credential is the one the
+ *  aio client uses: none on a loopback app without auth, the app's shared key
+ *  (`<data>/app.key`, offered only after a 401, as `trojanOverUds` does), or —
+ *  for a per-user app — `AIO_TOKEN`, a token of the user whose view to read
+ *  (from the environment, never argv: a command line is readable by every
+ *  local process). A refusal names the credential that would pass. */
+export async function viewGet(
+  port: number,
+  appId?: string,
+  timeout = FETCH_TIMEOUT,
+): Promise<Result> {
+  sayOtherRoot(lockForPort(appId, port));
+  const { ep, home } = controlTarget(appId, port);
+  // The same "is this port the app I mean" gate every control read meets.
+  if (ep.kind === "tcp") {
+    const pre = await controlPreflight(ep.port, appId, {
+      control: false,
+      timeout,
+      home,
+    });
+    if (pre.mismatch) return pre.mismatch;
+  }
+  const userToken = Deno.env.get("AIO_TOKEN")?.trim() || undefined;
+  const keyed = (): { headers: Record<string, string>; keyPath?: string } => {
+    if (userToken) return { headers: { Authorization: `Bearer ${userToken}` } };
+    const c = localCreds(appId, { control: false, gated: true }, home);
+    return { headers: c.headers, keyPath: c.appKeyPath };
+  };
+  const send = async (
+    headers: Record<string, string>,
+  ): Promise<UdsReply> => {
+    if (ep.kind === "uds") {
+      return await udsRequest(ep.socketPath, VIEW_PATH, {
+        method: "GET",
+        headers,
+      }, timeout);
+    }
+    try {
+      const resp = await fetch(`http://127.0.0.1:${ep.port}${VIEW_PATH}`, {
+        headers,
+        signal: AbortSignal.timeout(timeout),
+      });
+      return { status: resp.status, body: await resp.text() };
+    } catch (e) {
+      const r = fetchError(e, ep.port, appId);
+      return { error: r.ok ? String(e) : r.error };
+    }
+  };
+  // Unauthenticated first unless a user token was given: a wrong credential is
+  // a charged auth failure, so the key goes out only once the app asked for one.
+  let creds: { headers: Record<string, string>; keyPath?: string } = userToken
+    ? keyed()
+    : { headers: {} };
+  let r = await send(creds.headers);
+  if (!("error" in r) && r.status === 401 && !userToken) {
+    const k = keyed();
+    if (k.keyPath) {
+      creds = k;
+      r = await send(k.headers);
+    }
+  }
+  if ("error" in r) {
+    return ep.kind === "uds"
+      ? udsUnreachable(ep, appId, r.error)
+      : { ok: false, error: r.error };
+  }
+  if (r.status >= 200 && r.status < 300) {
+    try {
+      return { ok: true, data: JSON.parse(r.body) };
+    } catch (e) {
+      return { ok: false, error: `malformed ${VIEW_PATH} reply: ${e}` };
+    }
+  }
+  let said = r.body;
+  try {
+    said = JSON.parse(r.body).error ?? r.body;
+  } catch {
+    // aio-ok: a plain-text refusal is said as is
+  }
+  return {
+    ok: false,
+    error: `${said}${
+      viewDiagnosis(r.status, r.body, {
+        userToken: !!userToken,
+        keyPath: creds.keyPath,
+        appId,
+      })
+    }`,
+  };
+}
+
+/** The fix for a refused `am state --prod`. Pure; exported for its test. */
+export function viewDiagnosis(
+  status: number,
+  body: string,
+  sent: { userToken: boolean; keyPath?: string; appId?: string },
+): string {
+  if (status === 401) {
+    if (sent.userToken) {
+      return "\n\nAIO_TOKEN was refused: it is not a credential this app " +
+        "accepts (a `users:` token, a `resolveUser` token, or a login " +
+        "session token). The view is that user's — use one of theirs.";
+    }
+    if (sent.keyPath) {
+      return `\n\nam presented the shared key from ${sent.keyPath} and the ` +
+        "app refused it. If the app runs per-user auth, that file is stale " +
+        "(delete it) and the view needs a user: AIO_TOKEN=<token> am state " +
+        "--prod. Otherwise the app was started with a different key.";
+    }
+    return "\n\nThis app requires a credential, and am found none to " +
+      "present.\n  shared key (`key:` / --expose): am reads it from the " +
+      `app's data dir (${
+        sent.appId ? appKeyPath(sent.appId) : "<data>/app.key"
+      }) — run am on the app's machine, as the OS user that owns it.\n` +
+      "  per-user (`users` / `resolveUser` / `auth: true`): AIO_TOKEN=<that " +
+      "user's token> am state --prod — you get exactly that user's view.";
+  }
+  if (status === 500) {
+    return "\n\nThe app failed while building this view (a `visible` / " +
+      "`forUser` filter threw) — the cause is in its log: am logs --level=error.";
+  }
+  if (status === 404 && /local-peer lockdown/.test(body)) {
+    return "\n\nThis is a packaged desktop app in production: its socket " +
+      "gives a process that is not its own window NO state, by design. Read " +
+      "what it persisted instead: am state --offline [path].";
+  }
+  if (status === 503 && /no control plane/.test(body)) {
+    return "\n\nThis packaged desktop app runs with no HTTP handler, so it " +
+      "has no view to serve. Read what it persisted instead: am state " +
+      "--offline [path].";
+  }
+  if (status === 404) {
+    return `\n\nThe app does not serve ${VIEW_PATH} — its aio is older than ` +
+      "this am. Upgrade the app's aio, or read its store: am state --offline.";
+  }
+  return "";
 }
 
 /** POST request to trojan API endpoint */

@@ -39,6 +39,7 @@ export type Kind =
   | "reload" // S→C — dev: full reload
   | "patch" // S→C — dev: re-import the UI entry and swap it in, no reload
   | "notify" // S→C — desktop notification {title, body?, tag?, silent?, route?}
+  | "icon" // S→C — the app's run-time icon {window?, tray?, tooltip?, fps}
   | "css" // S→C — dev: css-only reload
   | "ping" // C→S — UDS/IPC keepalive
   | "subs" // C→S — subscription list {subs}
@@ -87,6 +88,7 @@ export const FRAME_KINDS: readonly Kind[] = [
   "reload",
   "patch",
   "notify",
+  "icon",
   "css",
   "ping",
   "subs",
@@ -170,6 +172,7 @@ export function isIgnorableKind(t: string): boolean {
  *    omissions — a server frame the client cannot route is a bug.
  *  S→C-only kinds are absent from ws/uds and C→S-only kinds from browser by
  *  direction, not by choice. */
+// aio-ok(dead-wiring): the per-transport contract table; tests parse the real routers against it
 export const SERVES: Record<
   "ws" | "uds" | "browser" | "am" | "electronMain",
   ReadonlySet<Kind>
@@ -219,6 +222,7 @@ export const SERVES: Record<
   ]),
   browser: new Set<Kind>([
     "notify",
+    "icon",
     "proto",
     "proto-err",
     "boot",
@@ -513,4 +517,32 @@ export function errorCode(err: unknown): AioErrorCode | undefined {
   return typeof code === "string" && code.length > 0
     ? code as AioErrorCode
     : undefined;
+}
+
+/** ONE line for a failure — its code (when it has one) and the first sentence
+ *  of its message, at most `max` characters — for a log line, a CI gate or an
+ *  agent scanning a wall of failures. The message itself is unchanged: its
+ *  first line is what apps' tests match, so the summary is a reader, never a
+ *  rewrite. Not for branching — that is {@linkcode errorCode}.
+ *
+ *  ```ts
+ *  errorSummary(e) // "DEAD_BOOT: notes:add refused — this boot is dead"
+ *  ``` */
+export function errorSummary(err: unknown, max = 160): string {
+  const code = errorCode(err);
+  const raw = err instanceof Error
+    ? err.message
+    : typeof (err as { message?: unknown } | null)?.message === "string"
+    ? (err as { message: string }).message
+    : String(err);
+  const line = raw.trim().split("\n")[0]!.trim();
+  const end = line.search(/[.;](\s|$)/);
+  let head = end > 0 ? line.slice(0, end) : line;
+  // The code once, in front: a message that already leads with it
+  // (`[DEAD_BOOT] …`, `DEAD_BOOT: …`) does not say it twice.
+  for (const lead of code ? [`[${code}]`, `${code}:`] : []) {
+    if (head.startsWith(lead)) head = head.slice(lead.length).trimStart();
+  }
+  const text = code ? `${code}: ${head}` : head;
+  return text.length > max ? text.slice(0, max - 1) + "…" : text;
 }

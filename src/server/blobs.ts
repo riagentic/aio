@@ -63,7 +63,9 @@ export interface BlobStore {
   /** The HTTP path this blob is served at (`/__aio/blobs/<id>`) — subject to
    *  the app's auth gate exactly like every other app resource. */
   url(id: string): string;
-  /** Remove a blob (+ its metadata). True when something was deleted; false
+  /** Remove a blob (+ its metadata). Content-addressed: every put of the same
+   *  bytes returned THIS id, so delete it only when nothing of yours still
+   *  names it. True when something was deleted; false
    *  only when there was nothing there. A store that REFUSED the removal
    *  throws rather than reporting false, which a caller reads as "already
    *  gone". */
@@ -182,6 +184,36 @@ function makeStore(dir: string): BlobStore {
     data: Uint8Array | ReadableStream<Uint8Array>,
     opts?: { name?: string },
   ): Promise<BlobInfo> {
+    // A `File` from `req.formData()` — the most common upload there is — or
+    // an ArrayBuffer used to fail as "data is not async iterable", naming
+    // neither the store nor the fix.
+    // Anything `for await` can walk (async OR sync iterables — an array of
+    // chunks, a generator) keeps working, as it always has; a string walks
+    // into string chunks, which never worked.
+    const it = data as {
+      [Symbol.asyncIterator]?: unknown;
+      [Symbol.iterator]?: unknown;
+    } | null;
+    if (
+      !(data instanceof Uint8Array) &&
+      (typeof data === "string" ||
+        (typeof it?.[Symbol.asyncIterator] !== "function" &&
+          typeof it?.[Symbol.iterator] !== "function"))
+    ) {
+      const kind = Object.prototype.toString.call(data).slice(8, -1);
+      throw new TypeError(
+        `blobs: put() takes a Uint8Array or a ReadableStream<Uint8Array> — ` +
+          `got ${kind}. ${
+            (data as unknown) instanceof Blob
+              ? "For a Blob/File pass file.stream() (streamed, never buffered)."
+              : kind === "ArrayBuffer"
+              ? "Wrap it: new Uint8Array(buffer)."
+              : kind === "String"
+              ? "Encode text: new TextEncoder().encode(text)."
+              : "Convert the bytes to a Uint8Array first."
+          }`,
+      );
+    }
     await ensureDir();
     const tmp = join(dir, `.tmp-${crypto.randomUUID()}`);
     const hash = createHash("sha256");
@@ -483,6 +515,7 @@ export function openBlobStore(
 
 /** Test-only: forget memoized stores so a fixture dir resolves fresh.
  *  @internal */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetBlobStores(): void {
   _stores.clear();
 }

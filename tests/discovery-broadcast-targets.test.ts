@@ -13,6 +13,7 @@ import { Buffer } from "node:buffer";
 import { createRequire } from "node:module";
 import { broadcastTargets, discoverAioApps } from "../src/server/discovery.ts";
 import { electronClientScript } from "../src/electron/electron-client-script.ts";
+import { NO_USER_DATA } from "./no-user-data.ts";
 
 type Iface = { family: string | number; address: string; netmask?: string };
 const v4 = (address: string, netmask?: string): Iface => ({
@@ -89,7 +90,8 @@ function client(
       return {
         app: {
           on: noop,
-          getPath: () => "/nonexistent-aio-client-test",
+          getPath: () => NO_USER_DATA,
+          setDesktopName: () => {}, // its window class (electron-shell-parity.test.ts)
           quit: noop,
           whenReady: () => new Promise(noop),
         },

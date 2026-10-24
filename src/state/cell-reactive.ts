@@ -10,9 +10,9 @@ import { attachMeta } from "./cell-catalog.ts";
 import { _cellSignals, getCellSignal } from "./state-signals.ts";
 import { ackMethodKey } from "../protocol/ack-registry.ts";
 import {
-  context,
-  contextNote,
+  noteOf,
   SIDE,
+  SYNC_METHOD,
   WHERE_HINT,
 } from "../diagnostics/contexts.ts";
 import { _ackSink } from "./ack-sink.ts";
@@ -166,7 +166,7 @@ export function reportHiddenRead(
       // is always which one they are in. The sync method is the expensive
       // case: reading a hidden field there is correct-looking TypeScript that
       // only dies when the reducer replays.
-      `  ${WHERE_HINT}. Note: ${contextNote("a sync method")} — where ` +
+      `  ${WHERE_HINT}. Note: ${noteOf(SYNC_METHOD)} — where ` +
       `hidden fields are not present.`,
   );
 }
@@ -242,22 +242,32 @@ type Slice = Record<string, unknown>;
 type ForUser = (exposed: Slice, user?: AccessUser) => Slice;
 
 /** Who a harness is reading AS — `null` when the runtime already holds a
- *  client's view (the browser) or has no users at all (standalone). */
+ *  client's view (the browser) or has no users at all (standalone).
+ *
+ *  A harness seam in product code, and unavoidably so: a component under
+ *  `testUI` reads its cells through THIS module's accessors, in-process, from
+ *  the server's full state — there is no socket in between to apply the
+ *  per-user view, and nothing outside this module sees the read. Inert
+ *  outside the harness: only `src/testing/ui-test-build.ts` sets it, and
+ *  `clientSlice` returns the raw slice after one null check when unset. */
 let _clientViewer: {
-  user: AccessUser | undefined;
+  /** Read per access: a page signed in mid-test (a login through the form)
+   *  reads as that user from then on. */
+  user: () => AccessUser | undefined;
   forUserOf: (def: CellDef) => ForUser | undefined;
   /** `forUserView`, reached only through here so the browser bundle (which
    *  never sets a viewer) does not carry it. */
   view: typeof forUserView;
 } | null = null;
 
-/** Harness-only: read every cell as a client signed in as `user` (undefined =
- *  an anonymous connection) sees it. `forUserOf` hands over each cell's
+/** Harness-only: read every cell as a client signed in as `user()` (undefined
+ *  = an anonymous connection) sees it — asked per read, so a login mid-test
+ *  changes the view. `forUserOf` hands over each cell's
  *  per-user filter — passed in, not read here, because this module rides in
  *  the browser bundle, whose cell stub does not carry the filter (it runs on
  *  the server). Returns the undo. @internal */
 export function _readAsClient(
-  user: AccessUser | undefined,
+  user: () => AccessUser | undefined,
   forUserOf: (def: CellDef) => ForUser | undefined,
 ): () => void {
   const viewer = { user, forUserOf, view: forUserView };
@@ -330,7 +340,10 @@ export function forUserView(
 
 /** One view per committed slice per viewer: a commit replaces the slice
  *  object, so identity is the cache key and a stale view cannot be served. */
-const _views = new WeakMap<object, { viewer: object; view: Slice | null }>();
+const _views = new WeakMap<
+  object,
+  { viewer: object; user: AccessUser | undefined; view: Slice | null }
+>();
 
 /** The slice a client of the current viewer holds for `def` — `raw` itself
  *  unless a harness named a viewer and the cell has a per-user filter; `null`
@@ -343,19 +356,20 @@ function clientSlice(def: CellDef, raw: unknown): Slice | null {
     !viewer || !forUser || raw == null || typeof raw !== "object" ||
     def.__aio.scope === "client"
   ) return raw as Slice | null;
+  const user = viewer.user();
   const hit = _views.get(raw);
-  if (hit && hit.viewer === viewer) return hit.view;
+  if (hit && hit.viewer === viewer && hit.user === user) return hit.view;
   const filter = clientUiFilter(def);
   const out = viewer.view(
     def.__aio.id,
     forUser,
     filterSlice(filter, raw as Slice),
-    viewer.user,
+    user,
     (filter ?? "all") === "all",
   );
   if ("omit" in out) log.error(out.omit);
   const view = "view" in out ? out.view : null;
-  _views.set(raw, { viewer, view });
+  _views.set(raw, { viewer, user, view });
   return view;
 }
 
@@ -486,9 +500,7 @@ export function guardHiddenReplay<S extends object>(def: CellDef, draft: S): S {
     // client, so anything derived from the declaration names the wrong side at
     // the one moment the side is the whole point. See the note in
     // `diagnostics/contexts.ts` about the helper that used to do exactly that.
-    `read in ${SIDE.client} — this is ${
-      context("a sync method").name
-    }, and sync methods replay on the client`,
+    `read in ${SIDE.client} — this is ${SYNC_METHOD.name}, and sync methods replay on the client`,
   ) as unknown as S;
 }
 

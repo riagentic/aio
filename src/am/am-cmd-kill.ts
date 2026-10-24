@@ -214,11 +214,15 @@ export function listenerPids(
     for (const l of out.split("\n")) if (/^\d+$/.test(l.trim())) pids.add(+l);
   } else if (os === "windows") {
     // `  TCP    127.0.0.1:8123    0.0.0.0:0    LISTENING    4242`
+    // Not by the state word: netstat translates it (`ABHÖREN`, `ÉCOUTE`), so
+    // on a non-English Windows nothing matched. A listener is the row whose
+    // FOREIGN end is port 0 — the same in every language.
     const out = run("netstat", ["-ano", "-p", "TCP"]) ?? "";
     for (const l of out.split("\n")) {
       const f = l.trim().split(/\s+/);
       if (
-        f.length === 5 && f[3] === "LISTENING" && f[1]!.endsWith(`:${port}`)
+        f.length === 5 && f[0] === "TCP" && f[1]!.endsWith(`:${port}`) &&
+        f[2]!.endsWith(":0")
       ) pids.add(Number(f[4]));
     }
   }

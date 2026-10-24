@@ -30,6 +30,8 @@ import {
  *  `LintReport`. */
 export type { Issue, LintReport, SafeFixFn, Severity } from "./types.ts";
 import denoJson from "../deno.json" with { type: "json" };
+import { routeAmLogsToStderr } from "../src/am/am-log.ts";
+import { dirname, join, resolve } from "@std/path";
 
 // Single source of truth — aiol shares the framework version (deno.json).
 const VERSION = denoJson.version;
@@ -293,7 +295,34 @@ export function nearestFlag(given: string): string | null {
   return nearestOf(given, FLAGS, 4);
 }
 
+/** The nearest directory at or above `dir` holding a deno.json(c); `dir`
+ *  itself when none does (the lint then says the config is missing). The walk
+ *  stops at a repository root (`.git`) and below HOME, so a stray
+ *  `~/deno.json` never turns into "lint my whole home directory". */
+export function projectRoot(dir: string): string {
+  const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE");
+  const has = (d: string, f: string) => {
+    try {
+      Deno.statSync(join(d, f));
+      return true;
+    } catch {
+      return false; // absent — the only answer this probe needs
+    }
+  };
+  for (let d = dir; d !== home; d = dirname(d)) {
+    if (has(d, "deno.json") || has(d, "deno.jsonc")) return d;
+    if (has(d, ".git") || dirname(d) === d) break;
+  }
+  return dir;
+}
+
 if (import.meta.main) {
+  // STDOUT is the report — with --json, ONE parseable document. The framework
+  // modules aiol calls log on their own (the pin reader's `aio: local path pin
+  // → …` is an info line, and info goes to stdout), so `aiol . --json | jq`
+  // failed on a path-pinned app. Same decider `am` uses: every framework log
+  // line goes to stderr for the life of this process.
+  routeAmLogsToStderr();
   const args = Deno.args.filter((a) => !a.startsWith("-"));
   const flags = new Set(Deno.args.filter((a) => a.startsWith("-")));
 
@@ -354,13 +383,29 @@ Only harmless changes: missing config, unused imports. Never changes behavior.
     Deno.exit(0);
   }
 
-  const projectDir = args[0] ?? Deno.cwd();
+  const asked = args[0] ?? Deno.cwd();
 
+  let info: Deno.FileInfo | undefined;
   try {
-    await Deno.stat(projectDir);
+    info = await Deno.stat(asked);
   } catch {
-    console.error(`Error: directory not found: ${projectDir}`);
+    console.error(`Error: directory not found: ${asked}`);
     Deno.exit(1);
+  }
+  if (!info.isDirectory) {
+    console.error(
+      `Error: ${asked} is a file — aiol lints a PROJECT (the directory ` +
+        `holding deno.json), not one file`,
+    );
+    Deno.exit(2);
+  }
+  // The project is the nearest directory holding a deno.json — the same walk
+  // `deno` does. Run from `src/`, aiol used to lint `src` as a project with no
+  // config, and `--safe-fix` then wrote `appId: "src"` into app.ts: a NEW
+  // appId, so the next boot opened an empty database beside the real one.
+  const projectDir = projectRoot(resolve(asked));
+  if (projectDir !== resolve(asked)) {
+    console.error(`aiol: linting ${projectDir} (the nearest deno.json)`);
   }
 
   const report = await lintProject(projectDir);

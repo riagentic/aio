@@ -20,6 +20,7 @@
 import { isScheduleEffect, type ScheduleEffect } from "./schedule.ts";
 import { isOwnEffect, type OwnEffect } from "./own.ts";
 import { isNotifyEffect, type NotifyEffect } from "./notify.ts";
+import { type AppIconEffect, isAppIconEffect } from "./app-icon.ts";
 
 /** The framework effect kinds every runtime must route. THE registry — add a
  *  kind here and the compiler demands a guard below and a handler at every
@@ -28,6 +29,7 @@ export type FrameworkEffects = {
   schedule: ScheduleEffect;
   own: OwnEffect;
   notify: NotifyEffect;
+  appIcon: AppIconEffect;
 };
 
 /** Union of all framework effects (what a reducer may emit beside app
@@ -50,9 +52,17 @@ const ROUTES: {
   schedule: isScheduleEffect,
   own: isOwnEffect,
   notify: isNotifyEffect,
+  appIcon: isAppIconEffect,
 };
 
 const ROUTE_KEYS = Object.keys(ROUTES) as (keyof FrameworkEffects)[];
+
+/** Is `e` a framework effect of ANY kind — the one answer for the gates that
+ *  must accept every kind (`s.$do`, a returned effect), so a new kind cannot
+ *  be refused by a hand-kept `isX || isY` chain that nobody extended. */
+export function isFrameworkEffect(e: unknown): e is FrameworkEffect {
+  return ROUTE_KEYS.some((k) => ROUTES[k](e));
+}
 
 /** Route one effect: framework kinds to their handler, everything else to
  *  `app`. The single classifier for all three effect runtimes. */

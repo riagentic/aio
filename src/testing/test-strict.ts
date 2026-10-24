@@ -485,6 +485,48 @@ class ObservedCall<T> extends Promise<T> {
   }
 }
 
+/** The observation points (`ui.expectCell`, `ui.settle`, `t.expect.rejects`,
+ *  …) a test STARTED and never awaited. `ui.expectCell(…)` without `await`
+ *  returned at once, the test passed, and the assertion failed seconds later
+ *  as an uncaught error that named no test and cancelled every later test in
+ *  the file. The harness awaits them at teardown instead: a failure fails
+ *  THIS test, naming the missing `await`; a pass is a warning, because the
+ *  test never waited for what it asserted. @internal */
+export function _observationLedger(harness: string): {
+  track<T>(what: string, p: Promise<T>): Promise<T>;
+  raise(): Promise<void>;
+} {
+  const open: { what: string; p: Promise<unknown>; seen: boolean }[] = [];
+  return {
+    track(what, p) {
+      const rec = { what, p, seen: false };
+      open.push(rec);
+      return _observedCall(p, () => rec.seen = true);
+    },
+    async raise() {
+      for (const r of open.splice(0).filter((r) => !r.seen)) {
+        try {
+          await r.p;
+        } catch (e) {
+          throw new Error(
+            `${harness}: \`${r.what}\` was never awaited, and it failed — ` +
+              `the test body returned before it finished. Write ` +
+              `\`await ${r.what}\`. It failed with: ${
+                e instanceof Error ? e.message : String(e)
+              }`,
+            { cause: e },
+          );
+        }
+        console.warn(
+          `[aio] ${harness}: \`${r.what}\` was never awaited — it passed, ` +
+            `but only after the test body had returned, so the test did not ` +
+            `wait for what it asserts. Write \`await ${r.what}\`.`,
+        );
+      }
+    },
+  };
+}
+
 /** How a harness calls a `worker: true` cell's method — see
  *  `_callAcrossWorkerBoundary` (boot-refusals.ts). Passed in rather than
  *  imported: this module rides in the browser graph, which must not grow a

@@ -48,6 +48,7 @@ export function electronAssetSlug(platform: string): string | null {
 
 /** The URL Electron publishes that build at. Pure, so the whole mapping is a
  *  unit test rather than a download nobody runs twice. */
+// aio-ok(dead-wiring): pure platform→URL mapping for unit tests; the fetcher composes the same two functions
 export function electronZipUrl(
   version: string,
   platform: string,
@@ -59,6 +60,7 @@ export function electronZipUrl(
 /** Where a fetched runtime lives — the SAME directory the launcher of a
  *  compiled binary downloads into, so a machine that built an app and a
  *  machine that runs one each hold one copy per version, not one per use. */
+// aio-ok(dead-wiring): pure platform→dir mapping for unit tests; the fetcher composes the same two functions
 export function electronCacheDir(version: string, platform: string): string {
   const slug = electronAssetSlug(platform) ?? platform;
   return electronRuntimeDir(version, slug);

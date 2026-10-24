@@ -75,6 +75,8 @@ Deno.test("build block shape: what built on 1.0.11 is warned, never refused", ()
         { targets: { browser: { platforms: "linux" } } },
         "build.targets.browser.platforms",
       ],
+      [{ channel: 5 }, "build.channel"],
+      [{ channel: "" }, "build.channel"],
     ] as const
   ) {
     const r = warn(b);

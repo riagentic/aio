@@ -284,8 +284,16 @@ export function initDiagnostics(
   let unsubscribeBus: (() => void) | null = null;
   if (opts.diagnosticBus !== false) {
     unsubscribeBus = diagSubscribe((ev) => {
-      if (ev.severity === "error") log.error("diag", ev.message);
-      else if (ev.severity === "warning") log.warn("diag", ev.message);
+      if (ev.severity !== "error" && ev.severity !== "warning") return;
+      // WHAT and HOW MANY, not only the message: error.log read
+      // `ERROR diag {"code":"E_QUOTA"}` with no event type or action, and an
+      // event the bus's dedup window had swallowed 40 copies of logged as one.
+      const d = ev.detail as { actionType?: unknown } | null | undefined;
+      const data: Record<string, unknown> = { type: ev.type };
+      if (typeof d?.actionType === "string") data.action = d.actionType;
+      if (ev.suppressed) data.suppressed = ev.suppressed;
+      if (ev.severity === "error") log.error("diag", ev.message, data);
+      else log.warn("diag", ev.message, data);
     });
   }
 

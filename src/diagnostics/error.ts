@@ -3,7 +3,7 @@
 import type { DiagnosticEvent } from "./diagnostic-bus.ts";
 import { randomUuid } from "../rand.ts";
 import { log } from "./logger-api.ts";
-import { describeThrown, overLimit } from "./fmt.ts";
+import { describeThrown, overLimit, thrownText } from "./fmt.ts";
 import {
   indent,
   mark,
@@ -1009,13 +1009,13 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
           // lands in the same catch.
           Promise.resolve(ret).catch((hookErr: unknown) => {
             log.error("onError hook threw:", {
-              detail: String(hookErr),
+              detail: thrownText(hookErr),
               async: true,
             });
           });
         }
       } catch (hookErr) {
-        log.error("onError hook threw:", { detail: String(hookErr) });
+        log.error("onError hook threw:", { detail: thrownText(hookErr) });
       }
     }
 

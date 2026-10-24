@@ -423,3 +423,12 @@ Deno.test({
     }
   },
 });
+
+Deno.test("prune flags: a stray word refuses instead of running the defaults", () => {
+  // `am prune versoins --yes` pruned the ELECTRON cache: the misspelt
+  // subcommand was ignored and `--yes` applied to the default plan.
+  const r = parsePruneArgs(["versoins", "--yes"]);
+  assert(r.error?.includes('"versoins"'), r.error);
+  assert(r.error?.includes("versions"), r.error);
+  assertEquals(parsePruneArgs(["--yes", "--days=3"]).error, undefined);
+});

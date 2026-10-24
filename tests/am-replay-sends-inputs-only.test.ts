@@ -27,6 +27,7 @@ import { tempDir } from "../src/testing/temp-dir.ts";
 import { cmdReplay, planReplay } from "../src/am/am-cmd-timeline.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
 import type { JournalRow } from "../src/am/record.ts";
+import { capture } from "./am-capture-helper.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -81,20 +82,6 @@ const post = async (port: number, type: string, args: unknown[]) => {
   });
   assertEquals(r.status, 200, await r.text());
 };
-
-async function capture(fn: () => Promise<void>): Promise<unknown> {
-  const orig = console.log;
-  let captured: unknown;
-  console.log = (v: unknown) => {
-    captured = typeof v === "string" ? JSON.parse(v) : v;
-  };
-  try {
-    await fn();
-  } finally {
-    console.log = orig;
-  }
-  return captured;
-}
 
 Deno.test("am replay: a run with a schedule-born action and an async write-set replays to the same state", async () => {
   const srcDir = await tempDir("aio-replay-src-");

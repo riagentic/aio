@@ -33,7 +33,7 @@
 // inert.
 
 /** The owning app's identity. `""` = unknown, matches every app. */
-import { bumpPending } from "../protocol/pending-calls.ts";
+import { finishPending, startPending } from "../protocol/pending-calls.ts";
 
 export type AppScope = string;
 
@@ -165,6 +165,7 @@ export function unregisterCancelOn(
 
 /** @internal How many trigger→method edges the registry holds. Exists so the
  *  leak can be ASSERTED rather than argued about (tests/method-cancel). */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _cancelTriggerCount(): number {
   let n = 0;
   for (const set of _triggers.values()) n += set.size;
@@ -218,12 +219,12 @@ export function trackCall(
   // `cell.$pending("m")` — the count aio was already keeping and not showing
   // (report 8 §14, report 9 §9.5). A COUNT, never a flag: a boolean is wrong the
   // moment two readings overlap, which is the bug that report shipped.
-  bumpPending(`${cellPrefix}:${method}`, 1);
+  const start = startPending(`${cellPrefix}:${method}`);
   let released = false;
   const release = () => {
     if (released) return; // an untrack called twice must not double-decrement
     released = true;
-    bumpPending(`${cellPrefix}:${method}`, -1);
+    finishPending(`${cellPrefix}:${method}`, start);
   };
   const mine = entry;
   const untrack = () => {
@@ -298,8 +299,12 @@ export function notifyMethodCancel(
  *  Shutdown does, which is why the registry is here. */
 const _pending = new Map<
   Promise<unknown>,
-  { prefix: string; app: AppScope }
+  { prefix: string; app: AppScope; call?: PendingCall }
 >();
+
+/** Which call a tracked promise is, for shutdown's deadline: `key` names it
+ *  in the warning, `answer` rejects its caller. */
+export type PendingCall = { key: string; answer?: (e: Error) => void };
 
 /** Track a whole async call — body, commit and all — under its cell's prefix
  *  and app, so a shutting-down app can wait for ITS calls and no one else's. */
@@ -307,8 +312,9 @@ export function trackPending(
   p: Promise<unknown>,
   cellPrefix = "",
   app: AppScope = "",
+  call?: PendingCall,
 ): void {
-  _pending.set(p, { prefix: cellPrefix, app });
+  _pending.set(p, { prefix: cellPrefix, app, ...(call ? { call } : {}) });
   const drop = () => _pending.delete(p);
   p.then(drop, drop);
 }
@@ -395,6 +401,33 @@ export async function settlePending(
     mine = _pendingFor(cells, app);
   }
   return mine.length;
+}
+
+/** Shutdown's drain deadline passed: reject the caller of every call of
+ *  `cells` still running, with DISPATCH_CLOSED — the code a worker cell's
+ *  caller gets when its worker closes. Left pending, it waited out the method
+ *  (whose late writes hit a sealed queue) or its 30 s ceiling. Returns the
+ *  calls by method, for the deadline warning. */
+export function failStuckCalls(
+  cells: Set<string> | undefined,
+  app: AppScope,
+): string[] {
+  const keys: string[] = [];
+  for (const [, { prefix, app: owner, call }] of _pending) {
+    if (cells && !cells.has(prefix)) continue;
+    if (!sameApp(owner, app)) continue;
+    const key = call?.key ?? (prefix || "?");
+    keys.push(key);
+    call?.answer?.(Object.assign(
+      new Error(
+        `[aio] "${key}" was still running when the app stopped (the ` +
+          `${DRAIN_TIMEOUT_MS}ms drain deadline) — its remaining writes are ` +
+          `lost. End it on \`s.$signal\` abort.`,
+      ),
+      { code: "DISPATCH_CLOSED" },
+    ));
+  }
+  return keys;
 }
 
 /** Abort EVERY in-flight async method, whatever its cancelOn triggers say.

@@ -70,10 +70,13 @@ export interface SerializedReturn {
  *  the list of values that crossed in a different shape than they left.
  *
  *  `what` names the method for the warning ("cell:method"); pass it from the
- *  ack site so a corrupted return says WHICH call produced it. */
+ *  ack site so a corrupted return says WHICH call produced it. `kind`
+ *  "chunk": the value is one `emitChunk` piece, and the warning says so —
+ *  a dropped chunk still arrives, as `undefined`, and the result is apart. */
 export function serializeReturn(
   value: unknown,
   what?: string,
+  kind: "return" | "chunk" = "return",
 ): SerializedReturn {
   if (value === undefined) {
     return { value: undefined, dropped: false, lossy: [], truncated: false };
@@ -85,17 +88,17 @@ export function serializeReturn(
     const json = JSON.stringify(value);
     if (json === undefined) {
       // A bare function/symbol stringifies to `undefined` without throwing.
-      return dropValue(what);
+      return dropValue(what, kind);
     }
     round = JSON.parse(json);
   } catch {
-    return dropValue(what);
+    return dropValue(what, kind);
   }
 
   const lossy: LossyConversion[] = [];
   const budget: LossyBudget = { n: 0 };
   findLossy(value, round, "value", lossy, budget);
-  if (lossy.length > 0) warnLossy(lossy, what);
+  if (lossy.length > 0) warnLossy(lossy, what, kind);
   return {
     value: round,
     dropped: false,
@@ -116,14 +119,22 @@ export function serializeReturn(
  *  nothing at any level. Its sibling `warnLossy` had already settled the
  *  question one line below: a corrupted return value is a defect either way.
  *  Observe-only, so this is not a dev/prod behaviour fork. */
-function dropValue(what?: string): SerializedReturn {
+function dropValue(
+  what: string | undefined,
+  kind: "return" | "chunk",
+): SerializedReturn {
   const where = what ? `"${what}"` : "a method";
   log.warn(
     "ack",
-    `${where} returned a value JSON cannot carry AT ALL (a function, a ` +
-      `BigInt, or a circular reference) — the caller resolves with ` +
-      `undefined. Return JSON-safe data (plain objects/arrays/primitives) to ` +
-      `transport a value, or read it from synced state instead.`,
+    kind === "chunk"
+      ? `${where} emitted a chunk JSON cannot carry AT ALL (a function, a ` +
+        `BigInt, or a circular reference) — the caller receives undefined ` +
+        `for that chunk. Emit JSON-safe data (plain objects/arrays/` +
+        `primitives; a string for a BigInt).`
+      : `${where} returned a value JSON cannot carry AT ALL (a function, a ` +
+        `BigInt, or a circular reference) — the caller resolves with ` +
+        `undefined. Return JSON-safe data (plain objects/arrays/primitives) ` +
+        `to transport a value, or read it from synced state instead.`,
   );
   return { value: undefined, dropped: true, lossy: [], truncated: false };
 }
@@ -131,15 +142,23 @@ function dropValue(what?: string): SerializedReturn {
 /** Say exactly what changed. Loud in dev AND prod: a corrupted return value is
  *  a defect either way, and the whole point is that it stops being invisible.
  *  Observe-only, so it is not a dev/prod behaviour fork. */
-function warnLossy(lossy: LossyConversion[], what?: string): void {
+function warnLossy(
+  lossy: LossyConversion[],
+  what: string | undefined,
+  kind: "return" | "chunk",
+): void {
   const where = what ? `"${what}"` : "a method";
+  const [did, sent, send] = kind === "chunk"
+    ? ["emitted a chunk", "the method emitted", "Emit"]
+    : ["returned a value", "the method returned", "Return"];
   log.warn(
     "ack",
-    `${where} returned a value JSON cannot carry intact — the caller ` +
-      `receives a DIFFERENT value than the method returned:\n${
+    `${where} ${did} JSON cannot carry intact — the caller ` +
+      `receives a DIFFERENT value than ${sent}:\n${
         formatLossy(lossy)
-      }\nReturn JSON-safe data across the wire (ISO strings for dates, arrays ` +
-      `for Map/Set, plain objects for class instances), or read the value ` +
-      `from synced state instead.`,
+      }\n${send} JSON-safe data across the wire (ISO strings for dates, ` +
+      `arrays for Map/Set, plain objects for class instances)${
+        kind === "chunk" ? "" : ", or read the value from synced state instead"
+      }.`,
   );
 }

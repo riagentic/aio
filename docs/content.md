@@ -168,10 +168,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (99 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (100 pages)
+- [Upgrading from 1.0.24-beta to 1.0.25-beta](upgrade/from-1.0.24-beta-to-1.0.25-beta.md) — Nothing is removed or renamed.
 - [Upgrading from 1.0.23-beta to 1.0.24-beta](upgrade/from-1.0.23-beta-to-1.0.24-beta.md) — Nothing is removed or renamed, and no option changes meaning.
 - [Upgrading from 1.0.22-beta to 1.0.23-beta](upgrade/from-1.0.22-beta-to-1.0.23-beta.md) — Nothing is removed or renamed, and no option changes meaning.
-- [Upgrading from 1.0.21-beta to 1.0.22-beta](upgrade/from-1.0.21-beta-to-1.0.22-beta.md) — Nothing is removed or renamed.
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

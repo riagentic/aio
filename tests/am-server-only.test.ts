@@ -10,6 +10,7 @@ import { fromFileUrl, join, toFileUrl } from "@std/path";
 import { trojanGet } from "../src/am/am-http.ts";
 import { aio } from "../src/server/aio.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
@@ -53,7 +54,7 @@ Deno.test("Broken-2: am state serves the SERVER's live store with zero clients",
 
 Deno.test("M2: am surface renders headlessly against LIVE state (server-only app)", async () => {
   _resetAioRuntime();
-  const dir = await Deno.makeTempDir({ prefix: "am-headless-surface-" });
+  const dir = await tempDir("am-headless-surface-");
   // A real minimal app on disk: the cell module + a UI entry reading it. The
   // headless render imports App.tsx; Deno's module cache resolves cell.ts to
   // the SAME instance the server boots below — so the surface shows live state.
@@ -113,5 +114,6 @@ export default function App() {
   } finally {
     await app.close();
     _resetAioRuntime();
+    await dropTempDir(dir);
   }
 });

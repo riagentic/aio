@@ -214,7 +214,6 @@ export function startGraphValidation(
         log.error(
           `  ⛔ the browser is being served the DIAGNOSTIC PAGE, not your app` +
             ` — the fix hot-reloads, no restart needed.`,
-          { detail: String() },
         );
       }
       // server-only-api = CONDITIONAL break (Deno.* in a client-reachable
@@ -235,7 +234,6 @@ export function startGraphValidation(
         log.warn(
           `[aio] graph: server-only API reachable from the browser bundle ` +
             `(blank-screens if it runs in ${SIDE.client}):`,
-          { detail: String() },
         );
         for (const err of apiWarnings.slice(0, MAX_SHOWN)) {
           log.warn(
@@ -248,7 +246,6 @@ export function startGraphValidation(
         log.warn(
           `  Fix: move server-only I/O into a *.server.ts module and ` +
             `dynamic-import it from the cell method (docs/build/imports.md).`,
-          { detail: String() },
         );
       }
       // A Worker that runs here and not in a build (`unmanagedWorkers`). It

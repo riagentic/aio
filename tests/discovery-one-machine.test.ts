@@ -76,9 +76,11 @@ async function fakeMachine(
   return { port, stop: () => [ear, ...senders].forEach((s) => s.close()) };
 }
 
-// 127.0.0.2 answers only on Linux, where all of 127/8 is this host's; it is
-// not in the interface list, so to the sweep it is a remote address.
-const LINUX = Deno.build.os === "linux";
+// 127.0.0.2 answers on Linux and Windows, where all of 127/8 is this host's
+// (measured on Windows 11, 2026-10-24: 5/5); it is not in the interface list,
+// so to the sweep it is a remote address. macOS has 127.0.0.1 alone — a bind
+// to .2 is refused there.
+const LOOPBACK_8 = Deno.build.os !== "darwin";
 
 for (
   const [what, addrs, want] of [
@@ -102,7 +104,7 @@ for (
 ) {
   Deno.test({
     name: `discovery sweep: ${what}`,
-    ignore: !LINUX,
+    ignore: !LOOPBACK_8,
     async fn() {
       const nonce = `m${crypto.randomUUID().slice(0, 8)}`;
       const { port, stop } = await fakeMachine(
@@ -135,7 +137,7 @@ for (
 Deno.test({
   name:
     "discovery sweep: two apps on one port of one machine, one per interface, are both listed",
-  ignore: !LINUX,
+  ignore: !LOOPBACK_8,
   async fn() {
     const nonce = `m${crypto.randomUUID().slice(0, 8)}`;
     const { port, stop } = await fakeMachine(

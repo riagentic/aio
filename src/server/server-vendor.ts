@@ -106,6 +106,7 @@ export function hasVendorImmer(appImmer?: string): boolean {
 }
 
 /** Test hook — clear the cache so resolution runs again. */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetVendorCache(): void {
   _immerSource.clear();
 }

@@ -41,6 +41,51 @@ function sameDocument(a: unknown, b: unknown): boolean {
  *  on when the store holds the document in BOTH, with different contents. */
 export const storedLayoutKey = (appId: string): string => `${appId}:__layout`;
 
+/** The store row recording which `persistKey` an app's saves write — stamped
+ *  beside `<appId>:__schema` in every save, so a boot can tell whether
+ *  another app writes the same stored document. */
+export const storedPersistKeyKey = (appId: string): string =>
+  `${appId}:__persistKey`;
+
+/** `null`, or the warning that ANOTHER appId saves to this boot's stored
+ *  document. Two apps given one `dbPath` (or one `appDir`) share the store,
+ *  and in it the `persistKey` row: the second boot loads the first app's
+ *  cells and whichever saves last wins — silently. Every save stamps
+ *  `<appId>:__schema`; newer builds also stamp `<appId>:__persistKey`, and a
+ *  writer without it saved under the default key `"state"`. */
+export async function sharedStoreWarning(
+  db: { query<T>(sql: string, params?: unknown[]): Promise<{ rows: T[] }> },
+  appId: string,
+  persistKey: string,
+  dbPath: string,
+): Promise<string | null> {
+  const { rows } = await db.query<{ k: string; v: string }>(
+    `SELECT k, v FROM aio_kv WHERE k LIKE '%:\\_\\_schema' ESCAPE '\\' ` +
+      `OR k LIKE '%:\\_\\_persistKey' ESCAPE '\\'`,
+  );
+  const keyOf = new Map<string, string>();
+  const writers = new Set<string>();
+  for (const r of rows) {
+    const cut = r.k.lastIndexOf(":__");
+    const id = r.k.slice(0, cut);
+    if (id === appId) continue;
+    if (r.k.endsWith(":__persistKey")) keyOf.set(id, JSON.parse(r.v));
+    else writers.add(id);
+  }
+  const others = [...new Set([...writers, ...keyOf.keys()])].filter((id) =>
+    (keyOf.get(id) ?? "state") === persistKey
+  ).sort();
+  if (others.length === 0) return null;
+  const names = others.map((id) => `"${id}"`).join(", ");
+  return `persist: ${dbPath} also holds the stored state of app ${names} ` +
+    `under the same persistKey "${persistKey}" — two apps on one dbPath ` +
+    `share ONE stored document: each boot loads the other's cells and ` +
+    `whichever saves last wins. Give each app its own dbPath (or appDir), ` +
+    `or its own persistKey. If this app was RENAMED from ${names}, the old ` +
+    `id's stamps are what is left: \`DELETE FROM aio_kv WHERE k LIKE ` +
+    `'${others[0]}:%'\` once you have checked.`;
+}
+
 /** Load the persisted snapshot and bring it to the current persistence
  *  schema (A4). Alpha-era snapshots have no `<appId>:__schema` stamp and
  *  read as version 0; snapshots from a NEWER schema throw `PERSIST_SCHEMA`
@@ -515,6 +560,9 @@ export type DriftStore = {
   /** `AIO_APPS_DIR` when it placed the home, so an `am` run in a shell
    *  without it (which resolves `~/.<appId>`) is not a surprise. */
   appsDir?: string;
+  /** The app sets its own appDir or dbPath: `--instance` moves neither, so
+   *  it is no private copy of THIS data and is not offered. */
+  pinned?: boolean;
 };
 
 /** The refusal's "where, and the way out" lines (report 9b §2). The message
@@ -555,8 +603,9 @@ function driftStoreLines(store: DriftStore): string {
       }\``) +
     `\n` +
     // The escape that keeps this data untouched. Not under AIO_APPS_DIR:
-    // there `--instance` is ignored (said loudly), so offering it misleads.
-    (store.appsDir
+    // there `--instance` is ignored (said loudly), so offering it misleads —
+    // nor for an app that pins appDir/dbPath, which `--instance` cannot move.
+    (store.appsDir || store.pinned
       ? ""
       : `or run this build against a PRIVATE, empty data home and leave ` +
         `this one untouched: \`am start --instance=<name>\`\n`)

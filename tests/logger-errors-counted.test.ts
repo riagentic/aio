@@ -87,3 +87,21 @@ Deno.test("logger: an async method failure is worth exactly ONE", async () => {
       "observer must not count it again",
   );
 });
+
+Deno.test("logger: dispatched= counts the app's actions, not cell lifecycle frames", async () => {
+  const dir = await tempDir("logger-dispatched-");
+  const l = new AioLogger({ dir, level: "info", console: false, heartbeat: 0 });
+  await l.init();
+  const st = {};
+  for (const c of ["a", "b"]) l.observe({ type: `${c}:__init` }, st);
+  l.observe({ type: "a:bump" }, st);
+  l.observe({ type: "a:__exec" }, st); // a marker
+  l.observe({ type: "a:load" }, st);
+  l.observe({ type: "a:__error", payload: { _method: "load" } }, st);
+  for (const c of ["a", "b"]) l.observe({ type: `${c}:__destroy` }, st);
+  l.onStop();
+  await l.flush();
+  const app = await Deno.readTextFile(`${dir}/app.log`);
+  const line = app.split("\n").filter((x) => /\bstopped\b/.test(x)).pop()!;
+  assertEquals(/\bdispatched=(\d+)/.exec(line)?.[1], "2", line);
+});

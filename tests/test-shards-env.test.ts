@@ -10,6 +10,7 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   portSliceFor,
   shardEnv,
+  shardTestFlags,
   SWALLOW_OK,
   SWALLOWED_PRESS,
   swallowedPresses,
@@ -127,4 +128,14 @@ Deno.test("swallowed press ratchet: real deno output is attributed, and the runn
       src.includes("left: left.length > 0 || swallowed.length > 0,"),
     "scripts/test-shards.ts must fail a shard whose log has a swallowed press",
   );
+});
+
+// A leak an earlier file of a shard leaves surfaces in a later file's first
+// test, in full runs only; `AIO_TEST_TRACE_LEAKS=1` is how the next full run
+// names the stack that started it.
+Deno.test("shardTestFlags: sanitizers always, --trace-leaks only when asked", () => {
+  const base = ["-A", "--sanitize-ops", "--sanitize-resources"];
+  assertEquals(shardTestFlags(undefined), base);
+  assertEquals(shardTestFlags("0"), base);
+  assertEquals(shardTestFlags("1"), [...base, "--trace-leaks"]);
 });

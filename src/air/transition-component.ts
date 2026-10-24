@@ -2,7 +2,7 @@
 // Detects when child appears/disappears in the VDOM and applies transition functions.
 // Uses deferred DOM removal (onBeforeRemove) for exit animations.
 
-import type { VNode } from "./vdom.ts";
+import type { VChild, VNode } from "./vdom.ts";
 import { h } from "./vdom.ts";
 import {
   _applyTransition,
@@ -54,8 +54,21 @@ export interface TransitionProps {
  * </Transition>
  * ```
  */
-export function Transition(props: TransitionProps): VNode | null {
-  const child = props.children.find((c) => c != null) ?? null;
+export function Transition(props: TransitionProps): VNode | null;
+// An ADDED overload (`TransitionProps` is frozen: its `children` is an array
+// type), so the form this component's own example shows — one child,
+// `{show.value && <Modal />}` — type-checks: JSX hands a single child over
+// as-is, and the array-only type refused it (TS2745) and `false` with it.
+export function Transition(
+  props: Omit<TransitionProps, "children"> & { children?: VChild },
+): VNode | null;
+export function Transition(
+  props: Omit<TransitionProps, "children"> & { children?: VChild },
+): VNode | null {
+  const kids = Array.isArray(props.children)
+    ? props.children
+    : [props.children];
+  const child = kids.find((c) => c != null && typeof c !== "boolean") ?? null;
   if (child == null || typeof child !== "object") {
     return child as VNode | null;
   }

@@ -148,6 +148,41 @@ export function noLockOnPortMessage(port: number): string {
     `  an orphan SERVING with no lock is what \`am kill --stale --port=${port}\` reaps`;
 }
 
+/** The app `--port=N` names, for a verb that READS about it (`status`,
+ *  `logs`): a lock holding the port first, else the port is asked
+ *  (`/__aio/health`). Never the cwd's app — `--port` identifies. */
+export async function appIdOnPort(
+  flags: GlobalFlags,
+): Promise<
+  | { ok: true; appId: string }
+  | { ok: false; error: string; nothingThere?: true }
+> {
+  const t = resolveLockTarget(flags);
+  if (t.kind === "target") return { ok: true, appId: t.target.appId };
+  if (t.kind === "none") return { ok: false, error: t.error };
+  const p = await probePort(t.port);
+  if (p.kind === "aio") {
+    const wanted = flags.app ? resolveAppId(flags.app) : undefined;
+    return wanted && wanted !== p.appId
+      ? {
+        ok: false,
+        error: `port ${t.port} answers as app "${p.appId}", not "${wanted}" ` +
+          `(--app) — refusing to report on a different app`,
+      }
+      : { ok: true, appId: p.appId };
+  }
+  // `nothingThere`: no aio app answers on N — the caller decides whether that
+  // is "stopped" (status), a fallback (logs of a crashed app) or a refusal.
+  return {
+    ok: false,
+    nothingThere: true,
+    error: p.kind === "closed"
+      ? `nothing is listening on port ${t.port} (running instances: am instances)`
+      : `port ${t.port} is not an aio app (${p.kind}) — wrong port? ` +
+        `(running instances: am instances)`,
+  };
+}
+
 export async function resolveStopTarget(
   flags: GlobalFlags,
 ): Promise<{ ok: true; target: StopTarget } | { ok: false; error: string }> {
@@ -834,7 +869,17 @@ export async function cmdStop(
     }
   }
   if (!resolved.ok) {
-    outError(resolved.error, mode);
+    // Exit 1 stays (the CLI surface is frozen, and a typo'd --app reads
+    // exactly like an app already down) — but the message says which of the
+    // two outcomes a script is looking at, and the idempotent spelling.
+    outError(
+      resolved.error.startsWith("app not running: no lock file")
+        ? `am stop: nothing to stop — ${resolved.error}\n  exit 1 all the ` +
+          `same (a mistyped --app looks exactly like this); a script that ` +
+          `only needs it down: \`am stop … || true\``
+        : resolved.error,
+      mode,
+    );
     Deno.exit(1);
   }
   const pf = resolved.target.pf;

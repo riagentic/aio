@@ -51,7 +51,10 @@ irm https://raw.githubusercontent.com/riagentic/aio/main/run.ps1 | iex
    Windows
    ([the layout](../persistence/where-files-live.md#the-program-vs-its-data)).
 7. **Run** — the installed artifact is executed. AppImages run with
-   `APPIMAGE_EXTRACT_AND_RUN=1`, so no FUSE is needed — containers included.
+   `APPIMAGE_EXTRACT_AND_RUN=1`, so no FUSE is needed — containers included. In
+   that mode the AppImage's own process is the runtime, which forwards no signal
+   to the app; its `AppRun` hands the app the runtime's pid as `AIO_PARENT_PID`,
+   so a `kill` of that process stops the app (and its window) within ~2 s.
 
 **macOS:** a desktop (Electron) app is installed as its bundle —
 `~/app/<name>/versions/<version>/<Title>.app`, linked from

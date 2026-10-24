@@ -15,26 +15,10 @@ import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { cmdReplay, planReplay } from "../src/am/am-cmd-timeline.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
+import { capture } from "./am-capture-helper.ts";
 
 // deno-lint-ignore no-explicit-any
 type D = any;
-
-async function capture(fn: () => Promise<void>): Promise<unknown> {
-  const orig = console.log;
-  const origErr = console.error;
-  let captured: unknown;
-  console.log = (v: unknown) => {
-    captured = typeof v === "string" ? JSON.parse(v) : v;
-  };
-  console.error = () => {};
-  try {
-    await fn();
-  } finally {
-    console.log = orig;
-    console.error = origErr;
-  }
-  return captured;
-}
 
 Deno.test("am replay: a line stamped with another cell version is not sent to the running app — skipped, and said", async () => {
   const dir = await tempDir("aio-replay-version-");

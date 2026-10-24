@@ -176,6 +176,10 @@ switch (args[0]) {
   case "compile": {
     log("compile");
     Deno.writeTextFileSync(F.argvFile, args.join("\n") + "\n");
+    if (exists(F.failFile.replace("install-fails", "compile-fails"))) {
+      console.error("error: Module not found");
+      Deno.exit(1);
+    }
     args.forEach((a, i) => {
       if (args[i - 1] !== "-o") return;
       if (exists(F.binFile)) Deno.copyFileSync(F.binFile, a);
@@ -245,7 +249,12 @@ async function compiledWith(
   const warns: string[] = [];
   class Exit extends Error {}
   Deno.env.set("PATH", bin + DELIMITER + path);
-  console.warn = (...a: unknown[]) => warns.push(a.join(" "));
+  // The baked-`--client=cli` note is its own test's subject
+  // (cli-build-baked-args-warning); these fixtures declare no client.
+  console.warn = (...a: unknown[]) => {
+    const s = a.join(" ");
+    if (!s.includes("carries --client=cli")) warns.push(s);
+  };
   console.log = () => {};
   Deno.exit = (code?: number) => {
     throw new Exit(String(code));
@@ -290,6 +299,33 @@ const cfg = (root: string, tmp: string) =>
 
 const audited = (warns: string[]) =>
   warns.filter((w) => w.includes("the build-tool audit could not read"));
+
+Deno.test({
+  name:
+    "compile wiring: a failed deno compile is said to be deno's — once, with the fix",
+  async fn() {
+    const tmp = await tempDir("compile-wiring-deno-fails-");
+    try {
+      const { root, nm } = await project(tmp);
+      await Deno.writeTextFile(join(tmp, "compile-fails"), "");
+      const said: string[] = [];
+      const error = console.error;
+      console.error = (...a: unknown[]) => void said.push(a.join(" "));
+      let ok: unknown;
+      await compiledWith(
+        tmp,
+        graph(root, nm, ["lib@1.0.0"]),
+        async () => ok = await runDenoCompile(cfg(root, tmp)),
+      ).finally(() => console.error = error);
+      assertEquals(ok, false);
+      const blamed = said.filter((m) => m.includes("deno compile failed"));
+      assertEquals(blamed.length, 1, said.join("\n"));
+      assertStringIncludes(blamed[0]!, "compile.include");
+    } finally {
+      await dropTempDir(tmp);
+    }
+  },
+});
 
 Deno.test({
   name:
@@ -702,6 +738,11 @@ Deno.test({
       assertStringIncludes(why[0]!, PLATFORM);
       assertStringIncludes(why[0]!, "error: no network");
       assertStringIncludes(why[0]!, "Nothing was built");
+      // aio's own stop, not deno's: the line blaming deno is not said.
+      assert(
+        !said.some((m) => m.includes("deno compile failed")),
+        said.join("\n"),
+      );
       assertEquals(await lock(), LOCK);
       assertEquals(installed(), before);
 

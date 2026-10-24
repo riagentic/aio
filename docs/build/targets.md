@@ -666,22 +666,22 @@ where no exec bit exists, "executable" is what Windows runs by its name: `.exe`,
 `deno task ship` (sign + publish a built artifact — see
 [updates](../deploy/updates.md)):
 
-| Flag                       | Effect                                                                                                    |
-| -------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `--src=DIR`                | Source directory of the build (default: the artifact's)                                                   |
-| `--name=N` / `--version=V` | Override the app name / version recorded in the manifest                                                  |
-| `--key=key.json`           | Signing key (default `~/.aio/keys/<name>-release-key.json` when it exists)                                |
-| `--channel=X`              | `dev` \| `test` \| `prod`                                                                                 |
-| `--target=T`               | Which target the artifact is (when two build for one platform)                                            |
-| `--url=U` / `--notes=…`    | Artifact download URL / release notes in the manifest                                                     |
-| `--min-from=X.Y.Z`         | Refuse to update FROM anything older than this (a forced-step release)                                    |
-| `--data=contract.json`     | Data contract to publish with the release; `--no-data` skips the data probe                               |
-| `--out=ship.json`          | Manifest path                                                                                             |
-| `--channel-dir=DIR`        | Also write `DIR/<channel>/<os>-<arch>.json` — the layout an update client fetches                         |
-| `--allow-dirty`            | publish a `-dirty`/`-nogit` build anyway — logged; a published build should be reproducible from a commit |
-| `--github`                 | `ship github`: write a GitHub release workflow                                                            |
-| `--stdout`                 | `ship keygen --stdout`: print the key pair for a CI secret instead of writing a file                      |
-| `--force`                  | `ship keygen`: overwrite an existing key / write one inside a git tree anyway                             |
+| Flag                       | Effect                                                                                                       |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `--src=DIR`                | Source directory of the build (default: the artifact's)                                                      |
+| `--name=N` / `--version=V` | Override the app name / version recorded in the manifest                                                     |
+| `--key=key.json`           | Signing key (default `~/.aio/keys/<name>-release-key.json` when it exists)                                   |
+| `--channel=X`              | Channel name (default `build.channel`, else `prod`) — letters, digits, `. _ + -`; e.g. `dev`, `test`, `prod` |
+| `--target=T`               | Which target the artifact is (when two build for one platform)                                               |
+| `--url=U` / `--notes=…`    | Artifact download URL / release notes in the manifest                                                        |
+| `--min-from=X.Y.Z`         | Refuse to update FROM anything older than this (a forced-step release)                                       |
+| `--data=contract.json`     | Data contract to publish with the release; `--no-data` skips the data probe                                  |
+| `--out=ship.json`          | Manifest path                                                                                                |
+| `--channel-dir=DIR`        | Also write `DIR/<channel>/<os>-<arch>.json` — the layout an update client fetches                            |
+| `--allow-dirty`            | publish a `-dirty`/`-nogit` build anyway — logged; a published build should be reproducible from a commit    |
+| `--github`                 | `ship github`: write a GitHub release workflow                                                               |
+| `--stdout`                 | `ship keygen --stdout`: print the key pair for a CI secret instead of writing a file                         |
+| `--force`                  | `ship keygen`: overwrite an existing key / write one inside a git tree anyway                                |
 
 ### Which "title" names what
 
@@ -810,8 +810,9 @@ deno task compile
 
 Bundles `src/App.tsx` and everything it imports into a fully self-contained
 `dist/app.js` (no CDN dependency), then runs `deno compile` to produce a
-standalone binary (~95MB). Dev-only packages (electron, esbuild, react,
-react-dom) are excluded automatically.
+standalone binary (~110 MB on Linux x86_64, most of it the Deno runtime).
+Dev-only packages (electron, esbuild, react, react-dom) are excluded
+automatically.
 
 `dist/app.js` is an INTERMEDIATE file, not something to serve: `deno compile`
 embeds it, and the fleet then assembles a clean `dist/` holding the binaries and
@@ -822,11 +823,13 @@ dist/`). Running
 the source with `--prod` afterwards has nothing to serve, and warns at boot; run
 the binary in `dist/`, or `deno task dev`.
 
-The binary name comes from deno.json `"title"` (lowercased, spaces to hyphens).
+The binary name comes from deno.json `"title"` (lowercased, spaces to hyphens),
+followed by the build's version (`major.minor.<commit count>`,
+[versioning](versioning.md)):
 
 ```sh
-./my-app                       # binary name derived from title "My App"
-./my-app --port=3000           # custom port
+./dist/my-app-0.1.7                 # title "My App", version "0.1", 7 commits
+./dist/my-app-0.1.7 --port=3000     # custom port
 ```
 
 > Scaffolds ship `compile` (the default target) and `build` (the declared
@@ -2022,9 +2025,19 @@ sw.js                  the offline cache
   the `assets` mounts' files after them, two at a time — a first visit's page
   (not yet controlled by the worker) keeps most of the bandwidth for its own
   requests. The update is still all or nothing: any file that fails fails it.
-  Each build is cached whole: a deploy downloads every file again, the `assets`
-  too, and the version in the page (`appVersion()`, which moves with every
-  commit) makes each commit's build a new one. A browser that refuses the worker
+  Each build is cached whole, but an `assets` mount file whose bytes did not
+  change is not downloaded again: the new build's install copies it from the
+  cache of the build it replaces when the stored bytes hash to the new build's
+  SHA-256 (measured in Chromium and WebKit: an unchanged pack, 0 downloads).
+  Everything else is fetched as before — the page's own files every deploy (the
+  version in the page, `appVersion()`, moves with every commit), a changed
+  asset, a file over 16 MiB (the copy is hashed in memory: two 60 MB copies took
+  a WebKit web process to ~620 MB), and an image a host rewrites (its bytes
+  never match). While a build installs, the previous one stays whole beside it:
+  an update needs room for both, and a store too small fails the install
+  (`✗ [aio] offline cache: this build was not installed — …` in the worker's
+  console) and the previous build keeps serving. Only caches made before the new
+  build's are dropped when it takes over. A browser that refuses the worker
   (plain `http` off localhost, `file://`) logs
   `[aio] offline cache (service worker) not registered` in the console; the app
   still runs online.
@@ -2207,10 +2220,11 @@ the password from the environment (a variable that is set wins over the file):
 ```
 
 A password is never read from `deno.json` — a `build.android` key naming one
-(`keyPassword`, `storePassword`, …) stops the build. `"aab": true` there makes
-an **unsigned** `--release` write `<name>-unsigned.aab` beside the unsigned APK
-(Gradle's `bundleRelease`, which adds to the build time), for a bundle you sign
-yourself. A signed release always writes its `.aab`.
+(`keyPassword`, `storePassword`, …) is ignored, with a warning on every build.
+`"aab": true` there makes an **unsigned** `--release` write
+`<name>-unsigned.aab` beside the unsigned APK (Gradle's `bundleRelease`, which
+adds to the build time), for a bundle you sign yourself. A signed release always
+writes its `.aab`.
 
 ### State survives a kill
 
@@ -2453,6 +2467,37 @@ template does them, for a standalone APK and for one that talks to a server:
   10 seconds stops the app instead of reloading in a loop. Both are logged under
   the tag `aio`.
 
+### Deep links — `android.schemes`
+
+An APK can open its own URL scheme — a `myapp://…` link in a browser, a mail or
+another app starts (or brings forward) the app:
+
+```json
+{
+  "android": { "schemes": ["myapp"] }
+}
+```
+
+The page gets the link, whether it started the app or arrived while it ran:
+
+```ts
+addEventListener("aio:open-url", (e) => {
+  const url = (e as CustomEvent<{ url: string }>).detail.url; // "myapp://item/42"
+});
+const launchedWith = (globalThis as { __aioOpenUrl?: string }).__aioOpenUrl;
+```
+
+The event fires once the page has loaded (a client APK: once the server's page
+has, never on the connect form); `window.__aioOpenUrl` keeps the last link for
+code that looks later. Any app can send such a link, so treat it as input: parse
+it, never run it. A scheme is lower case (`[a-z][a-z0-9+.-]*` — Android matches
+it case-sensitively); `http`, `https`, `file`, `content`, `intent`,
+`javascript`, `tel`, `mailto` and the other system/web schemes are refused, and
+so is anything that is not an array of strings — on every build, not only an
+Android one. With schemes declared the activity is `singleTask`, so a link
+reaches the copy that is open instead of starting a second one in the sender's
+task.
+
 ### The camera is opt-in
 
 An APK declares `android.permission.CAMERA` **only when the app asks for it**:
@@ -2477,6 +2522,12 @@ E aio: camera DENIED: this page asked for the camera, but the APK does not
   declare android.permission.CAMERA. It is opt-in: add "android": { "camera":
   true } to your deno.json and rebuild.
 ```
+
+The shell grants the camera only. Ask for `{ video: true }` alone: the WebView
+grants a request whole or not at all, so `{ video: true, audio: true }` is
+denied (`NotAllowedError`), and logcat says so
+(`W aio: WebView permission request
+DENIED: … refuses a request it cannot grant whole`).
 
 `camera: true` also declares **both** `android.hardware.camera` and
 `android.hardware.camera.any` as `required="false"`, so the app still installs
@@ -2588,13 +2639,13 @@ Overlaid files still go through placeholder substitution, and `dev:android`
 rewrites two exact strings in `MainActivity.kt`. So a replacement must keep what
 the build reaches for, or that step quietly does nothing:
 
-| If you replace        | Keep                                                                                                                                                                                                                                                                                                                                                               |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `MainActivity.kt`     | `loadUrl("https://appassets.androidplatform.net/assets/index.html")` — rewritten to the dev server's URL                                                                                                                                                                                                                                                           |
-| `MainActivity.kt`     | `return !url.startsWith("https://appassets.androidplatform.net/")` — rewritten so dev navigation stays in the WebView                                                                                                                                                                                                                                              |
-| `AndroidManifest.xml` | `{{APPLICATION_ID}}`, `{{APP_NAME}}`, `{{ICON_ATTR}}`, `{{CLEARTEXT_ATTR}}` and `{{CAMERA_PERMISSION}}` — `{{CLEARTEXT_ATTR}}` becomes `android:usesCleartextTraffic="true"` for a dev or `--remote` build and nothing for a standalone one; `{{CAMERA_PERMISSION}}` becomes the CAMERA declaration only with [`android: { camera: true }`](#the-camera-is-opt-in) |
-| `MainActivity.kt`     | `{{CAMERA_DECLARED}}` — the same flag, so the WebView's refusal cannot disagree with the manifest                                                                                                                                                                                                                                                                  |
-| `MainActivity.kt`     | `{{SPLASH}}` — `null`, or the [splash](#splash-on-android) that `build.splash` bakes in                                                                                                                                                                                                                                                                            |
+| If you replace        | Keep                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MainActivity.kt`     | `loadUrl("https://appassets.androidplatform.net/assets/index.html")` — rewritten to the dev server's URL                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `MainActivity.kt`     | `return !url.startsWith("https://appassets.androidplatform.net/")` — rewritten so dev navigation stays in the WebView                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `AndroidManifest.xml` | `{{APPLICATION_ID}}`, `{{APP_NAME}}`, `{{ICON_ATTR}}`, `{{CLEARTEXT_ATTR}}` and `{{CAMERA_PERMISSION}}` — `{{CLEARTEXT_ATTR}}` becomes `android:usesCleartextTraffic="true"` for a dev or `--remote` build and nothing for a standalone one; `{{CAMERA_PERMISSION}}` becomes the CAMERA declaration only with [`android: { camera: true }`](#the-camera-is-opt-in); `{{DEEP_LINK_ATTR}}` and `{{DEEP_LINK_FILTERS}}` become `singleTask` and one VIEW filter per scheme only with [`android.schemes`](#deep-links--androidschemes) |
+| `MainActivity.kt`     | `{{CAMERA_DECLARED}}` — the same flag, so the WebView's refusal cannot disagree with the manifest; `{{DEEP_LINKS}}` — whether schemes are declared, the same list as the manifest's filters                                                                                                                                                                                                                                                                                                                                        |
+| `MainActivity.kt`     | `{{SPLASH}}` — `null`, or the [splash](#splash-on-android) that `build.splash` bakes in                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 A replacement `MainActivity.kt` also replaces what the template's activity does,
 and the build **warns** when an overlay drops any of these:

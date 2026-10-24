@@ -30,6 +30,9 @@ Deno.test("am: the measured no-op flags are warned about, naming who reads them"
       ["timeline", "--follow", "am logs"],
       ["sql", "--lines=1", "am timeline"],
       ["status", "--all", "am stop"],
+      ["surface", "--wait=3", "am expect"],
+      ["logs", "--wait=2", "am start"],
+      ["status", "--wait", "am stop"],
     ] as const
   ) {
     const e = misplacedFlagError(verb, [flag]);
@@ -45,7 +48,7 @@ Deno.test("am: a scoped flag is still accepted where it is read", () => {
     assert(GLOBAL_FLAGS.includes(flag), `${flag} is not a global flag`);
     for (const v of verbs) {
       n++;
-      assert(v in VERB_FLAGS, `${v} is not a gated verb`);
+      assert(v in VERB_FLAGS || v in PASSTHROUGH, `${v} is not a verb`);
       assertEquals(misplacedFlagError(v, [`${flag}=1`]), null, `${v} ${flag}`);
     }
   }
@@ -53,7 +56,7 @@ Deno.test("am: a scoped flag is still accepted where it is read", () => {
   assertEquals(misplacedFlagError("actions", ["--lines=1"]), null);
   assertEquals(misplacedFlagError("stop", ["--all"]), null);
   // Cross-cutting flags stay everywhere.
-  for (const f of ["--json", "--app=x", "--port=1", "--quiet", "--wait=2"]) {
+  for (const f of ["--json", "--app=x", "--port=1", "--quiet", "--no-wait"]) {
     assertEquals(misplacedFlagError("status", [f]), null, f);
   }
   // A forwarding verb is never judged; after `--` nothing is a flag.

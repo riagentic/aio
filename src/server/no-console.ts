@@ -338,6 +338,111 @@ const K32_START = {
   CloseHandle: { parameters: ["pointer"], result: "i32" },
 } as const;
 
+/** Have Windows pass its verdict on `exe` on a POOL thread, before the spawn
+ *  that follows starts it on the event loop's.
+ *
+ *  `Deno.Command.spawn()` is `CreateProcessW` on the calling thread, and for
+ *  an executable Windows has not run before, that call waits for Defender.
+ *  Measured on Windows 11 (2026-10-13), a never-run exe, 20 of them:
+ *  1.3 – 11.5 s inside `spawn()` (three at 10 s or more — the cloud verdict's
+ *  own timeout); the same file a second time, 3 ms. For that long the app
+ *  ran no JavaScript at all: a control request sent to it then — the first
+ *  `am state` after a boot — was taken by the kernel on the app's pipe and
+ *  answered by nobody. A window's runtime is such a file on every first start
+ *  after an install or an update.
+ *
+ *  What moves the wait off the loop — measured, each on 10 never-run files,
+ *  as the time `spawn()` then took: reading the whole file first, 1.9 – 11 s;
+ *  opening it for execute, 0.9 – 10.5 s; mapping it as an image, 9 ms – 10 s;
+ *  creating the process once — suspended, so not one instruction of it runs
+ *  — and ending it, 3 – 6 ms, 10 of 10. The verdict is on the process
+ *  creation, so that is what is done here, by a `nonblocking` FFI call.
+ *
+ *  Never fatal, and it decides nothing: whatever it returns, the caller's
+ *  own spawn follows and is the one that reports a binary that cannot be
+ *  started. Without `--allow-ffi` the spawn waits on the loop as before, and
+ *  the reason is returned for the caller to log. Once per program path per
+ *  process: a second spawn of it has nothing left to wait for. */
+export async function firstRunVerdict(
+  exe: string,
+  os: typeof Deno.build.os = Deno.build.os,
+  /** Test seam: kernel32. */
+  open: (
+    name: string,
+    symbols: typeof K32_VERDICT,
+  ) => Deno.DynamicLibrary<typeof K32_VERDICT> = Deno.dlopen,
+): Promise<"given" | "not-windows" | string> {
+  if (os !== "windows") return "not-windows";
+  if (_verdictGiven.has(exe)) return "given";
+  try {
+    if (Deno.permissions.querySync({ name: "ffi" }).state !== "granted") {
+      return "no --allow-ffi";
+    }
+  } catch {
+    // aio-ok: no permissions API — the dlopen below answers instead
+  }
+  let k32: Deno.DynamicLibrary<typeof K32_VERDICT> | null = null;
+  try {
+    k32 = open("kernel32.dll", K32_VERDICT);
+    // Held in one object that is read again after the call: nothing else
+    // keeps a buffer alive while a pool thread uses it. `si` and `pi` over
+    // their own ArrayBuffers — the kernel writes into them from that thread.
+    const held = {
+      cmdline: utf16z(windowsCommandLine([exe])),
+      cwd: utf16z(neutralCwd(os)!),
+      si: new Uint8Array(new ArrayBuffer(104)), // STARTUPINFOW, x64
+      pi: new Uint8Array(new ArrayBuffer(24)), // PROCESS_INFORMATION, x64
+    };
+    new DataView(held.si.buffer).setUint32(0, held.si.byteLength, true);
+    const CREATE_SUSPENDED = 0x4;
+    const CREATE_NO_WINDOW = 0x08000000;
+    const ok = await k32.symbols.CreateProcessW(
+      null,
+      held.cmdline,
+      null,
+      null,
+      0,
+      CREATE_SUSPENDED | CREATE_NO_WINDOW,
+      null,
+      held.cwd,
+      held.si,
+      held.pi,
+    );
+    // No code: the call ran on a pool thread, and the last error is that
+    // thread's. The spawn that follows fails the same way, and names it.
+    if (!ok) return "CreateProcessW (suspended) failed";
+    const dv = new DataView(held.pi.buffer);
+    const proc = Deno.UnsafePointer.create(dv.getBigUint64(0, true));
+    const thread = Deno.UnsafePointer.create(dv.getBigUint64(8, true));
+    const ended = k32.symbols.TerminateProcess(proc, 0);
+    k32.symbols.CloseHandle(proc);
+    k32.symbols.CloseHandle(thread);
+    if (!ended) {
+      return `a suspended ${exe} (pid ${
+        dv.getUint32(16, true)
+      }) could not be ended — it holds no window and runs nothing, end it by hand`;
+    }
+    _verdictGiven.add(exe);
+    return "given";
+  } catch (e) {
+    return `first-run verdict unavailable: ${
+      e instanceof Error ? e.message : e
+    }`;
+  } finally {
+    k32?.close();
+  }
+}
+
+/** Programs this process already had judged (see `firstRunVerdict`). */
+const _verdictGiven = new Set<string>();
+
+const K32_VERDICT = {
+  // On a pool thread — the whole point: see `firstRunVerdict`.
+  CreateProcessW: { ...K32.CreateProcessW, nonblocking: true },
+  TerminateProcess: K32.TerminateProcess,
+  CloseHandle: K32.CloseHandle,
+} as const;
+
 /** NUL-terminated UTF-16LE, as the W APIs take it (and may write into). */
 function utf16z(s: string): Uint8Array<ArrayBuffer> {
   const b = new Uint16Array(s.length + 1);

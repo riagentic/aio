@@ -174,8 +174,51 @@ export function appHue(name: HueKey): number {
 }
 
 /** What keys an app's hue: its appId (hashed), or the hue itself — deno.json
- *  `hue`, already resolved by {@linkcode declaredHue}. */
-export type HueKey = string | number;
+ *  `hue`, already resolved by {@linkcode declaredHue} — or either of those
+ *  with deno.json `"neutral": "soft"` ({@linkcode SoftHue}). */
+export type HueKey = string | number | SoftHue;
+
+/** A hue key whose theme keeps its neutrals (page, surfaces, borders, text)
+ *  close to grey — deno.json `"neutral": "soft"`. The accent keeps the hue. */
+export type SoftHue = {
+  readonly key: string | number;
+  readonly neutral: "soft";
+};
+
+/** Does `name` ask for soft neutrals ({@linkcode SoftHue})? Pure. */
+export function isSoftHue(name: HueKey): name is SoftHue {
+  return typeof name === "object" && name !== null;
+}
+
+/** deno.json `neutral`: how much of the app's hue its neutrals carry —
+ *  `"tinted"` (the default: a few degrees of it, one designed palette) or
+ *  `"soft"` (near-grey: a warm or magenta hue tints large surfaces visibly).
+ *  Undefined when unset or `"tinted"`; a THROW for anything else, as `hue`
+ *  does. Pure. */
+export function declaredNeutral(
+  denoJson: Record<string, unknown> | null | undefined,
+): "soft" | undefined {
+  const v = denoJson?.neutral;
+  if (v === undefined || v === "tinted") return undefined;
+  if (v === "soft") return "soft";
+  throw new Error(
+    `deno.json "neutral" must be "soft" (near-grey page, surfaces and ` +
+      `borders) or "tinted" (the default) — got ${JSON.stringify(v)}.`,
+  );
+}
+
+/** deno.json's hue for the places that fall back to the app's identity
+ *  themselves (`hue ?? appId`): the declared hue, or — with `"neutral":
+ *  "soft"` — the {@linkcode SoftHue} over it (else over `fallback`, the
+ *  appId the caller would hash). Undefined when deno.json sets neither. */
+export function declaredThemeHue(
+  denoJson: Record<string, unknown> | null | undefined,
+  fallback: string,
+): HueKey | undefined {
+  return declaredNeutral(denoJson)
+    ? hueKey(denoJson, fallback)
+    : declaredHue(denoJson);
+}
 
 /** deno.json `hue`: the app's hue chosen instead of hashed — undefined when
  *  unset, an integer 0–359 when valid, and a THROW for anything else (a hue
@@ -202,10 +245,12 @@ export function hueKey(
   denoJson: Record<string, unknown> | null | undefined,
   appId: string,
 ): HueKey {
-  return declaredHue(denoJson) ?? appId;
+  const key = declaredHue(denoJson) ?? appId;
+  return declaredNeutral(denoJson) ? { key, neutral: "soft" } : key;
 }
 
 function hueOf(name: HueKey): number {
+  if (isSoftHue(name)) return hueOf(name.key);
   if (typeof name === "number") return name;
   let h = 0x811c9dc5;
   // `|| "app"` — a build path that never resolved a title/binaryName must get

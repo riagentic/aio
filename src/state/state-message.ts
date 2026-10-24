@@ -64,7 +64,7 @@ export function handleMessage(data: any): HandleResult {
     const firstEver = _accessedPaths.size === 0;
     _initialStateReceived = true;
     _resyncAsked = 0;
-    _applyFullState(data);
+    _applyFullState(data, true);
     // Clear ONLY on the true first state of the session.
     //
     // A reconnect re-enters this branch (`_resetInitialStateFlag()` runs on

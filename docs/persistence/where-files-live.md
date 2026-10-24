@@ -16,6 +16,8 @@ none of it is state.
     tls/            self-signed cert + key    🔒 secret
     files/          whatever your app writes
     app.key         the persisted access token (key: true)  🔒 secret
+    control.key     the token `am` presents to the running app (per boot, removed at stop) 🔒
+    meta.json       which appId and profile own this home (boot checks it)
     backups/        pre-update store snapshots (3 kept) — see updates
     update-*.json   the updater's own records (a self-updating app) — see below
   electron/ ← ①b the desktop window's Chromium profile: cookies, Local Storage,
@@ -25,6 +27,7 @@ none of it is state.
   cache/    ← ② regenerable BULK your app writes: downloads, build trees, thumbnails
   app/      ← ② the unpacked binaries a packaged app RUNS from (AppImage) 🔒 0700
   launch.json ← ② the flags `am` started it with, so `am restart` replays them
+  backups/  ← what `am backup` writes when given no destination (one folder per run)
   .aio-instance.lock  ← the home's OS lock, held while the app runs: one process
   .aio-instance.json    per folder, whatever lock scope (the json names the holder)
 

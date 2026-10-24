@@ -63,7 +63,15 @@ Deno.test("hydrate: a shorter client text before an empty region leaves no dupli
       console.warn = warn;
       g.__aioDev = dev;
     }
-    assertEquals(warned, [], "hydrate repaired server leftovers");
+    // The text itself DID diverge ("Loading" on the server, "" now) and is
+    // said as such; nothing else may be — no leftover for the surplus pass.
+    const said = warned.map((a) => String(a[0]));
+    assertEquals(
+      said.filter((w) => !w.includes("found text in <p>")),
+      [],
+      "hydrate repaired server leftovers",
+    );
+    assertEquals(said.length, 1, "the text divergence is said once");
     assertEquals(host.innerHTML, want);
     assertEquals(host.textContent, "z");
     rows.set(["r"]);

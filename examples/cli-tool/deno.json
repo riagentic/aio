@@ -1,6 +1,7 @@
 {
   "title": "ex-cli-tool",
   "version": "0.1.0",
+  "client": "cli",
   "nodeModulesDir": "auto",
   "compilerOptions": {
     "lib": ["deno.ns", "deno.unstable", "dom", "dom.iterable"]

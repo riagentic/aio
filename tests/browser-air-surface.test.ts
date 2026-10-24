@@ -78,6 +78,8 @@ const EXTRA_ON_BROWSER: Record<string, string> = {
   msg: "the `aio` specifier maps here — action creator",
   own: "the `aio` specifier maps here — owned-resource effect creators",
   notify: "the `aio` specifier maps here — desktop-notification effect creator",
+  appIcon:
+    "the `aio` specifier maps here — run-time window/tray icon effect creator",
   schedule: "the `aio` specifier maps here — browser schedule stub",
   self: "the `aio` specifier maps here — self-action descriptor a cell " +
     "module uses in schedule.* (report 9b §3; tests/browser-air-mod-parity)",
@@ -91,6 +93,8 @@ const EXTRA_ON_BROWSER: Record<string, string> = {
   sleep: "the `aio` specifier maps here — async-method helper",
   UntilTimeoutError: "the `aio` specifier maps here — until()'s error",
   errorCode: "the `aio` specifier maps here — reads a call error's code",
+  errorSummary: "the `aio` specifier maps here — a call error as one " +
+    "readable line (mod.ts)",
   createSelector: "the `aio` specifier maps here — memoized selector",
   authClient: "the `aio` specifier maps here — client auth API",
   createAuthClient: "the `aio` specifier maps here — client auth API factory",

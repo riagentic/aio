@@ -4,7 +4,7 @@
 // and sabotaged ones that must fail with the line that says why.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { assertThrows } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   leftRunning,
   logProblems,
@@ -12,6 +12,7 @@ import {
   shellGuestPreloads,
   shellUrls,
   smokeBuild,
+  smokeCli,
   smokeElectron,
   smokeExit,
   smokeMode,
@@ -251,6 +252,69 @@ Deno.test("smoke: the log lines that mean 'did not come up clean' — and the or
     `[aio:electron] declared guest preload missing — REFUSED at startup: src/guest/preload.cjs — gone`,
     `error: Uncaught (in promise) TypeError: x is not a function`,
   ]);
+});
+
+Deno.test({
+  name:
+    "smoke: a cli binary whose --help is aio's own help passes — its prose says REFUSED, which is not a refusal",
+  ignore: Deno.build.os === "windows",
+  fn: async () => {
+    const dir = await tempDir("aio-smoke-cli-");
+    try {
+      // aio's real help text, printed the way a compiled cli binary prints it.
+      const main = join(dir, "help.ts");
+      await Deno.writeTextFile(
+        main,
+        `import { printHelp } from ${
+          JSON.stringify(
+            new URL("../src/server/aio-cli.ts", import.meta.url).href,
+          )
+        };\nprintHelp({ usage: "app [flags]" });\n`,
+      );
+      const bin = join(dir, "app");
+      await Deno.writeTextFile(
+        bin,
+        `#!/bin/sh\nexec ${JSON.stringify(Deno.execPath())} run -A --config ${
+          JSON.stringify(
+            fromFileUrl(new URL("../deno.json", import.meta.url)),
+          )
+        } ${JSON.stringify(main)}\n`,
+      );
+      await Deno.chmod(bin, 0o755);
+      assertEquals(await smokeCli(bin), []);
+      // …and a cli whose --help fails is still FAILED.
+      await Deno.writeTextFile(
+        bin,
+        "#!/bin/sh\necho REFUSED: bad flag >&2\nexit 3\n",
+      );
+      const fails = await smokeCli(bin);
+      assert(fails.some((f) => f.includes("exited 3")), fails.join("\n"));
+    } finally {
+      await dropTempDir(dir);
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "smoke: a cli run gets the throwaway home as HOME, never the developer's",
+  ignore: Deno.build.os === "windows",
+  fn: async () => {
+    const dir = await tempDir("aio-smoke-home-");
+    try {
+      const bin = join(dir, "app");
+      // Green only when HOME sits in the same throwaway dir as TMPDIR.
+      await Deno.writeTextFile(
+        bin,
+        '#!/bin/sh\n[ "$(dirname "$HOME")" = "$(dirname "$TMPDIR")" ] && exit 0\n' +
+          'echo "HOME=$HOME" >&2\nexit 3\n',
+      );
+      await Deno.chmod(bin, 0o755);
+      assertEquals(await smokeCli(bin), []);
+    } finally {
+      await dropTempDir(dir);
+    }
+  },
 });
 
 Deno.test("smoke: a declared guest preload the packaged shell does not list is a refusal", () => {

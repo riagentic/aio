@@ -42,10 +42,15 @@ function _whereInTree(
     (children.length > 4 ? `, … (${children.length} total)` : "");
 }
 
+/** Parents already told about a list shift — once per SITE: the warning's
+ *  text quotes the children, which the shift itself changes. */
+const _shifted = new WeakSet<Node>();
+
 export function _checkKeys(
   parent: Node,
   nextChildren: (VNode | string | number)[],
   hasKeys: boolean,
+  oldChildren: (VNode | string | number)[] = [],
 ): void {
   // A `_Null` slot is not a sibling with a missing key — it is the absence of
   // one. `{cond ? <span key="x"/> : null}` beside a keyed sibling is the most
@@ -119,6 +124,46 @@ export function _checkKeys(
       "Mixed keyed and unkeyed children — all siblings should have keys or none." +
         where,
     );
+  }
+  // An UNKEYED list that changed length shifts every sibling written after it
+  // by position: `{errors.map((e) => <p>{e}</p>)}<input/>` re-creates the
+  // input when the first error appears — the caret and the typed text gone
+  // mid-word, silently. One or two rows are below the missing-keys count
+  // above, so it said nothing. Said when it HAPPENS: a hand-written sibling
+  // reconciled against a list row, or a list row against one.
+  const oldKeyed = oldChildren.some(
+    (c) => typeof c === "object" && c !== null && c.key !== undefined,
+  );
+  // The SAME hand-written siblings on both sides — `{rows.length ? rows :
+  // <Empty/>}` swaps the list for a node no key would keep, and says nothing.
+  const literals = (l: (VNode | string | number)[]) =>
+    l.filter((c) =>
+      typeof c === "object" && c !== null && c.tag !== _Null && !_isFromArray(c)
+    ).length;
+  if (
+    !hasKeys && !oldKeyed && literals(nextChildren) > 0 &&
+    literals(nextChildren) === literals(oldChildren)
+  ) {
+    const n = Math.min(nextChildren.length, oldChildren.length);
+    for (let i = 0; i < n; i++) {
+      const a = nextChildren[i]!, b = oldChildren[i]!;
+      if (
+        typeof a !== "object" || typeof b !== "object" || b === null ||
+        _isFromArray(a) === _isFromArray(b) ||
+        a.tag === _Null || b.tag === _Null
+      ) continue;
+      if (_shifted.has(parent)) break;
+      _shifted.add(parent);
+      const where = _whereInTree(parent, nextChildren);
+      _devWarn(
+        `list-shift${where}`,
+        "An unkeyed list changed length, so the siblings written after it " +
+          "were matched against list rows by position — they are re-created " +
+          "(focus, caret and typed text lost) or patched with a row's state. " +
+          "Give the list's items keys (key={item.id})." + where,
+      );
+      break;
+    }
   }
   if (hasKeys) {
     const keys = new Set<string | number>();

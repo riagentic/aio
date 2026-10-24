@@ -500,6 +500,20 @@ export function portSliceFor(i: number, n: number): string {
   return `${first + i * span}-${first + (i + 1) * span - 1}`;
 }
 
+/** The flags every shard's `deno test` runs with. `AIO_TEST_TRACE_LEAKS=1`
+ *  adds `--trace-leaks`: a sanitizer failure then names the stack that STARTED
+ *  the leaked op — for a leak an earlier file of the shard left, seen only in
+ *  full runs (Windows: "an async call to left was started before the test"),
+ *  that stack is the only pointer to the file. Slower, so opt-in. Pure. */
+export function shardTestFlags(trace: string | undefined): string[] {
+  return [
+    "-A",
+    "--sanitize-ops",
+    "--sanitize-resources",
+    ...(trace === "1" ? ["--trace-leaks"] : []),
+  ];
+}
+
 /** Shard `i` of `n`'s environment — the three things that keep two shards
  *  from sharing anything: its own data home, its own port slice (below the
  *  OS ephemeral range, so `freePort()` in two shards can never be handed the
@@ -1398,9 +1412,7 @@ if (import.meta.main) {
         args: [
           ...pre,
           "test",
-          "-A",
-          "--sanitize-ops",
-          "--sanitize-resources",
+          ...shardTestFlags(Deno.env.get("AIO_TEST_TRACE_LEAKS")),
           // Process-lifetime FFI libraries belong to the process, not to the
           // first test that loads the framework (tests/preload-ffi.ts).
           `--preload=${join(ROOT, "tests", "preload-ffi.ts")}`,

@@ -369,6 +369,8 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
         // A notification crosses to the main thread like a timer does: the
         // clients are there.
         notify: (e) => post({ t: "effects", list: [e as unknown as Msg] }),
+        // The window's icon, too: the clients are on the main thread.
+        appIcon: (e) => post({ t: "effects", list: [e as unknown as Msg] }),
         // The scheduler is a main-isolate singleton — timers stay there.
         schedule: (e) => post({ t: "effects", list: [e as unknown as Msg] }),
         app: (e) => {

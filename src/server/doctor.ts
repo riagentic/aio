@@ -31,7 +31,11 @@ import {
 import { manifestReport, scanCapabilities } from "../build/capabilities.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { count } from "../diagnostics/fmt.ts";
-import { checkLockCoverage } from "./lock-coverage.ts";
+import {
+  checkLockCoverage,
+  lockLostVsHead,
+  lockPathOf,
+} from "./lock-coverage.ts";
 
 /** One doctor check — a named config assertion with a one-line fix on failure. */
 interface Check {
@@ -322,6 +326,22 @@ export async function lockCoverageLine(
   }
   if (!cfg) return null;
   const r = await checkLockCoverage(dir, cfg);
+  const rel = lockPathOf(cfg);
+  const lost = rel === null ? null : await lockLostVsHead(dir, rel);
+  if (lost && lost.length > 0) {
+    const shown = lost.slice(0, 6).join(", ");
+    const more = lost.length > 6 ? ` (+${lost.length - 6} more)` : "";
+    return {
+      ok: false,
+      line:
+        `  WARN  ${rel} has lost ${
+          count(lost.length, "entry", "entries")
+        } the committed one (git HEAD) holds\n        ${shown}${more}\n        ` +
+        `a run that could not load dep/aio prunes the lock, and the next ` +
+        `one re-resolves at whatever is newest — \`git checkout ${rel}\` ` +
+        `unless you removed a dependency on purpose`,
+    };
+  }
   if (r.status === "complete") {
     return {
       ok: true,

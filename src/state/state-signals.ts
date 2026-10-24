@@ -61,7 +61,12 @@ const _cache = _global.__aioSignals as {
   connected: Signal<boolean>;
   ready: Signal<boolean>;
   cells: Map<string, Signal<any>>;
+  delivered?: Set<string>;
 };
+/** Cells whose signal holds a slice a SERVER full-state frame put there —
+ *  the only ones a later frame can withdraw (see `_applyFullState`). A
+ *  client-scoped cell's signal is written here too, and never by a server. */
+const _delivered: Set<string> = _cache.delivered ??= new Set<string>();
 
 // ── Module state ─────────────────────────────────────────────────────
 
@@ -129,7 +134,13 @@ export function _serverDrivesCellSignal(cell: string): boolean {
   return _engineOwnsCell === null || !_engineOwnsCell(cell);
 }
 
-export function _applyFullState(state: Record<string, any>): void {
+export function _applyFullState(
+  state: Record<string, any>,
+  /** The frame is a connection's FIRST state — never subscription-filtered
+   *  (the server's set starts null on both transports and the frame goes out
+   *  before any `subs` is read), so it is this connection's whole view. */
+  wholeView = false,
+): void {
   batch(() => {
     // Readiness is set BEFORE the state itself, inside the same batch: a
     // component that renders off `ready` must not see it flip while its slices
@@ -141,6 +152,23 @@ export function _applyFullState(state: Record<string, any>): void {
       // AIO-4.4: freeze the value before installing in the cell signal so
       // component-side mutations throw in dev.
       _getOrCreateCellSignal(key, _maybeFreezeInDev(value)).set(value);
+      _delivered.add(key);
+    }
+    // …except in a connection's whole view. There an absent cell is one the
+    // server WITHHELD from this connection — `visible.forUser` failed closed,
+    // the documented "your UI sees the cell as absent" — and keeping the
+    // signal kept the PREVIOUS connection's slice on screen: alice's admin
+    // cell, still answering after bob signed in in the same tab. Reset, not
+    // deleted (the instance must stay stable, below); a getter reading
+    // `undefined` answers the declared state, as for a cell never sent.
+    if (wholeView) {
+      for (const key of _delivered) {
+        if (Object.hasOwn(state, key) || !_serverDrivesCellSignal(key)) {
+          continue;
+        }
+        _cellSignals.get(key)?.set(undefined);
+        _delivered.delete(key);
+      }
     }
     // NB: do NOT delete cell signals for keys absent from `state`. With
     // subscription filtering, an incoming full-state message is FILTERED to the
@@ -153,6 +181,29 @@ export function _applyFullState(state: Record<string, any>): void {
     // 2026-07-18 "read only after navigation never updates" bug. Signal
     // instances must stay stable for the session (same invariant _resetSignals
     // relies on: mutate values in place, never reassign).
+  });
+}
+
+/** Withdraw the cells a full frame COVERS but does not carry — the server
+ *  WITHHELD them from this connection (`visible.forUser` failed closed). The
+ *  frame says which cells it covers (`s`, see `encState` in
+ *  server-broadcast.ts): `null` = the whole view, else the subscription it
+ *  was filtered by. Without that word an absent cell may just be unsubscribed,
+ *  which keeps its copy. Only cells a server frame delivered; reset, not
+ *  deleted, as in `_applyFullState`. @internal */
+export function _withdrawWithheld(
+  state: Record<string, unknown>,
+  covers: readonly string[] | null,
+): void {
+  batch(() => {
+    for (const key of _delivered) {
+      if (
+        Object.hasOwn(state, key) || !_serverDrivesCellSignal(key) ||
+        (covers !== null && !covers.includes(key))
+      ) continue;
+      _cellSignals.get(key)?.set(undefined);
+      _delivered.delete(key);
+    }
   });
 }
 
@@ -211,6 +262,7 @@ export function _resetSignals(): void {
   _connected.set(false);
   _ready.set(false);
   for (const sig of _cellSignals.values()) sig.set(undefined);
+  _delivered.clear();
 }
 
 /** The cell a tracked signal belongs to, or null.

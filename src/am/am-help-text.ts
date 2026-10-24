@@ -141,6 +141,27 @@ export const EVERYDAY: readonly string[] = [
   "publish",
 ];
 
+/** THE `am trigger` actions — what the verb accepts and what its help names.
+ *  The help listed ten of sixteen and called the optional index required. */
+export const TRIGGER_ACTIONS = [
+  "click",
+  "dblclick",
+  "type",
+  "setValue",
+  "press",
+  "keyDown",
+  "keyUp",
+  "hover",
+  "focus",
+  "blur",
+  "select",
+  "check",
+  "uncheck",
+  "clear",
+  "scroll",
+  "dragTo",
+] as const;
+
 export const HELP_TEXT = `If you are an AI agent, start here:
   agent                   THE BRIEF (Markdown) — how aio works, the verbs, and
                           the seven rules that protect the user (never kill
@@ -252,13 +273,22 @@ Process (singleton — one instance per app identity):
                           maybe a person's window — am stop says so)
 
 State:
-  state [path] [--wait=N]  State query (dot-path, [*] wildcard, {pick})
+  state [path] [--wait=N]  State query (dot-path, [*] wildcard, {pick},
+                          [?k] / [?k=v] / [?k!=v] item filter);
+                          --wait=N RE-PRINTS it every N s until Ctrl-C (it
+                          never exits — for "until X" use am expect --wait=N)
   state <path> --watch    POLLS (every --wait=N s, default 2) and prints only
                           when the value differs from the last poll — the loop
                           you were about to write with \`until\`. A change
                           undone within one interval is not seen
   state --ui [user]       Server-side UI-state projection (was \`am ui\`; for
                           live client UI use: surface)
+  state --prod [path]     READ-ONLY client view of a running PRODUCTION app
+                          (what a WebSocket with the credential gets; works
+                          in dev too). Credential: none on loopback without
+                          auth · the app's shared key (read from its data
+                          dir) · per-user apps: AIO_TOKEN=<user token> — that
+                          user's view, never more. [?k] filters, --watch ok
   state --offline [path]  What a STOPPED app last persisted, read from its
                           store read-only (no boot, no write); --app=X for
                           another app. db: tables / sync cells are not in it
@@ -334,7 +364,9 @@ Inspect:
   surface --path=A/B      only that subtree, by path prefix
   surface --depth=N       cap the tree depth (0 = the component alone)
   surface --rects         MEASURE the layout — x/y/w/h per element, so "it looks fine" becomes "the Stage is 6886px tall". Needs a real client; a server render refuses rather than report 0x0
-  trigger <idx> <path> <action> [text]  Drive the live UI (click/type/setValue/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI; path "window" drives an onGlobalKey binding
+  trigger [idx] <path> <action> [text]  Drive the live UI (${
+  TRIGGER_ACTIONS.join("/")
+}) — same engine as testUI; no idx = the newest UI client; path "window" drives an onGlobalKey binding
                           type APPENDS to the field, setValue REPLACES it (as in testUI)
   trigger|surface --wait-client[=ms]  wait (default 10000) for a UI client to connect — right after a reload there may briefly be none
   shot [n] [--out=F.png] [--full]  SCREENSHOT (PNG) of the live Electron window via CDP — the app
@@ -447,12 +479,20 @@ Diagnose / repair / migrate (three different questions — do not conflate):
                           this app has not decided on (prints what it writes)
   link                    Just the dep/aio symlink (fix does this and more)
   migrate [--from=X]      which retired APIs THIS app still uses (CI exits 1).
+                          --tests: the test shapes a newer release turns red,
+                          in the order they fail (a prediction; exit 0)
                           Rewrites: aiol --safe-fix. Not a clone repairer.
   prune [--yes]           The SHARED Electron runtime cache (~250 MB/version,
                           never shrank on its own). Report-only by default:
                           prints every entry, its size and when an app last
                           started from it. --yes deletes exactly that list.
                           --days=N (default 30) --keep=44.4.1,43.4.1
+  prune versions [--yes]  The aio version store (~/.local/lib/aio-versions,
+                          one checkout per pinned version). Report-only by
+                          default; --yes removes (git worktree remove) only
+                          clean checkouts no app here or running pins or
+                          links, never the newest release or am's own.
+                          --keep=v1.0.20-beta
 
 Auth (apps running with auth: true) — run "am auth" for all of them:
   auth users              List accounts

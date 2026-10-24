@@ -10,25 +10,32 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { DELIMITER, join } from "@std/path";
 import { apkApplicationId } from "../src/build/build-android.ts";
+import { devTarget } from "../src/build/android-devices.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { EXE, writeProgram } from "./fake-program-helper.ts";
 
 const DEV_ANDROID = join(import.meta.dirname!, "..", "src", "dev-android.ts");
 const INSTALL = join(import.meta.dirname!, "..", "src", "android-install.ts");
 
-// adb: one booted emulator (and, for `devices -l`, one phone); `am start`
-// succeeds only for $EXPECT_ID.
+// adb: a phone AND a booted emulator, as real adb lists them; like real adb,
+// a device command that names no `-s` fails "more than one device/emulator".
+// `am start` succeeds only for $EXPECT_ID.
 const ADB = String.raw`
 let a = [...Deno.args];
 Deno.writeTextFileSync(Deno.env.get("ADB_LOG"), a.join(" ") + "\n", {
   append: true,
 });
-if (a[0] === "-s") a = a.slice(2);
+const named = a[0] === "-s";
+if (named) a = a.slice(2);
+if (!named && ["shell", "install", "reverse"].includes(a[0])) {
+  console.error("adb: error: more than one device/emulator");
+  Deno.exit(1);
+}
 if (a[0] === "devices") {
   console.log(
-    a[1] === "-l"
-      ? "List of devices attached\nR5CT12ABCDE device usb:1-3 model:SM_A525F"
-      : "List of devices attached\nemulator-5554\tdevice",
+    "List of devices attached\n" +
+      "R5CT12ABCDE device usb:1-3 model:SM_A525F\n" +
+      "emulator-5554\tdevice product:sdk model:sdk_gphone64",
   );
 } else if (a[0] === "install") console.log("Success");
 else if (a[0] === "shell") {
@@ -62,7 +69,7 @@ async function devAndroid(
   android: Record<string, unknown> | undefined,
   expectId: string,
   argv: string[] = [DEV_ANDROID],
-): Promise<{ code: number; out: string; starts: string[] }> {
+): Promise<{ code: number; out: string; starts: string[]; log: string }> {
   const dir = await tempDir("aio-dev-android-id-");
   try {
     const sdk = join(dir, "sdk");
@@ -99,6 +106,7 @@ async function devAndroid(
         PATH: `${bin}${DELIMITER}${Deno.env.get("PATH") ?? ""}`,
         ADB_LOG: log,
         EXPECT_ID: expectId,
+        ANDROID_SERIAL: "",
       },
       stdout: "piped",
       stderr: "piped",
@@ -112,7 +120,7 @@ async function devAndroid(
     const starts = adbLog.split("\n")
       .filter((l) => l.includes("shell am start"))
       .map((l) => l.replace(/^-s \S+ /, ""));
-    return { code: p.code, out, starts };
+    return { code: p.code, out, starts, log: adbLog };
   } finally {
     await dropTempDir(dir);
   }
@@ -148,6 +156,42 @@ Deno.test({
     );
     assertStringIncludes(r.out, "launched");
   },
+});
+
+Deno.test({
+  name:
+    "dev:android: a phone plus an emulator — every device command names the emulator",
+  fn: async () => {
+    // Unnamed, each `adb shell` failed "more than one device/emulator": the
+    // booted emulator never read as booted, a second one was started and the
+    // run timed out after 180 s.
+    const r = await devAndroid(undefined, "app.aio.hapdev");
+    const device = r.log.split("\n").filter((l) =>
+      /\b(shell|install|reverse)\b/.test(l)
+    );
+    assert(device.length >= 4, r.log);
+    for (const l of device) assert(l.startsWith("-s emulator-5554 "), l);
+    assertStringIncludes(r.out, "emulator-5554");
+    assertEquals(r.code, 0, r.out);
+  },
+});
+
+Deno.test("devTarget: ANDROID_SERIAL, then an emulator, then a lone phone", () => {
+  const phone = { serial: "P1", state: "device", emulator: false, model: "" };
+  const emu = {
+    serial: "emulator-5554",
+    state: "device",
+    emulator: true,
+    model: "",
+  };
+  assertEquals(devTarget([phone, emu]), { device: emu });
+  assertEquals(devTarget([phone, emu], "P1"), { device: phone });
+  assertEquals(devTarget([phone]), { device: phone });
+  assertEquals(devTarget([{ ...phone, state: "unauthorized" }]), null);
+  assertEquals(devTarget([phone], "nope"), null);
+  const two = devTarget([emu, { ...emu, serial: "emulator-5556" }]);
+  assert(two && "error" in two, JSON.stringify(two));
+  assertStringIncludes(two.hint, "ANDROID_SERIAL=emulator-5556");
 });
 
 Deno.test({

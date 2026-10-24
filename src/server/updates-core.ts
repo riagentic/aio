@@ -185,6 +185,19 @@ export function defaultInterval(channel: string): number {
   return CHANNEL_INTERVAL_MS[channel] ?? CHANNEL_INTERVAL_MS.prod!;
 }
 
+/** THE reading of deno.json `build.channel` — the channel stamped into an
+ *  artifact. `aio ship`, `am publish` and the running app each read it
+ *  themselves, three ways for a value that is not a channel name (`5`, `""`):
+ *  ship published to "prod", publish wrote into `<dir>/5/` (or the dir's
+ *  root), and the app followed the raw value. A non-empty string is the
+ *  channel; anything else is no stamp (build-shape.ts warns at build time),
+ *  and each reader's own default applies — "prod" for the publishers,
+ *  {@linkcode resolveChannel}'s chain for the app. @internal */
+export function buildChannel(build: unknown): string | undefined {
+  const c = (build as { channel?: unknown } | null | undefined)?.channel;
+  return typeof c === "string" && c !== "" ? c : undefined;
+}
+
 /** Where the channel default comes from, most specific first.
  *
  *  The artifact's own STAMP is the default rather than a constant, and that is
@@ -199,7 +212,7 @@ export function resolveChannel(src: {
   /** `AIO_UPDATE_CHANNEL` in this environment. */
   env?: string;
   /** Pinned in this install's trust store (`data/update-trust.json`) — written
-   *  the first time a channel is settled, and by `updates.setChannel()`. */
+   *  only by `updates.setChannel()`. */
   pinned?: string;
   /** Stamped into the artifact at build time (deno.json `build.channel`). */
   stamp?: string;

@@ -69,3 +69,31 @@ Deno.test("reconcileDetail: a new pid drops the old process's trojan snapshot", 
   assertEquals(next.cells, null, "the new process shows the dead one's cells");
   assertEquals(next.build, null, "the new process shows the dead one's build");
 });
+
+Deno.test("clearLiveDiagnostics: the State tab's snapshot is the old process's too", async () => {
+  // A restart keeps the entry id, so a State tab that had loaded saw
+  // "already loaded" and kept painting the dead process's state (or the
+  // "not running on port <old>" error of a read that landed mid-restart) as
+  // the new process's live state.
+  const { clearLiveDiagnostics } = await import("../amui/src/manager.ts");
+  const s = {
+    detailState: { counter: { count: 1 } },
+    detailFields: {},
+    detailStatePath: "/p#p#",
+    detailStateSize: 20,
+    detailStateTruncated: true,
+    detailStateError: "app not running on port 8000",
+  } as unknown as Parameters<typeof clearLiveDiagnostics>[0];
+  clearLiveDiagnostics(s);
+  assertEquals(
+    [
+      s.detailState,
+      s.detailFields,
+      s.detailStatePath,
+      s.detailStateSize,
+      s.detailStateTruncated,
+      s.detailStateError,
+    ],
+    [null, null, null, 0, false, null],
+  );
+});

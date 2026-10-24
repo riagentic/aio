@@ -13,7 +13,7 @@
  * ```
  */
 import { readDenoJson } from "./server/deno-json.ts";
-import { staged } from "./build/build-say.ts";
+import { staged, stagedInto } from "./build/build-say.ts";
 import { HEY, NO } from "./diagnostics/fmt.ts";
 import { fromFileUrl, join } from "@std/path";
 import {
@@ -117,6 +117,30 @@ export async function build(cfg?: BuildConfig): Promise<void> {
     Deno.exit(1);
   }
 
+  // ── The entry this binary compiles exists ───────────────────────────────
+  // Checked before the bundle: missing, it surfaced minutes later as a raw
+  // `TS2307 Cannot find module` from deno compile, under a hint about
+  // server-only imports.
+  const compilesEntry = doCompile && !doClient && !doCli && !doAndroid &&
+    !doIos && !doWeb;
+  if (compilesEntry) {
+    const at = join(root, cfg.configEntry);
+    const isFile = await Deno.stat(at).then((s) => s.isFile, (e) => {
+      if (e instanceof Deno.errors.NotFound) return false;
+      throw e;
+    });
+    if (!isFile) {
+      console.error(
+        `✗ entry not found: ${at}\n  (${
+          cfg.entryOverride !== undefined
+            ? "from --entry= (a per-target entry)"
+            : 'deno.json "entry", src/app.ts when it names none'
+        } — the module this binary compiles)`,
+      );
+      Deno.exit(1);
+    }
+  }
+
   // ── Step 1: Bundle dist/app.js ───────────────────────────────────────────
   // Skip for targets that don't need browser bundles
   const skipsBundle = doCli || cfg.doHeadless || doClient || doIos ||
@@ -149,7 +173,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
     title: cfg.appTitle,
     windowsShortcut: cfg.windowsShortcut,
   });
-  staged(BUILD_STAMP_FILE, cfg.version.version);
+  staged(BUILD_STAMP_FILE, cfg.version.version, stagedInto(cfg));
 
   // ── Bake the Electron version into dist/ ────────────────────────────────
   // A plain compiled binary (`--compile`, not the AppImage) whose client is
@@ -264,12 +288,8 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // ── Step 2: Compile deno binary ──────────────────────────────────────────
   const compileOk = await runDenoCompile(cfg);
   if (!compileOk) {
-    console.error(
-      "deno compile failed — its own message is above this line.\n" +
-        "       fix: resolve what it names (a module it cannot find is usually " +
-        "a server-only import reachable from the entry, or an asset missing " +
-        "from deno.json `compile.include`), then re-run `deno task build`.",
-    );
+    // What stopped it — deno's error or aio's refusal — is already said.
+    console.error(`${NO} no binary was built — the reason is above this line`);
     Deno.exit(1);
   }
 

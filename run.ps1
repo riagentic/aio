@@ -131,12 +131,15 @@ function Get-AioUserHome() {
 # and updated - or a user with HOME set would get a second clone and an "am"
 # that no longer follows the first. Only a machine with none gets the rule
 # above.
+# The last line is a string join, not Join-Path: Join-Path refuses a drive
+# that is not mounted (HOME on a USB or network drive that is not there right
+# now) with "Cannot find drive" before anything says which folder was meant.
 function Get-AioDefaultHome() {
   if ($env:USERPROFILE) {
     $old = Join-Path $env:USERPROFILE '.local\lib\aio'
     if (Test-Path -LiteralPath (Join-Path $old '.git')) { return $old }
   }
-  return Join-Path (Get-AioUserHome) '.local\lib\aio'
+  return [System.IO.Path]::Combine((Get-AioUserHome), '.local\lib\aio')
 }
 
 # One line saying where things will live - and a second when the two "home"

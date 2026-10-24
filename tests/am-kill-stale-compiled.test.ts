@@ -50,6 +50,11 @@ Deno.test("listenerPids: each OS's own answer, parsed", () => {
     "  TCP    [::1]:8123             [::]:0                 LISTENING       4244",
   ].join("\r\n");
   assertEquals(listenerPids(8123, "windows", () => netstat), [4242, 4244]);
+  // netstat translates the state word; a listener is told by its foreign
+  // port 0, which no language changes.
+  const de = netstat.replaceAll("LISTENING", "ABHÖREN")
+    .replace("ESTABLISHED", "HERGESTELLT");
+  assertEquals(listenerPids(8123, "windows", () => de), [4242, 4244]);
   // No tool, no answer: nothing is proven.
   for (const os of ["linux", "darwin", "windows"]) {
     assertEquals(listenerPids(8123, os, () => null), []);

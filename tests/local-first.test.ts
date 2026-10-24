@@ -229,3 +229,30 @@ Deno.test("localFirst: adopting a cell with existing persisted data keeps that d
     await db.close();
   }
 });
+
+Deno.test("localFirst: a worker cell is not adopted (the pool refuses worker + sync)", () => {
+  // Adopted, the boot refused: `cell "w" has worker: true but also has sync:
+  // true … Pick one.` — for a `sync: true` the author never wrote.
+  const w = cell("lf-worker", {
+    worker: true,
+    state: { n: 0 },
+    methods: {
+      inc(s: { n: number }) {
+        s.n++;
+      },
+    },
+  });
+  const plain = cell("lf-plain", {
+    state: { n: 0 },
+    methods: {
+      inc(s: { n: number }) {
+        s.n++;
+      },
+    },
+  });
+  const { composed } = compose([w, plain], true);
+  const byId = new Map(composed.cells.map((c) => [c.__aio.id, c.__aio]));
+  assertEquals(byId.get("lf-worker")!.syncConfig, undefined);
+  assert(byId.get("lf-plain")!.syncConfig, "the plain cell is still adopted");
+  _resetAioRuntime();
+});

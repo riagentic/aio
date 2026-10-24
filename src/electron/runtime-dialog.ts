@@ -40,7 +40,12 @@ import {
   splashNotDrawn,
   type SplashSpec,
 } from "./splash.ts";
-import { type Bounds, centredOn, windowRect } from "./splash-place.ts";
+import {
+  type Bounds,
+  centredOn,
+  EDGE_MARGIN,
+  windowRect,
+} from "./splash-place.ts";
 import type { WindowAt } from "./electron-renderer-log.ts";
 import { gtkAsk, gtkProgress, gtkSplash } from "./gtk-splash.ts";
 
@@ -57,36 +62,43 @@ export const PS_PLACE = `
 function AioAll { @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object { $_.WorkingArea }) }
 function AioPrimary { [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea }
 function AioFit($v, $lo, $n, $span) { if ($n -ge $span) { $lo } else { [Math]::Max($lo, [Math]::Min($v, $lo + $span - $n)) } }
+function AioM($n) { [Math]::Min(${EDGE_MARGIN}, [Math]::Floor($n / 8)) }
 function AioPlace($T, $W, $H, $all, $p, $real = $false) {
   if (@($all).Count -eq 0) { $all = @($p) }
   if ($null -eq $T) { $s = $p; $rx = $p.X; $ry = $p.Y; $rw = $p.Width; $rh = $p.Height }
   else {
     $rw = [int]$T[2]; $rh = [int]$T[3]
-    if ($null -eq $T[0] -or $null -eq $T[1]) {
-      $s = $p
-      $rx = AioFit ($s.X + [Math]::Floor(($s.Width - $rw) / 2)) $s.X $rw $s.Width
-      $ry = AioFit ($s.Y + [Math]::Floor(($s.Height - $rh) / 2)) $s.Y $rh $s.Height
-    } else {
+    $placed = -not ($null -eq $T[0] -or $null -eq $T[1])
+    if (-not $placed) { $s = $p } else {
       $x = [int]$T[0]; $y = [int]$T[1]; $s = $null
       foreach ($k in $all) { if ($x -ge $k.X -and $y -ge $k.Y -and $x + $rw -le $k.X + $k.Width -and $y + $rh -le $k.Y + $k.Height) { $s = $k; break } }
-      if ($null -ne $s) { $rx = $x; $ry = $y } else {
+      if ($null -eq $s) {
         $best = -1
         foreach ($k in $all) {
           $ix = [Math]::Max(0, [Math]::Min($x + $rw, $k.X + $k.Width) - [Math]::Max($x, $k.X))
           $iy = [Math]::Max(0, [Math]::Min($y + $rh, $k.Y + $k.Height) - [Math]::Max($y, $k.Y))
           if ($ix * $iy -gt $best) { $best = $ix * $iy; $s = $k }
         }
-        # Where the window REALLY is ($real): centred on it as it is, only
-        # its screen chosen; else where it opens, kept inside that screen.
-        if ($real) { $rx = $x; $ry = $y } else {
-          $rx = AioFit $x $s.X $rw $s.Width
-          $ry = AioFit $y $s.Y $rh $s.Height
-        }
+      }
+    }
+    # Where the window REALLY is ($real): centred on it as it is, only its
+    # screen chosen; else where it opens: EDGE_MARGIN inside that screen.
+    if ($real -and $placed) { $rx = $x; $ry = $y } else {
+      $mx = AioM $s.Width; $my = AioM $s.Height
+      $iw = [Math]::Max(1, $s.Width - 2 * $mx); $ih = [Math]::Max(1, $s.Height - 2 * $my)
+      $rw = [Math]::Min($rw, $iw); $rh = [Math]::Min($rh, $ih)
+      if ($placed) {
+        $rx = AioFit $x ($s.X + $mx) $rw $iw
+        $ry = AioFit $y ($s.Y + $my) $rh $ih
+      } else {
+        $rx = $s.X + $mx + [Math]::Floor(($iw - $rw) / 2)
+        $ry = $s.Y + $my + [Math]::Floor(($ih - $rh) / 2)
       }
     }
   }
-  $cx = AioFit ([Math]::Floor($rx + $rw / 2 - $W / 2 + 0.5)) $s.X $W $s.Width
-  $cy = AioFit ([Math]::Floor($ry + $rh / 2 - $H / 2 + 0.5)) $s.Y $H $s.Height
+  $mx = AioM $s.Width; $my = AioM $s.Height
+  $cx = AioFit ([Math]::Floor($rx + $rw / 2 - $W / 2 + 0.5)) ($s.X + $mx) $W ($s.Width - 2 * $mx)
+  $cy = AioFit ([Math]::Floor($ry + $rh / 2 - $H / 2 + 0.5)) ($s.Y + $my) $H ($s.Height - 2 * $my)
   return @([int]$cx, [int]$cy)
 }
 `;

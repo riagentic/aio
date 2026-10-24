@@ -25,6 +25,7 @@ function reportOnce(key: string, msg: string): void {
 }
 
 /** Test-only reset of the once-per-process report set. */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetDbReports(): void {
   _reported.clear();
 }
@@ -47,6 +48,33 @@ async function tableColumns(db: DB, name: string): Promise<ColumnInfo[]> {
     notnull: Number(r.notnull ?? 0),
     dflt: r.dflt_value,
   }));
+}
+
+/** The single-column UNIQUE rules on `table`: `constraint` from a declared
+ *  UNIQUE (what `table()` writes), `any` also counting an app's own
+ *  `CREATE UNIQUE INDEX` — which satisfies a declared `unique: true` but must
+ *  never be reported as one the app forgot to declare. */
+async function uniqueColumns(
+  db: DB,
+  table: string,
+): Promise<{ any: Set<string>; constraint: Set<string> }> {
+  const out = { any: new Set<string>(), constraint: new Set<string>() };
+  const { rows } = await db.query<
+    { name: string; unique: number; origin: string; partial: number }
+  >(`SELECT * FROM pragma_index_list(?)`, [table]);
+  for (const ix of rows) {
+    if (Number(ix.unique) !== 1 || ix.origin === "pk" || Number(ix.partial)) {
+      continue;
+    }
+    const cols = (await db.query<{ name: string | null }>(
+      `SELECT name FROM pragma_index_info(?)`,
+      [ix.name],
+    )).rows;
+    if (cols.length !== 1 || !cols[0]!.name) continue;
+    out.any.add(cols[0]!.name);
+    if (ix.origin === "u") out.constraint.add(cols[0]!.name);
+  }
+  return out;
 }
 
 /** A column that can be added to a table that already holds rows: SQLite fills
@@ -252,6 +280,46 @@ async function reconcileTable(
     }
   }
 
+  // (After the missing-column pass: an empty table rebuilt there already has
+  // the declared constraints, and returned.)
+  // A changed CONSTRAINT is as invisible as a retype: `unique: true` added
+  // to a column of an existing table enforced nothing — duplicates were
+  // accepted, in silence — and `nullable: true` added to a stored NOT NULL
+  // column surfaced only as a failed persist window, far from its cause.
+  const unique = await uniqueColumns(db, name);
+  for (const d of declared) {
+    const stored = have.get(d);
+    const col = def.columns[d]!;
+    if (!stored || col.pk) continue;
+    const drift: string[] = [];
+    if (!col.nullable && stored.notnull !== 1) {
+      drift.push(
+        "declared NOT NULL but stored nullable — NULL is still accepted",
+      );
+    } else if (col.nullable && stored.notnull === 1) {
+      drift.push(
+        "declared nullable but stored NOT NULL — writing null is refused",
+      );
+    }
+    if (col.unique && !unique.any.has(d)) {
+      drift.push(
+        "declared UNIQUE but stored without — duplicates are still accepted",
+      );
+    } else if (!col.unique && unique.constraint.has(d)) {
+      drift.push(
+        "stored UNIQUE but declared without — duplicates are still refused",
+      );
+    }
+    if (!drift.length) continue;
+    reportOnce(
+      `constraint:${name}.${d}`,
+      `table "${name}" column "${d}" is ${drift.join("; ")}. ` +
+        `CREATE TABLE IF NOT EXISTS never alters an existing table, so the ` +
+        `stored constraint is the one in effect. Migrate it with app.db ` +
+        `(\`CREATE UNIQUE INDEX …\` adds a uniqueness rule; a NOT NULL change ` +
+        `means add a new column, copy, drop the old), or declare it as stored.`,
+    );
+  }
   for (const c of extra) {
     if (c.notnull === 1 && c.dflt === null) {
       throw new Error(
@@ -265,7 +333,11 @@ async function reconcileTable(
     reportOnce(
       `extra:${name}.${c.name}`,
       `table "${name}" has column "${c.name}", which the app no longer ` +
-        `declares — new rows leave it empty and it is not part of state.`,
+        `declares — new rows leave it empty. Its stored values are still ` +
+        `loaded into each row's "${c.name}" field, but a change to that ` +
+        `field is never written back: after a restart the stored value ` +
+        `returns. Declare it again, or drop it ` +
+        `(\`ALTER TABLE ${name} DROP COLUMN ${c.name}\`).`,
     );
   }
 }

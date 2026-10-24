@@ -80,6 +80,9 @@ async function aapt2Label(title: string, dir: string): Promise<string | null> {
       // — filled here so no placeholder reaches aapt2 verbatim. The camera's
       // own two shapes are linked in tests/build-android-camera.test.ts.
       "{{CAMERA_PERMISSION}}": "",
+      // Deep links are opt-in too (`android.schemes`): none here.
+      "{{DEEP_LINK_ATTR}}": "",
+      "{{DEEP_LINK_FILTERS}}": "",
     },
   )
     // The AppCompat theme lives in a library this link does not have; the

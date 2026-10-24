@@ -2,7 +2,7 @@
 // Wraps keyed children. New items get enter transitions, removed items get
 // exit transitions (deferred DOM removal), reordered items get FLIP animation.
 
-import type { VNode } from "./vdom.ts";
+import type { VChild, VNode } from "./vdom.ts";
 import { h } from "./vdom.ts";
 import {
   _applyTransition,
@@ -77,14 +77,24 @@ export function _setGroupAfterRender(
  * </TransitionGroup>
  * ```
  */
-export function TransitionGroup(props: TransitionGroupProps): VNode {
+export function TransitionGroup(props: TransitionGroupProps): VNode;
+// An ADDED overload (`TransitionGroupProps` is frozen: its `children` is an
+// array type), so a fixed item beside a mapped list (`{head}{items.map(…)}`)
+// or a single child type-checks — the array-only type refused both.
+export function TransitionGroup(
+  props: Omit<TransitionGroupProps, "children"> & { children?: VChild },
+): VNode;
+export function TransitionGroup(
+  props: Omit<TransitionGroupProps, "children"> & { children?: VChild },
+): VNode {
   const { enter, exit, options = {}, flip, flipDuration = 300, children } =
     props;
 
   // Filter to VNode children only (skip text/number)
-  const vnodeChildren = children.filter(
-    (c): c is VNode => typeof c === "object" && c !== null,
-  );
+  const vnodeChildren = (Array.isArray(children) ? children : [children])
+    .filter(
+      (c): c is VNode => typeof c === "object" && c !== null,
+    );
 
   // AIO-250: Read previous keys/rects from ref (captured in _afterRender of the
   // PREVIOUS render, when _dom was available). Fresh VNodes from h() have no _dom.

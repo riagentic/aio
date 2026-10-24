@@ -55,9 +55,23 @@ export type ContextSpec = {
   readonly surprise: string;
 };
 
+/** The row the BROWSER names (a sync method replaying client-side), on its
+ *  own so the page carries this one row — not the table, which only tooling
+ *  and server messages read. Bundled, `CONTEXTS` below tree-shakes away. */
+export const SYNC_METHOD: ContextSpec = {
+  name: "a sync method",
+  side: "server",
+  reachedBy: "`cell.method()`",
+  deno: false,
+  hiddenFields: false,
+  tracked: false,
+  surprise:
+    'under `sync`/`localFirst`/`scope:"client"` it ALSO runs in the browser',
+};
+
 /** THE six. Order is the reading order of the table in
  *  `docs/basics/where-code-runs.md`, which is generated from this. */
-export const CONTEXTS: readonly ContextSpec[] = Object.freeze(
+export const CONTEXTS: readonly ContextSpec[] = /* @__PURE__ */ Object.freeze(
   [
     {
       name: "a component body",
@@ -78,16 +92,7 @@ export const CONTEXTS: readonly ContextSpec[] = Object.freeze(
       tracked: false,
       surprise: "reads here do not subscribe — the body already returned",
     },
-    {
-      name: "a sync method",
-      side: "server",
-      reachedBy: "`cell.method()`",
-      deno: false,
-      hiddenFields: false,
-      tracked: false,
-      surprise:
-        'under `sync`/`localFirst`/`scope:"client"` it ALSO runs in the browser',
-    },
+    SYNC_METHOD,
     {
       name: "an async method",
       side: "server",
@@ -164,7 +169,11 @@ export function context(name: string): ContextSpec {
  *  field is off limits outside this module — `tests/context-vocabulary.test.ts`
  *  enforces that — and this renders the one shape that always reads. */
 export function contextNote(name: string): string {
-  const c = context(name);
+  return noteOf(context(name));
+}
+
+/** {@link contextNote} for a row already in hand ({@link SYNC_METHOD}). */
+export function noteOf(c: ContextSpec): string {
   return `${c.name} — ${c.surprise}`;
 }
 

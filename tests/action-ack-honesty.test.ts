@@ -21,6 +21,8 @@
 import { assertEquals, assertMatch } from "@std/assert";
 import { dec, enc } from "../src/protocol/envelope.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { join } from "@std/path";
 
 type Ack = { cid: string; ok: boolean; error?: string; value?: unknown };
 
@@ -114,6 +116,57 @@ Deno.test("ack honesty: a refused action is acked ok:false, not ok:true", async 
     assertMatch(String(c?.error), /unregistered cell 'ghost'/);
   } finally {
     await r.close();
+  }
+});
+
+// A bare type ("inc") is NOT refused: an onAction/plugin hook may be what it
+// is for (docs/basics/plugins.md), and 1.0.24 acked it ok. With no hook,
+// listener or cell to observe it, dev says so once per type.
+Deno.test("ack honesty: a bare type is acked ok, and dev warns once when nothing observed it", async () => {
+  const { aio, cell } = await import("../mod.ts");
+  const { getLogger } = await import("../src/diagnostics/logger-api.ts");
+  const c = cell("bare", { state: { n: 0 }, methods: {} });
+  const port = freePort();
+  const baseDir = await tempDir("aio-bare-");
+  const app = await aio.run({
+    cells: [c],
+    appId: "test-ack-bare-type",
+    client: "server-only",
+    persist: false,
+    libraryMode: true,
+    port,
+    baseDir,
+  });
+  const acks: Ack[] = [];
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  try {
+    await new Promise((r) => ws.onopen = r);
+    ws.onmessage = (e) => {
+      const f = dec(String(e.data)) as { t?: string; d?: unknown } | null;
+      if (f?.t === "ack") acks.push(f.d as Ack);
+    };
+    for (const cid of ["b1", "b2"]) {
+      ws.send(enc("action", { type: "zzping", payload: {}, cid }));
+    }
+    await settle();
+    assertEquals(acks.map((a) => [a.cid, a.ok]), [["b1", true], ["b2", true]]);
+    await getLogger()?.flush();
+    // app.log holds every level once (warning.log / debug.log repeat it).
+    const text = await Deno.readTextFile(
+      join(baseDir, ".aio", "logs", "app.log"),
+    );
+    const hits = text.split("\n").filter((l) =>
+      l.includes("WARN") && l.includes("'zzping' has no 'cell:' prefix")
+    );
+    assertEquals(
+      hits.length,
+      1,
+      `one warning, once per type:\n${text.slice(-3000)}`,
+    );
+  } finally {
+    ws.close();
+    await app.close();
+    await dropTempDir(baseDir);
   }
 });
 

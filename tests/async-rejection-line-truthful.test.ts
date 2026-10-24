@@ -47,6 +47,7 @@ const tx = cell("rej-line-tx", {
 
 async function rejectionOf(
   run: () => Promise<unknown>,
+  needle = "rejected: nope",
 ): Promise<string> {
   const cap = capture();
   try {
@@ -55,7 +56,7 @@ async function rejectionOf(
   } finally {
     cap.restore();
   }
-  const line = cap.lines.find((l) => l.includes("rejected: nope"));
+  const line = cap.lines.find((l) => l.includes(needle));
   assert(line, `no rejection line in: ${cap.lines.join("\n")}`);
   return line;
 }
@@ -78,5 +79,56 @@ testCell(
     const line = await rejectionOf(() => t.send.go!());
     assertEquals(t.getState().n, 0, "the transaction rolled back");
     assertStringIncludes(line, "no state changed");
+  },
+);
+
+// The only write-set the method made was REFUSED by `validate`, so nothing
+// changed — the line said "those earlier writes STAY committed" anyway,
+// because it asked whether a write-set was DISPATCHED, not whether one landed.
+const refused = cell("rej-line-refused", {
+  state: { n: 0 } as S,
+  validate: (s: S) => s.n >= 0 || "nope",
+  methods: {
+    async go(s: S) {
+      await new Promise((r) => setTimeout(r, 1));
+      s.n = -1;
+    },
+  },
+});
+
+testCell(
+  refused,
+  "async write refused by validate: the rejection line says no state changed",
+  async (t) => {
+    const line = await rejectionOf(() => t.send.go!(), "failed: nope");
+    assertEquals(t.getState().n, 0, "the refused write never landed");
+    assertStringIncludes(line, "no state changed");
+  },
+);
+
+// A transaction that published with `s.$commit()` and THEN threw: the commit
+// stays (n === 1), and the line said "no state changed".
+const txCommitted = cell("rej-line-tx-commit", {
+  state: { n: 0 } as S,
+  transaction: true,
+  methods: {
+    async go(s: S & { $commit(): void }) {
+      s.n = 1;
+      s.$commit();
+      await new Promise((r) => setTimeout(r, 1));
+      s.n = 2;
+      throw new Error("nope");
+    },
+  },
+});
+
+testCell(
+  txCommitted,
+  "transactional throw after $commit: the line says the commit stayed",
+  async (t) => {
+    const line = await rejectionOf(() => t.send.go!());
+    assertEquals(t.getState().n, 1, "the $commit stayed, the rest did not");
+    assert(!line.includes("no state changed"), `false claim: ${line}`);
+    assertStringIncludes(line, "STAYS committed");
   },
 );

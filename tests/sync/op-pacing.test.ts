@@ -99,8 +99,12 @@ Deno.test("a 1000-op seed never exceeds the rate the server advertised", async (
       engine.handleLocalAction(CELL, "add", { id: i }).catch(() => {});
     }
     // Long enough to cross the pacer's refill at least once past the burst,
-    // however long the enqueue took.
+    // however long the enqueue took — and on a loaded machine (timers late:
+    // 55 frames in 1.2s with five suites running) until the drain shows.
     await new Promise((r) => setTimeout(r, 1200));
+    for (let i = 0; i < 40 && sent.length <= RATE * 0.6; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
     const elapsedSec = (Date.now() - started) / 1000;
     assert(sent.length > 0, "nothing was sent at all");
     // The RATE in any second, not frames over the run. This asserted

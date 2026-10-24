@@ -255,6 +255,12 @@ async function episode(
         await new Promise((r) => setTimeout(r, 20));
         await drain();
       }
+      // …and an op the pacer released only in that wait was dispatched there:
+      // a listener's reaction to it is a server write whose fold (debounced
+      // 100 ms) has not pushed yet. Settled, or a checkpoint compares a
+      // client with a push still owed (SYNC_PROP_SEED=3303521809, jitter).
+      await net.handler.flushServerWrites();
+      await drain();
     };
 
     /** (a) (b) (d) at a quiescent point. */

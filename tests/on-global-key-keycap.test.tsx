@@ -177,3 +177,69 @@ Deno.test("keycapMatch: rule table", () => {
   assert(!t("/", "÷", "Slash")); // no Alt
   assert(!t("/", "§", "Slash"));
 });
+
+// German layout: "/" is Shift+7, so Ctrl+Shift+7 is key "/" with Shift held.
+// Bound alone, "ctrl+/" fires on it (Shift is free on a symbol key). With
+// "ctrl+shift+/" bound too, only the binding naming Shift runs — one press
+// used to run both handlers.
+function GermanBoth() {
+  onGlobalKey("ctrl+/", () => push("comment"));
+  onGlobalKey("ctrl+shift+/", () => push("help"));
+  return <button type="button" t="btn">focus me</button>;
+}
+
+testUI(
+  GermanBoth,
+  "German Ctrl+Shift+7 ('/'): with ctrl+/ AND ctrl+shift+/ bound, only the Shift one runs",
+  async (ui) => {
+    hits.set([]);
+    down(ui, "/", "Digit7", { ctrlKey: true, shiftKey: true }); // German
+    down(ui, "?", "Slash", { ctrlKey: true, shiftKey: true }); // US Shift+/
+    down(ui, "/", "Slash", { ctrlKey: true }); // US Ctrl+/
+    await ui.settle();
+    assertEquals(hits(), ["help", "help", "comment"]);
+  },
+);
+
+testUI(
+  Comment,
+  "German Ctrl+Shift+7 ('/'): ctrl+/ bound alone still fires",
+  async (ui) => {
+    hits.set([]);
+    down(ui, "/", "Digit7", { ctrlKey: true, shiftKey: true });
+    await ui.settle();
+    assertEquals(hits(), ["comment"]);
+  },
+);
+
+// The Shift-specific binding takes the keystroke only when it would FIRE:
+// with focus in a field it is input-gated (default), so the free binding that
+// opted into fields (`ignoreInInput: false`) must not yield to it — that left
+// NEITHER firing (R9 review).
+function GermanInField() {
+  onGlobalKey("ctrl+/", () => push("comment"), { ignoreInInput: false });
+  onGlobalKey("ctrl+shift+/", () => push("help"));
+  return <input t="field" />;
+}
+
+testUI(
+  GermanInField,
+  "German Ctrl+Shift+7 in a field: ctrl+shift+/ is input-gated, so ctrl+/ (ignoreInInput: false) fires",
+  async (ui) => {
+    hits.set([]);
+    const w = ui.window;
+    const field = w.document.querySelector("input")!;
+    field.dispatchEvent(
+      new w.KeyboardEvent("keydown", {
+        key: "/",
+        code: "Digit7",
+        ctrlKey: true,
+        shiftKey: true,
+        bubbles: true,
+      }),
+    );
+    down(ui, "/", "Digit7", { ctrlKey: true, shiftKey: true }); // outside: help wins
+    await ui.settle();
+    assertEquals(hits(), ["comment", "help"]);
+  },
+);

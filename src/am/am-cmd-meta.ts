@@ -26,7 +26,7 @@ import {
 import type { Style } from "../diagnostics/fmt.ts";
 import { repoRoot } from "./am-cmd-create.ts";
 import { resolve } from "@std/path";
-import { cloneProblem, gitEnvFor } from "./am-versions.ts";
+import { cloneProblem, gitEnvFor, latestTag } from "./am-versions.ts";
 
 const PKG = "@riagentic/aio";
 
@@ -185,6 +185,17 @@ async function notCloneRefusal(root: string): Promise<string | null> {
     `  ${oneLiner}`;
 }
 
+/** What `am upgrade` checks the framework out at: THE "latest release" every
+ *  other `am` report gives ({@link latestTag} — the newest `v*` tag by semver
+ *  on origin/main), else origin/main itself. It was `git describe --tags
+ *  origin/main` — the NEAREST tag by ancestry, any name: a maintenance
+ *  `v1.2.1` merged into main after `v2.0.0` checked out 1.2.1 (a silent
+ *  downgrade), and a non-release tag on main (`proof-ci`) was checked out as
+ *  a release. @internal exported for tests. */
+export async function upgradeTarget(root: string): Promise<string> {
+  return await latestTag(root) ?? "origin/main";
+}
+
 export async function cmdUpdate(
   args: string[],
   flags: GlobalFlags,
@@ -310,16 +321,7 @@ export async function cmdUpdate(
       outError(`git fetch failed in ${root} — check network`, mode);
       Deno.exit(1);
     }
-    // Latest tag reachable from origin/main (ancestry-based — robust to the
-    // alphaN naming that breaks semver/version sorts).
-    let tag =
-      (await git(["describe", "--tags", "--abbrev=0", "origin/main"], true))
-        .text;
-    if (!tag) {
-      tag = (await git(["tag", "-l", "v*", "--sort=-creatordate"], true)).text
-        .split("\n")[0] ?? "";
-    }
-    const target = tag || "origin/main";
+    const target = await upgradeTarget(root);
     if ((await git(["checkout", "--force", target])).code !== 0) {
       outError(`git checkout ${target} failed in ${root}`, mode);
       Deno.exit(1);
@@ -750,7 +752,7 @@ export function cmdHelp(
   args: string[],
   flags: GlobalFlags,
   commandKeys: string[],
-): void {
+): 0 | 1 {
   // `am help <cmd> --json` used to answer with the whole command LIST: the
   // json branch ran before the argument was read, so the one form a script
   // would use to ask "what does this verb take?" silently answered a different
@@ -762,11 +764,11 @@ export function cmdHelp(
       const block = helpBlock(HELP_TEXT, cmd);
       if (block) {
         out({ command: cmd, help: block, flags: helpTail(HELP_TEXT) }, "json");
-        return;
+        return 0;
       }
       if (commandKeys.includes(cmd)) {
         out({ command: cmd, help: null, commands: commandKeys }, "json");
-        return;
+        return 0;
       }
       outError(
         `unknown command "${cmd}" — run "am help" for the list`,
@@ -788,7 +790,7 @@ export function cmdHelp(
         },
       "json",
     );
-    return;
+    return 0;
   }
   if (cmd) {
     const block = helpBlock(HELP_TEXT, cmd);
@@ -800,7 +802,7 @@ export function cmdHelp(
           hints([["am help", "every command"]]),
         ),
       );
-      return;
+      return 0;
     }
     // A mapped command with no entry of its own (`help`) or an unknown word:
     // say so, then the whole text — never a silent fall-through.
@@ -810,6 +812,10 @@ export function cmdHelp(
         : `am: unknown command "${cmd}" — the full list:`,
     );
   }
+  // An unknown word is a failure in BOTH modes — `--json` already exits 1,
+  // and `am help <typo> && …` must not read as success. RETURNED (am.ts
+  // exits on it), so the text stays testable in-process.
+  const unknown = cmd !== undefined && !commandKeys.includes(cmd);
   // `flags.all`, not `args.includes("--all")`: `--all` is a GLOBAL flag, so
   // parseGlobalFlags consumes it before a command ever sees argv. Reading argv
   // here made `am help --all` silently print the summary — the one form whose
@@ -837,6 +843,7 @@ export function cmdHelp(
       ],
     ),
   ));
+  return unknown ? 1 : 0;
 }
 
 /** The help text, and the template list it names, live in a LEAF module

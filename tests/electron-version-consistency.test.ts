@@ -77,21 +77,29 @@ Deno.test("electron version: the scaffold pins the framework's version, not bare
   }
 });
 
-Deno.test("electron version: the examples agree with the framework", async () => {
+Deno.test("electron version: the examples and amui agree with the framework", async () => {
   // Examples are the docs that run. A drifting example teaches the wrong pin.
-  for (
-    const f of [
-      "examples/contacts/deno.json",
-      "examples/targets/electron/deno.json",
-      "examples/targets/electron-remote/deno.json",
-    ]
-  ) {
-    let cfg: { imports?: Record<string, string> };
-    try {
-      cfg = JSON.parse(await Deno.readTextFile(f));
-    } catch {
-      continue; // example absent in this checkout
+  // WALKED, never listed: the hand-kept list named three files and missed
+  // `examples/todo` and `amui/` — amui shipped a bare `npm:electron`, so every
+  // `deno task amui` let `deno install` rewrite its tracked deno.json, and its
+  // lock had resolved the bare spec to an Electron a major behind.
+  const files: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for await (const e of Deno.readDir(dir)) {
+      if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+      const p = `${dir}/${e.name}`;
+      if (e.isDirectory) await walk(p);
+      else if (e.name === "deno.json") files.push(p);
     }
+  };
+  await walk("examples");
+  await walk("amui");
+  assert(files.length > 1, `the walk found ${files.length} deno.json`);
+  assert(files.includes("amui/deno.json"), "the walk must reach amui");
+  for (const f of files) {
+    const cfg = JSON.parse(await Deno.readTextFile(f)) as {
+      imports?: Record<string, string>;
+    };
     const spec = cfg.imports?.electron;
     if (!spec) continue;
     // `npm:electron@44.4.1`, EXACTLY — a range re-opens the drift this whole

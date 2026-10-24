@@ -238,7 +238,7 @@ export function resolvePlatforms(
     const n = raw.trim();
     if (!n) continue;
     const name = n === "host" ? hostPlatform() : n;
-    if (!(name in PLATFORMS)) {
+    if (!Object.hasOwn(PLATFORMS, name)) {
       unknown.push(n);
       continue;
     }

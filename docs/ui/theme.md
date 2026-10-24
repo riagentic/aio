@@ -344,3 +344,18 @@ than `aio.run({ ui })` because the build draws the packaged icons without
 running your entry; one key read by both keeps them from disagreeing. Anything
 but an integer 0–359 is refused (the build exits, `aio.run()` throws), never
 silently replaced by the hash. Apps that do not set it keep their hashed colour.
+
+### Near-grey neutrals — deno.json `neutral`
+
+The page, surfaces, borders and text carry a few degrees of the hue, so the
+palette reads as one designed thing. On a large dark surface a warm or magenta
+hue shows through (cards read purple-brown). `"neutral": "soft"` keeps every
+neutral at most 4% saturated — near grey — while the accent keeps the hue:
+
+```jsonc
+{ "appId": "my-notes", "hue": 300, "neutral": "soft" } // or without "hue"
+```
+
+It reaches everywhere `hue` does (the theme tokens, the window background, the
+splash and the download window). `"tinted"` is the default; any other value is
+refused, the same way.

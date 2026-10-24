@@ -22,6 +22,7 @@ import {
 import type { ReportErrorOpts } from "../diagnostics/error.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
+import { storedPersistKeyKey } from "./boot-restore.ts";
 import {
   describeIssues,
   type PersistIssue,
@@ -679,6 +680,10 @@ export function createPersistenceManager(
     }
     const pairs: [string, unknown][] = [
       [`${cfg.appId}:__schema`, PERSIST_SCHEMA_VERSION],
+      // Which stored document this app writes — how a boot of ANOTHER app
+      // on the same database tells it shares that document
+      // (`sharedStoreWarning`).
+      [storedPersistKeyKey(cfg.appId), cfg.persistKey],
     ];
     let next: Record<string, number> | null = null;
     if (cfg.cellVersions) {

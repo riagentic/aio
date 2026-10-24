@@ -287,12 +287,45 @@ const TOOLING_REMOVALS: readonly Removal[] = [
   },
 ] as const;
 
+/** The source patterns of the RUNTIME rows (removals-core.ts), kept here —
+ *  only the source scanner reads them, and a page that carries the rows for
+ *  their messages does not need them. Joined onto the rows in `REMOVALS`. */
+const CORE_PATTERNS: Readonly<Record<string, RegExp>> = {
+  "schedule.poll({ backoff })": /\bevery\s*:[^}]*\bbackoff\s*:/,
+  "schedule.backoff/poll(id, attempt, opts, action)":
+    /schedule\.(?:backoff|poll)\([^,()]+,[^,()]+,\s*\{/,
+  // A CELL's `ui:` takes "all"/"none" or a filter object; the app-level
+  // `aio.run({ ui: { width } })` window config never takes a string and
+  // never those filter keys — so this matches the cell key alone.
+  "cell({ ui })":
+    /(?:^|[{,\s])ui\s*:\s*(?:["']|\{\s*(?:include|exclude|forUser|publicFields)\b)/,
+  "cellDefaults.ui": /\bcellDefaults\s*:\s*\{[^}]*\bui\s*:/,
+  "listensTo: [...]": /\blistensTo\s*:\s*\[/,
+  "return effect(s) from a method": /\breturn\s+(?:schedule|own)\.\w+\s*\(/,
+  // A NON-EMPTY deps list (zero deps is never the spread form) whose `fn`
+  // takes a second parameter that is not the tuple: `fn: (s, prices)` is
+  // legacy, `fn: (s, [prices])` is current, and `fn: (s)` ignores its deps
+  // and is neither. The lookahead swallows the whitespace ITSELF: `,\s*`
+  // followed by `(?!\[)` backtracks to zero spaces and passes on `, [p]`.
+  "selector deps as a spread":
+    /\bdeps\s*:\s*\[\s*[^\]\s][^\]]*\]\s*,\s*fn\s*:\s*(?:async\s*)?\(\s*\w+[^,)]*,(?!\s*\[)/,
+};
+// A key that names no runtime row would drop its pattern without a word.
+for (const k of Object.keys(CORE_PATTERNS)) {
+  if (!CORE_REMOVALS.some((r) => r.key === k)) {
+    throw new Error(`removals.ts: CORE_PATTERNS["${k}"] names no core row`);
+  }
+}
+
 /**
  * Every removal in 1.x — THE record. The runtime rows first (removals-core.ts,
- * which a page can reach), then the tooling-only ones.
+ * which a page can reach, with their patterns joined back on), then the
+ * tooling-only ones.
  */
 export const REMOVALS: readonly Removal[] = [
-  ...CORE_REMOVALS,
+  ...CORE_REMOVALS.map((r) =>
+    CORE_PATTERNS[r.key] ? { ...r, pattern: CORE_PATTERNS[r.key] } : r
+  ),
   ...TOOLING_REMOVALS,
 ];
 

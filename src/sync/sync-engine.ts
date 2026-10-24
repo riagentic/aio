@@ -25,6 +25,7 @@ import type { SyncConflict } from "./types.ts";
 import { mergeField } from "./merge.ts";
 import { applyStatePatch, stateDigest } from "./state-patch.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 /**
  * Dependencies injected into the client-side sync engine.
@@ -127,6 +128,10 @@ export interface SyncEngine {
   setOnline(online: boolean): void;
   getStatus(cell: string): SyncStatus;
   requestSync(): Promise<void>;
+  /** Start syncing `cell` too — a cell the server adopted into local-first
+   *  after this engine booted (a build-time shell learns `syncCells` from the
+   *  `cfg` frame). Catches it up at once. No-op for a cell already synced. */
+  addCell(cell: string, config: SyncConfig): Promise<void>;
   isSyncCell(cellName: string): boolean;
   /** Stop everything this engine armed — today, the catch-up watchdog.
    *
@@ -162,6 +167,20 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   const _sessionKey = randomUuid();
   /** Every op id this engine issues, and nothing else. */
   const _ownPrefix = `${deps.clientId}-${_session}-`;
+  /** A fresh op id of this session — see `handleLocalAction` for the tail. */
+  const newOpId = (): string =>
+    `${deps.clientId}-${_session}-${(++_opCounter).toString(36)}.${
+      randomUuid().replaceAll("-", "").slice(0, 12)
+    }`;
+  /** When each op of THIS session was made, on both clocks — see
+   *  `reissueStale`. A re-made op keeps its original's. */
+  const _madeAt = new Map<string, { mono: number; device: number }>();
+  const noteMade = (id: string, at = { mono: mono(), device: deviceNow() }) => {
+    _madeAt.set(id, at);
+    if (_madeAt.size > 4 * SYNC_DEFAULTS.pendingCap) {
+      _madeAt.delete(_madeAt.keys().next().value!);
+    }
+  };
   /** An op THIS session issued — the only op that can be a live echo of our
    *  own send.
    *
@@ -432,6 +451,85 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       clearTimeout(_flushTimer);
       _flushTimer = undefined;
     }
+  }
+
+  // ── A stale refusal of a change made moments ago ──────────────────────
+  // The server refuses an UNKNOWN op stamped older than its tombstone window
+  // (`STALE_OP_REASON`): it cannot tell a resend whose tombstone was swept
+  // from a new change. Time can. A tombstone is swept no sooner than the
+  // window (24 h at least) after its op was applied, and an op is applied
+  // only after it was made — so an op made LESS than the window ago cannot
+  // have a swept tombstone, and "unknown" then means never applied, whichever
+  // tab sent it from the shared queue. Its stamp is old only because this
+  // device's clock was far behind when it was made (a board with no RTC,
+  // offline from boot, before the server was heard). Dropping it lost the
+  // user's offline edit; it is made again instead — same change, a new id
+  // (the server remembers its refusal of the old one), a stamp from the clock
+  // the refusal's `serverNow` has just corrected — in place, and sent.
+  //
+  // "Less than the window ago" is measured on BOTH clocks, the larger
+  // reading winning: the monotonic one pauses during a system suspend, the
+  // device one can be stepped; each undercounts only in its own case, and
+  // `maxDrift` of slack covers the server's own clock. An op made before a
+  // reload is measured by the device-clock stamp in its queue entry; one with
+  // none is dropped.
+  const REISSUE_WITHIN_MS = 24 * 3_600_000 - 2 * SYNC_DEFAULTS.maxDrift;
+  let _reissueSaid = false;
+  /** Ops made by `reissueStale` — each change is made again ONCE: a clock the
+   *  refusal could not correct (no usable `serverNow` sample) would stamp the
+   *  new op just as old, and every refusal would make another. */
+  const _reissued = new Set<string>();
+  async function reissueStale(cell: string, opId: string): Promise<boolean> {
+    if (_reissued.delete(opId)) return false;
+    const old = (await deps.buffer.getUnconfirmed(cell)).find((o) =>
+      o.id === opId
+    );
+    if (!old) return false;
+    // An op made before a reload has no in-memory reading — the device-clock
+    // stamp its queue entry carries (`_clientTs`) is the measure then: a clock
+    // still far behind after the reload reads the same wrong time, so the age
+    // holds. It used to be dropped, losing an offline edit made before a
+    // reload while still offline.
+    const made = _madeAt.get(opId) ??
+      (typeof old._clientTs === "number"
+        ? { mono: Infinity, device: old._clientTs }
+        : undefined);
+    if (!made) return false;
+    const age = Math.max(mono() - made.mono, deviceNow() - made.device);
+    if (!(age >= 0 && age < REISSUE_WITHIN_MS)) return false;
+    const id = newOpId();
+    const hlc = clock.tick();
+    const op: SyncOp = { ...old, id, hlc, confirmed: false };
+    _reissued.add(id);
+    if (_reissued.size > SYNC_DEFAULTS.pendingCap) {
+      _reissued.delete(_reissued.values().next().value!);
+    }
+    _madeAt.delete(opId);
+    untrackOwn(cell, opId);
+    await deps.buffer.pruneStale(cell, opId);
+    if (!(await deps.buffer.add(op))) {
+      // The buffer refused it and said so (`onDrop`, prune-failed).
+      await rebaseCell(cell);
+      return true;
+    }
+    noteMade(id, made);
+    trackOwn(cell, id);
+    await rebaseCell(cell);
+    const said =
+      `[sync] ${cell}: the server refused op ${opId} as stamped older than ` +
+      `its tombstone window — but it was made ${Math.round(age / 1000)}s ` +
+      `ago, too recently to be a swept resend, so it was never applied: made ` +
+      `again as op ${id} with the current time.`;
+    if (_reissueSaid) deps.log?.debug?.(said);
+    else {
+      _reissueSaid = true;
+      log.warn("sync", said + " (Said once; further ones at debug level.)");
+    }
+    if (online && !_flushing) {
+      const { action, payload } = op;
+      sendOpPaced(enc("op", { id, hlc, cell, action, payload }), id);
+    }
+    return true;
   }
 
   const statuses = new Map<string, SyncStatus>();
@@ -1596,7 +1694,9 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         try {
           onConflict(conflicts);
         } catch (e) {
-          deps.log?.warn(`[sync] onConflict callback threw: ${e}`);
+          deps.log?.warn(
+            `[sync] onConflict callback threw: ${thrownText(e)}`,
+          );
         }
       }
     }
@@ -1772,9 +1872,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         // of ours then met a "duplicate" — acked here, never applied there
         // (tests/sync/op-id-unguessable.test.ts). The counter stays for
         // reading a log in order; the tail makes the next id unguessable.
-        const id = `${deps.clientId}-${_session}-${
-          (++_opCounter).toString(36)
-        }.${randomUuid().replaceAll("-", "").slice(0, 12)}`;
+        const id = newOpId();
+        noteMade(id);
         const op: SyncOp = {
           id,
           cell,
@@ -1782,7 +1881,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           payload,
           hlc,
           confirmed: false,
-          _clientTs: Date.now(),
+          // Durable made-at, on the clock `reissueStale` measures with.
+          _clientTs: deviceNow(),
         };
         // A frame over the server's limit is dropped there unread: queued, this
         // op was never acked, and every catch-up carried it, was dropped, and
@@ -1893,6 +1993,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       // Measured on arrival, never held.
       noteServerClock(serverNow, _sent.get(opId));
       _sent.delete(opId);
+      _madeAt.delete(opId);
       // Held while a catch-up is outstanding — the op it confirms was applied
       // by the server AFTER the log that response carries (see `hold`). The op
       // stays unconfirmed meanwhile, so the optimistic view is unchanged and a
@@ -1925,6 +2026,10 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           );
           return;
         }
+        if (
+          reason.startsWith(STALE_OP_REASON) && await reissueStale(cell, opId)
+        ) return;
+        _madeAt.delete(opId);
         untrackOwn(cell, opId);
         // Drop the rejected op — it will never be confirmed. A refusal for
         // staleness is the one rejection that is ALSO an abandoned local
@@ -2303,7 +2408,9 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
                 pending: statuses.get(cell)?.pending ?? 0,
               });
             } catch (e) {
-              deps.log?.warn(`[sync] onSync callback threw: ${e}`);
+              deps.log?.warn(
+                `[sync] onSync callback threw: ${thrownText(e)}`,
+              );
             }
           }
         });
@@ -2584,6 +2691,17 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           }
         }
       }
+    },
+
+    addCell(cell, config) {
+      if (Object.hasOwn(deps.cells, cell)) return Promise.resolve();
+      (deps.cells as Record<string, SyncConfig>)[cell] = config;
+      statuses.set(cell, {
+        status: online ? "online" : "offline",
+        pending: 0,
+        lastSync: 0,
+      });
+      return this.requestSync();
     },
 
     isSyncCell(cellName) {

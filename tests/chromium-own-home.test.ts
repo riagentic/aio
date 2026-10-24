@@ -20,13 +20,19 @@ import { aioTestRoot } from "../src/testing/test-strict.ts";
 const CHROME = findChromium();
 const linux = Deno.build.os === "linux";
 
-/** Every path under `dir`, relative, sorted. */
+/** Every path under `dir`, relative, sorted. A sub-directory gone between its
+ *  listing and its read (a browser's exiting helper removes its own
+ *  `scoped_dir*` temp dir — seen on Windows under load) is listed, not read. */
 async function tree(dir: string, rel = ""): Promise<string[]> {
   const out: string[] = [];
-  for await (const e of Deno.readDir(`${dir}/${rel}`)) {
-    const p = rel ? `${rel}/${e.name}` : e.name;
-    out.push(p);
-    if (e.isDirectory) out.push(...await tree(dir, p));
+  try {
+    for await (const e of Deno.readDir(`${dir}/${rel}`)) {
+      const p = rel ? `${rel}/${e.name}` : e.name;
+      out.push(p);
+      if (e.isDirectory) out.push(...await tree(dir, p));
+    }
+  } catch (e) {
+    if (!rel || !(e instanceof Deno.errors.NotFound)) throw e;
   }
   return out.sort();
 }
@@ -212,4 +218,76 @@ Deno.test("tests: a file that starts a browser on a profile of its own gives it 
     "spread `...browserHomeEnv(profile)` (src/testing/chromium.ts) into the " +
       "spawn's env, before `...testDisplayEnv()`",
   );
+});
+
+Deno.test("AIO_TEST_BROWSER_HOME=own: Windows moves the per-user folders; macOS names what still leaks, once", async () => {
+  const { browserHomeEnv, MACOS_BROWSER_HOME_LEAK } = await import(
+    "../src/testing/chromium.ts"
+  );
+  const had = Deno.env.get("AIO_TEST_BROWSER_HOME");
+  const warn = console.warn;
+  const said: string[] = [];
+  console.warn = (...a: unknown[]) => void said.push(a.join(" "));
+  Deno.env.set("AIO_TEST_BROWSER_HOME", "own");
+  const profile = await tempDir("aio-own-home-win-");
+  try {
+    const win = browserHomeEnv(profile, "windows");
+    const home = `${profile}\\aio-home`;
+    assertEquals(win, {
+      USERPROFILE: home,
+      APPDATA: `${home}\\AppData\\Roaming`,
+      LOCALAPPDATA: `${home}\\AppData\\Local`,
+      TEMP: `${home}\\AppData\\Local\\Temp`,
+      TMP: `${home}\\AppData\\Local\\Temp`,
+    });
+    assertEquals(browserHomeEnv("/nowhere", "darwin"), {});
+    assertEquals(browserHomeEnv("/nowhere", "darwin"), {});
+    assertEquals(said.length, 1, JSON.stringify(said));
+    assert(said[0]!.includes(MACOS_BROWSER_HOME_LEAK), said[0]);
+  } finally {
+    console.warn = warn;
+    if (had === undefined) Deno.env.delete("AIO_TEST_BROWSER_HOME");
+    else Deno.env.set("AIO_TEST_BROWSER_HOME", had);
+    await dropTempDir(profile);
+  }
+});
+
+// Measured on Windows 11 (Edge): a plain launch writes `%TEMP%\cv_debug.log`
+// and jump lists under `%APPDATA%`; with the folders moved, the log is in the
+// profile's own home — the env reached the browser.
+Deno.test({
+  ignore: !CHROME || Deno.build.os !== "windows",
+  name:
+    "chromium (windows): with AIO_TEST_BROWSER_HOME=own the browser's TEMP is its profile's",
+  async fn() {
+    const had = Deno.env.get("AIO_TEST_BROWSER_HOME");
+    Deno.env.set("AIO_TEST_BROWSER_HOME", "own");
+    try {
+      const b = await launchChromium(CHROME!, [
+        "--remote-debugging-port=0",
+        "about:blank",
+      ]);
+      let left: string[] = [];
+      try {
+        const cdp = await chromiumPage(b);
+        await cdp.call("Page.navigate", { url: "data:text/html,hi" });
+        await cdp.close();
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          left = await tree(`${b.profile}/aio-home`);
+          if (left.some((p) => p.endsWith("Temp/cv_debug.log"))) break;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      } finally {
+        await b.close();
+      }
+      assert(
+        left.includes("AppData/Local/Temp/cv_debug.log"),
+        `nothing of the browser's in its own TEMP: ${left}`,
+      );
+    } finally {
+      if (had === undefined) Deno.env.delete("AIO_TEST_BROWSER_HOME");
+      else Deno.env.set("AIO_TEST_BROWSER_HOME", had);
+    }
+  },
 });

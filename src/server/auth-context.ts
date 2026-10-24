@@ -39,6 +39,7 @@ import type { AioUser } from "./aio-types.ts";
 import type { UserStore } from "./auth-users.ts";
 import { parseCookies } from "./route.ts";
 import { _installCallerScope } from "../state/method-policy.ts";
+import { _installWriteAuthor } from "../state/cell-impl.ts";
 
 const NO_KEY = new Error("no key");
 
@@ -195,6 +196,15 @@ export const serverUser = (): AioUser | undefined => {
   noteRead("user");
   return _als?.getStore();
 };
+
+/** The ambient caller, WITHOUT marking a running `ttl`/`"first"` call as
+ *  user-dependent — for the framework's own bookkeeping (stamping a
+ *  write-set with its call's author), which is not the method reading who
+ *  called it. @internal */
+export const _ambientUser = (): AioUser | undefined => _als?.getStore();
+// An async method's write-sets carry the call's author (cell-impl.ts
+// `createBatcher`).
+_installWriteAuthor(_ambientUser);
 
 /** The transport facts of the call in flight — what a caller can't forge.
  *  Read-only by design: to SET a cookie/status/header, use `route()`. */

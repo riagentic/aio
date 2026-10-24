@@ -68,6 +68,8 @@ const DEV_ONLY = [
   "src/air/dev-keys.ts", // missing / mixed / duplicate keys
   "src/air/dev-align.ts", // the child-alignment walk after every diff
   "src/air/dev-burst.ts", // the render-burst tripwire and its three messages
+  // the time-travel panel's DOM — only a non-prod server sends `tt-state`
+  "src/air/time-travel-dom.ts",
 ] as const;
 
 /** What the probe app's own `src/ui/air/dev-air.ts` exports. */
@@ -83,6 +85,7 @@ const DEV_PROSE = [
   "children without keys",
   "the child reconciler desynced",
   "times in under a second",
+  "Ctrl+. to toggle",
 ] as const;
 
 /** Modules that must STAY in the bundle. Their absence would make production
@@ -95,7 +98,8 @@ const MUST_STAY = [
   "src/browser/console-intercept.ts",
   // `am eval '__aioProfile()'` reads these counts off a live production app
   "src/air/component-profile.ts",
-  // reachable from the public `useTimeTravel()`
+  // reachable from the public `useTimeTravel()` (its state; the panel's DOM
+  // is `time-travel-dom.ts`, above)
   "src/air/time-travel-panel.ts",
 ] as const;
 
@@ -291,5 +295,21 @@ Deno.test({
     );
     // `am shot` waits on it before vouching for a frame — on a prod page too.
     assert((await probe()).code.includes("__aioMounted"));
+  },
+});
+
+Deno.test({
+  name: "dev chunk: tooling-only tables stay off the page",
+  async fn() {
+    const { code } = await probe();
+    // The page names ONE execution context (diagnostics/contexts.ts
+    // SYNC_METHOD) and looks removals up for their MESSAGES; the full context
+    // table and the source-scan patterns (removals.ts CORE_PATTERNS) are read
+    // only by tooling and server messages. ~0.6 KB gz together, measured.
+    const leaked = [
+      ["the context table (CONTEXTS)", "a worker isolate"],
+      ["a removal's source pattern", "forUser|publicFields)\\b"],
+    ].filter(([, marker]) => code.includes(marker!)).map(([what]) => what);
+    assertEquals(leaked, [], "tooling-only data is in dist/app.js again");
   },
 });

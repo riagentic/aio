@@ -96,13 +96,6 @@ export function sessionTokenFromCookie(
   return sessionCookieFrom(req, name)?.token ?? null;
 }
 
-/** Extract token from query param, Authorization header, or session cookie.
- *  Cookie last: it only exists when the AUTH-2 login flow set it, and an
- *  explicit token always wins over ambient cookie state. */
-export function _extractToken(url: URL, req: Request): string | null {
-  return _extractTokenWithSource(url, req).token;
-}
-
 /** Where a presented token came from. A URL-borne credential is visible in
  *  browser history, proxy logs and the `Referer` header, so the SOURCE decides
  *  what it is allowed to authenticate (see `sessionResolver` in server.ts).
@@ -285,11 +278,15 @@ export function weakStaticTokenUsers(
   users: Record<string, AioUser>,
 ): string[] {
   return Object.entries(users)
-    .filter(([t]) =>
-      [...t].length < WEAK_TOKEN_MIN_CHARS ||
-      tokenEntropyBits(t) < WEAK_TOKEN_MIN_BITS
-    )
+    .filter(([t]) => isWeakToken(t))
     .map(([, u]) => u.id);
+}
+
+/** THE weakness bar for a static credential — a `users:` token or a fixed
+ *  shared `key`. See `WEAK_TOKEN_MIN_*`. */
+export function isWeakToken(t: string): boolean {
+  return [...t].length < WEAK_TOKEN_MIN_CHARS ||
+    tokenEntropyBits(t) < WEAK_TOKEN_MIN_BITS;
 }
 
 // ── Control-plane gate (/__aio/trojan/*) ─────────────────────────────────────
@@ -298,6 +295,16 @@ import { mintControlKey, removeControlKey } from "./app-key.ts";
 
 /** URL prefix of the trojan control plane. */
 export const TROJAN_PREFIX = "/__aio/trojan/";
+
+/** The read-only CLIENT VIEW: `GET /__aio/view` answers exactly the state a
+ *  WebSocket opened with the same credential receives — `getUIState(user)`,
+ *  i.e. the `ui` include/exclude projection and the `forUser` pass for that
+ *  user — and nothing else. No writes, no dispatch, no eval. It is the probe a
+ *  production smoke test has (`am state --prod`), since the trojan is dev-only.
+ *  Never mounted in `serveStatic`: server.ts answers it at the points where the
+ *  request's identity is known (beside `/ws`), so it cannot be reached by a
+ *  door that skips the credential (the peer path, the local control key). */
+export const VIEW_PATH = "/__aio/view";
 
 /** Header carrying the local operator's control credential.
  *
@@ -387,7 +394,6 @@ export function armLocalControl(
     log.warn(
       "[aio] control plane: no appId — `am`/amui cannot authenticate to " +
         "/__aio/trojan/* on an auth-enabled app. Set appId in aio.run().",
-      { detail: String() },
     );
     return;
   }
@@ -410,13 +416,14 @@ export function armLocalControl(
  *  With no appId, every armed credential in this process. */
 export function disarmLocalControl(appId?: string): void {
   if (appId !== undefined) {
+    const armed = _armed.get(appId);
     _armed.delete(appId);
-    removeControlKey(appId);
+    removeControlKey(appId, armed?.key);
     return;
   }
-  for (const id of [..._armed.keys()]) {
+  for (const [id, armed] of [..._armed]) {
     _armed.delete(id);
-    removeControlKey(id);
+    removeControlKey(id, armed.key);
   }
 }
 
@@ -561,6 +568,7 @@ function _staleCredentialHint(): string {
 import type { Access } from "../state/cell-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 /** Evaluate a cell's declarative access rule for a network caller.
  *  Same vocabulary as serverFns' access (one `Access` type, alpha52): true = any authenticated user,
@@ -588,7 +596,9 @@ export function cellAccessAllowed(
       // three layers away from the sentence that would have explained it.
       log.error(
         "auth",
-        `access predicate for "${method}" threw (${e}) — DENIED. A rule that ` +
+        `access predicate for "${method}" threw (${
+          thrownText(e)
+        }) — DENIED. A rule that ` +
           `cannot answer is a refusal, never permission.`,
       );
       return false;
@@ -916,6 +926,7 @@ export function chargeMail(key: string, now = Date.now()): boolean {
 }
 
 /** Test isolation. */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetAuthFails(): void {
   _processLedger = _newLedger();
   _ledgerOf = new WeakMap(); // every app's too — a test resets from outside
@@ -1016,6 +1027,7 @@ function _machineHostname(): string | null {
 }
 
 /** Test isolation — re-read `Deno.hostname()`. @internal */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetMachineHostname(): void {
   _machineHost = undefined;
 }

@@ -21,7 +21,7 @@ import {
 } from "./build-compile.ts";
 import { BUILD_STAMP_FILE } from "./build-version.ts";
 import type { BuildConfig } from "./build-config.ts";
-import { NO } from "../diagnostics/fmt.ts";
+import { HEY, NO } from "../diagnostics/fmt.ts";
 import { compiled } from "./build-say.ts";
 import { warnMachineBoundImports } from "./machine-bound-imports.ts";
 import { DENO_JSON_NAMES, readDenoJson } from "../server/deno-json.ts";
@@ -99,6 +99,21 @@ export function cliCompileArgs(opts: {
   });
 }
 
+/** The warning for a CLI binary that BAKES `--client=cli` into its argv, or
+ *  null. `deno compile` puts baked args in FRONT of the user's, so the app's
+ *  own program sees `Deno.args[0] === "--client=cli"`: a `Deno.args[0] ===
+ *  "serve"` dispatch (the shape `examples/cli-tool` uses) fell through in the
+ *  binary while it worked from source — measured, without a word at build
+ *  time. Declaring `"client": "cli"` in deno.json bakes nothing. Pure. */
+export function bakedCliArgsWarning(argv: readonly string[]): string | null {
+  if (!argv.includes("--client=cli")) return null;
+  return `${HEY} this cli binary carries --client=cli IN FRONT of its users' ` +
+    `arguments (deno compile puts baked args first), so your program sees ` +
+    `Deno.args[0] === "--client=cli" — a check on Deno.args[0] works from ` +
+    `source and not in the binary. Add "client": "cli" to deno.json and ` +
+    `nothing is baked (aio/cli's args() skips it either way).`;
+}
+
 /** Compile a CLI binary. Exits process on completion or error. */
 export async function buildCli(cfg: BuildConfig): Promise<void> {
   const { root, binaryName, configEntry, doRemote, entryOverride } = cfg;
@@ -166,6 +181,10 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
     target: cfg.targetTriple,
     declaredClient,
   };
+  const bakedNote = bakedCliArgsWarning(
+    cliCompileArgs({ ...argvOpts, excludes: [] }),
+  );
+  if (bakedNote) console.warn(bakedNote);
   const moduleRoots = compileModuleRoots(cliEntry, [
     ...(doRemote ? [] : dbWorkerInclude()),
     ...assets,

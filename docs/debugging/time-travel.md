@@ -58,6 +58,11 @@ are O(1) — the entry's state is simply served.
   the restored point are discarded, like any other state they built.
 - UI: `useTimeTravel()` in any AIR component; server side drives it over the
   `tt-state` / `tt-cmd` frames.
+- Who may use it: with per-user auth, only `role: "admin"` sockets get the
+  history and may rewind (it is every user's actions, and a jump moves state for
+  every client). On the local socket the app's own window is trusted as before;
+  a `peer()` caller PROVEN as a user (`resolvePeer`) answers to the same admin
+  bar.
 
 ## High-frequency apps: `skipActions`
 

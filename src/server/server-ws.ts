@@ -25,7 +25,6 @@ import {
   type ActionPayload,
   dec,
   enc,
-  encRaw,
   errorFields,
   isIgnorableKind,
   type SfnPayload,
@@ -66,7 +65,7 @@ import { bytes, count } from "../diagnostics/fmt.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import { WS_BUFFER_HIGH_WATER, wsWriteBacklog } from "./write-backlog.ts";
 import { userMemoKey } from "./aio-run-helpers.ts";
-import { warnBigFullState } from "./server-broadcast.ts";
+import { encState, warnBigFullState } from "./server-broadcast.ts";
 import { LARGE_STATE_DOC } from "../state/budgets.ts";
 
 /** A whole state is about to be sent to ONE client outside the broadcast
@@ -97,7 +96,11 @@ function drainBeforeSnapshot(): void {
  *  Pure and exported so the classification is testable without a socket — and
  *  so widening it later is a visible, reviewed edit rather than a `catch {}`. */
 export function isPeerGone(message: string): boolean {
-  return /unexpected eof|connection reset|broken pipe|reset by peer|connection closed before message completed|os error 104|os error 32/i
+  // "Failed to send frame": the runtime's words for a write to a socket whose
+  // peer is gone — measured on every page reload that
+  // follows a server restart (the old page navigates away while a frame to it
+  // is in flight), a WARN after every restart.
+  return /unexpected eof|connection reset|broken pipe|reset by peer|connection closed before message completed|os error 104|os error 32|failed to send frame/i
     .test(message);
 }
 
@@ -472,6 +475,9 @@ export interface WsDeps {
   costMeter?: import("../vitals/cost-meter.ts").CostMeter;
   dispatch: (event: unknown, user?: AioUser) => Promise<unknown> | void;
   getUIState: (user?: AioUser) => unknown;
+  /** The icon frames a client that connects now is sent after its state —
+   *  the broadcaster's `iconReplay`. */
+  iconReplay?: () => readonly string[];
   debug: (msg: string) => void;
   prod: boolean;
   maxConnections?: number;
@@ -535,6 +541,7 @@ export interface WsManager {
     clientKey?: string,
     sessionToken?: string,
     resolverToken?: string,
+    viaLink?: boolean,
   ) => Response;
   connections: Map<WebSocket, ClientMeta>;
   payloadStats: Map<
@@ -1068,7 +1075,7 @@ export function createWsManager(deps: WsDeps): WsManager {
         filterStateBySubs(deps.getUIState(meta.user), meta.subscriptions),
       );
       if (!meta.lastFullJsonStale && msg === meta.lastFullJson) return;
-      const frame = encRaw("state", msg);
+      const frame = encState(msg, meta.subscriptions);
       socket.send(frame);
       // Metered like the connect frame: a whole view re-sent on a user change
       // is paid in full, so it counts toward `payload` and PRESSURE.
@@ -1216,6 +1223,8 @@ export function createWsManager(deps: WsDeps): WsManager {
     clientKey?: string,
     sessionToken?: string,
     resolverToken?: string,
+    /** Signed in from a `?token=` SESSION link with no cookie (server.ts). */
+    viaLink?: boolean,
   ): Response {
     // F-4: reject denylisted clients at handshake so reconnect loops can't
     // reset per-socket abuse counters.
@@ -1559,6 +1568,9 @@ export function createWsManager(deps: WsDeps): WsManager {
             // the 100/sec fallback instead.
             rate: Math.min(wsRateLimit, 1_000_000),
             maxMessageBytes: wsMaxMessage,
+            // …and the byte budget, so a burst of large frames is paced by
+            // size too (send-pacer.ts `bytesRate`). Clamped like `rate`.
+            bytesPerSec: Math.min(wsBytesPerSec, 1_000_000_000_000),
             // Whether the `cfg` frame below is sent: a client that waits for
             // it knows here that there is nothing to wait for.
             cfg: _sendsCfg,
@@ -1580,7 +1592,7 @@ export function createWsManager(deps: WsDeps): WsManager {
         // persist off, pushed 12.5 MB on every connect and never said so
         // (measured). `deps.getUIState` is the app's latch owner, as on UDS.
         warnBigFullState(msg, () => uiState, deps.getUIState);
-        const frame = encRaw("state", msg);
+        const frame = encState(msg, null);
         socket.send(frame);
         meta.lastFullJson = msg;
         // …and METERED for pressure, like every frame the broadcaster sends
@@ -1601,6 +1613,14 @@ export function createWsManager(deps: WsDeps): WsManager {
         // server believed it had served a client it had not.
         degraded("ws:initial-state").fail(e);
       }
+      // The icon the app set before this window connected (`appIcon`).
+      for (const f of deps.iconReplay?.() ?? []) {
+        try {
+          socket.send(f);
+        } catch {
+          break; // aio-ok: closing during onopen — its reconnect replays
+        }
+      }
       // The whole action log — every user's action types and error text — so
       // under per-user auth it is admin-only, like the `tt-cmd` it drives and
       // the broadcaster's flush (server-broadcast.ts `flushTT`).
@@ -1617,6 +1637,25 @@ export function createWsManager(deps: WsDeps): WsManager {
       try {
         socket.send(enc("boot", { id: deps.bootId }));
       } catch { /* socket closing during onopen (AIO-155) */ }
+      // Whose account this tab is in, when a LINK chose it (login CSRF):
+      // the existing `diag` sink shows it — overlay, else the console.
+      if (viaLink) {
+        try {
+          socket.send(enc("diag", {
+            type: "ws-session-link",
+            severity: "warning",
+            source: "server-ws",
+            message: `signed in via a link as ${meta.user?.id}`,
+            hint: "This tab uses the account of the ?token= link it was " +
+              "opened with, not a sign-in of your own — sign in normally if " +
+              "that is not you",
+            user: meta.user?.id,
+            ts: Date.now(),
+          }));
+        } catch {
+          /* aio-ok: the socket closed during onopen — nothing to tell */
+        }
+      }
       if (_sendsCfg) {
         try {
           socket.send(enc("cfg", deps.clientConfig));
@@ -2020,20 +2059,23 @@ export function createWsManager(deps: WsDeps): WsManager {
         ts: Date.now(),
         source: "server-ws",
       });
-      try {
-        // The original refusal: a bare JSON object, which a non-aio peer can
-        // read — and aio's OWN client cannot, because `dec()` rejects anything
-        // that is not a v2 envelope and logs "undecodable frame — dropped".
-        // Kept for the peers it does serve; the envelope below is the one this
-        // framework's client actually surfaces.
-        socket.send(
-          JSON.stringify({
-            error: "message_too_large",
-            code: 1009,
-            size: e.data.length,
-          }),
-        );
-      } catch { /* client gone */ }
+      // The original refusal: a bare JSON object, which a non-aio peer can
+      // read — and aio's OWN client cannot, because `dec()` rejects anything
+      // that is not a v2 envelope and logs "undecodable frame — dropped".
+      // Kept for the peers it does serve — those that never sent a `proto`
+      // hello; one that did reads the envelope below, and got a second,
+      // misleading "undecodable frame" warning per oversize frame besides.
+      if (meta.protocolVersion === undefined) {
+        try {
+          socket.send(
+            JSON.stringify({
+              error: "message_too_large",
+              code: 1009,
+              size: e.data.length,
+            }),
+          );
+        } catch { /* client gone */ }
+      }
       refuseFrameWithCall(
         socket,
         e.data,
@@ -2675,7 +2717,7 @@ export function createWsManager(deps: WsDeps): WsManager {
         meta.skipped = undefined;
         return;
       }
-      const frame = encRaw("state", msg);
+      const frame = encState(msg, meta.subscriptions);
       socket.send(frame);
       // Metered: a `subs`/`resync` re-send is a whole view, paid in full.
       deps.vitalsSystem?.pressureMonitor?.onBroadcast(meta.id, utf8Size(frame));
@@ -2701,7 +2743,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       const msg = JSON.stringify(
         filterStateBySubs(deps.getUIState(meta.user), meta.subscriptions),
       );
-      const frame = encRaw("state", msg);
+      const frame = encState(msg, meta.subscriptions);
       socket.send(frame);
       // Metered: a resync is a whole view, paid in full.
       deps.vitalsSystem?.pressureMonitor?.onBroadcast(meta.id, utf8Size(frame));

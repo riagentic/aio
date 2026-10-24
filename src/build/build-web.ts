@@ -110,6 +110,12 @@ function precacheUrl(f: string): string {
 /** How many asset-mount files the worker's install fetches at once. */
 const ASSETS_AT_ONCE = 2;
 
+/** The largest asset-mount file a new build's install copies from the build
+ *  it replaces instead of fetching: the copy is hashed in memory, one file
+ *  per lane. Measured in WebKit (two 60 MB lanes): the web process peaked at
+ *  ~620 MB — too much for a phone; at 16 MiB a lane holds at most that. */
+const REUSE_MAX = 16 * 1024 * 1024;
+
 /** The service worker: precaches every file of the build under a cache named
  *  by `version` (a hash of every file's bytes, the bundle included) — fetched
  *  past the browser's HTTP cache (`cache: "reload"`), else a host's `max-age`
@@ -138,6 +144,9 @@ export function serviceWorker(
   files: readonly string[],
   integrity: Readonly<Record<string, string>> = {},
   assets: readonly string[] = [],
+  /** Asset file → its SHA-256, base64: the bytes a cached copy must hash to
+   *  for the install to reuse it (see `reuse` in the worker). */
+  digests: Readonly<Record<string, string>> = {},
 ): string {
   const prefix = `aio-${appId}-`;
   const later = new Set(assets);
@@ -166,22 +175,64 @@ const SRI = ${
     )
   };
 const req = (f) => new Request(f, { cache: "reload", integrity: SRI[f] || "" });
+const DIGEST = ${
+    JSON.stringify(
+      Object.fromEntries(
+        files.filter((f) => later.has(f) && digests[f]).map((f) => [
+          precacheUrl(f),
+          digests[f],
+        ]),
+      ),
+    )
+  };
+const b64 = (d) => btoa(String.fromCharCode(...new Uint8Array(d)));
+// An asset file of an earlier build of this app at this scope whose stored
+// BYTES hash to this build's digest is copied, not fetched: a stale edge's
+// copy, a host-rewritten image or a half-filled cache never hashes to it and
+// is fetched as before. Only reading the old copy may miss quietly; the put
+// fails the install like a fetch would (storage full: the old build serves).
+const reuse = (c, f, from) => {
+  if (!DIGEST[f] || !from) return Promise.resolve(false);
+  return caches.open(from).then((o) => o.match(f, { ignoreVary: true }))
+    .then((old) => !old || old.status !== 200 ||
+      Number(old.headers.get("content-length")) > ${REUSE_MAX} ? null : old.blob().then((blob) =>
+      blob.size > ${REUSE_MAX} ? null : blob.arrayBuffer()
+        .then((buf) => crypto.subtle.digest("SHA-256", buf))
+        .then((d) => b64(d) === DIGEST[f] ? { blob, headers: old.headers } : null)))
+    .catch(() => null)
+    .then((hit) => hit && c.put(f, new Response(hit.blob, { status: 200, headers: hit.headers })).then(() => true));
+};
 // The page's own files at once, then the asset mounts' ${ASSETS_AT_ONCE} at a time;
 // the first failure fails the install and starts no further fetch.
-const precacheAssets = (c) => {
+const precacheAssets = (c, from) => {
   const todo = ASSETS.slice();
   let failed = false;
   const next = () => {
     const f = todo.shift();
     if (failed || f === undefined) return;
-    return c.add(req(f)).then(next, (err) => { failed = true; throw err; });
+    return reuse(c, f, from).then((done) => done || c.add(req(f)))
+      .then(next, (err) => { failed = true; throw err; });
   };
   return Promise.all(Array.from({ length: ${ASSETS_AT_ONCE} }, next));
 };
+// The newest other cache of this app at this scope — what reuse copies from.
+const newestOwn = () => caches.keys().then((ks) => ks.filter((k) => {
+  const m = OWN.exec(k);
+  return k !== V && m && m[2] === self.registration.scope;
+}).pop());
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(V).then((c) => c.addAll(FILES.map(req)).then(() => precacheAssets(c))).then(() => self.skipWaiting()));
+  e.waitUntil(newestOwn().then((from) => caches.open(V)
+    .then((c) => c.addAll(FILES.map(req)).then(() => precacheAssets(c, from))))
+    .then(() => self.skipWaiting(), (err) => {
+      console.error("✗ [aio] offline cache: this build was not installed — " +
+        (err && err.name) + ": " + (err && err.message) + "; the previous build keeps serving");
+      throw err;
+    }));
 });
-// Drops only THIS app's older builds at THIS scope: a bare prefix match also
+// Drops only THIS app's OLDER builds at THIS scope — the caches made before
+// this one (CacheStorage keeps creation order; measured across restarts in
+// Chromium and WebKit): a newer build's install may already be filling its
+// cache while this one activates. A bare prefix match also
 // took another app's ("notes" took "notes-pro"'s) and the same app's at
 // another path — that one offline, dead. A pre-scope name carries no scope, so
 // what it HOLDS says whose it is: dropped only when every entry is under this
@@ -193,15 +244,16 @@ const OWN = new RegExp(${
   });
 self.addEventListener("activate", (e) => {
   const scope = self.registration.scope;
-  const mine = (k) => {
+  const mine = (k, older) => {
     const m = OWN.exec(k);
     if (!m || k === V) return Promise.resolve(false);
-    if (m[2] !== undefined) return Promise.resolve(m[2] === scope);
+    if (m[2] !== undefined) return Promise.resolve(m[2] === scope && older);
     return caches.open(k).then((c) => c.keys())
       .then((rs) => rs.every((r) => r.url.startsWith(scope)));
   };
-  e.waitUntil(caches.keys().then((ks) => Promise.all(ks.map((k) =>
-    mine(k).then((drop) => drop && caches.delete(k))
+  e.waitUntil(caches.keys().then((ks) => Promise.all(ks.map((k, i) =>
+    mine(k, ks.indexOf(V) < 0 || i < ks.indexOf(V))
+      .then((drop) => drop && caches.delete(k))
   )))
     .then(() => self.clients.claim()));
 });
@@ -244,10 +296,16 @@ export function webIconProblem(
   if (!size) {
     return "icon.png is not a PNG — the web app uses the generated monogram";
   }
-  if (Math.min(size.w, size.h) >= 144) return null;
+  const why = Math.min(size.w, size.h) < 144
+    ? "an icon of at least 144×144"
+    // Measured the same way: a 1400×419 icon.png reports the same error.
+    : size.w !== size.h
+    ? "a SQUARE icon"
+    : null;
+  if (!why) return null;
   return `icon.png is ${size.w}×${size.h}: Chrome offers to install a web ` +
-    `app only with an icon of at least 144×144, so this one is not ` +
-    `installable on Android. Fix: ship a 512×512 icon.png`;
+    `app only with ${why}, so this one is not installable on Android. ` +
+    `Fix: ship a 512×512 icon.png`;
 }
 
 /** Every file under `dir`, as `/`-separated paths relative to it, sorted. */
@@ -278,15 +336,19 @@ async function subresourceIntegrity(
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const f of files) {
-    if (!digestPinned(f)) continue;
-    const d = new Uint8Array(
-      await crypto.subtle.digest("SHA-256", await Deno.readFile(join(dir, f))),
-    );
-    let bin = "";
-    for (const b of d) bin += String.fromCharCode(b);
-    out[f] = `sha256-${btoa(bin)}`;
+    if (digestPinned(f)) out[f] = `sha256-${await sha256Base64(join(dir, f))}`;
   }
   return out;
+}
+
+/** SHA-256 of the file at `path`, base64. */
+async function sha256Base64(path: string): Promise<string> {
+  const d = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", await Deno.readFile(path)),
+  );
+  let bin = "";
+  for (const b of d) bin += String.fromCharCode(b);
+  return btoa(bin);
 }
 
 /** SHA-256 over every file's path and bytes — the build's content version. */
@@ -421,6 +483,9 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
   // Screen, never by the page: precached, they were ~20 full-screen PNGs
   // every visitor's browser downloaded for nothing.
   const files = all.filter((f) => !launch.includes(f));
+  const assets = files.filter((f) => !shellFiles.has(f));
+  const digests: Record<string, string> = {};
+  for (const f of assets) digests[f] = await sha256Base64(join(outDir, f));
   await Deno.writeTextFile(
     join(outDir, "sw.js"),
     serviceWorker(
@@ -431,7 +496,8 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
         outDir,
         files,
       ),
-      files.filter((f) => !shellFiles.has(f)),
+      assets,
+      digests,
     ),
   );
   // A static host serves this folder as another account: stated modes, not

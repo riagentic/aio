@@ -21,6 +21,7 @@
 
 import { basename, dirname, fromFileUrl, join } from "@std/path";
 import { log } from "../diagnostics/logger-api.ts";
+import { parentPidOf } from "./process-liveness.ts";
 import {
   AppLock,
   instances,
@@ -65,6 +66,27 @@ export const RESTART_STORM_LIMIT = 5;
  *  detected — enough that a runaway toolchain costs one process per interval
  *  instead of a fork bomb, short enough that a real edit still lands fast. */
 export const RESTART_STORM_COOLDOWN_MS = 5_000;
+
+/** Does the end of a (non-restart) child end the dev session too? A signal
+ *  (`am kill`, Ctrl-C reaching the child), a clean 0 (`am stop`, the window
+ *  closing), a crash after it had been running — or a stop that was ASKED:
+ *  `am stop` / `am restart` mark the record `stopping` before they end the
+ *  child, and on Windows that end is TerminateProcess — exit code 1, no
+ *  signal — which read as "the saved file does not load": the session sat
+ *  waiting for a fix under the lock `am restart` was about to start into.
+ *  The mark is the signal Windows cannot carry. `held`: the slot's record
+ *  when the child had ended. Pure. */
+export function childEndsSession(
+  status: { code: number; signal: Deno.Signal | null },
+  ranMs: number,
+  held: LockData | null,
+  child: number,
+): boolean {
+  const stopAsked = held !== null && isOwnLock(held, child) &&
+    held.status === "stopping";
+  return status.signal !== null || status.code === 0 || stopAsked ||
+    ranMs > FAILED_RESTART_WINDOW_MS;
+}
 
 /** The delay before the next respawn, given how many storm-speed restarts have
  *  happened back to back. Pure — the throttle is a unit test, not a stopwatch. */
@@ -413,8 +435,8 @@ export async function restartForCellChange(
   // one), which files the next child over it. It used to remove the lock, and
   // until that filing (~100 ms on every save) nothing named the app.
   if (self) {
-    const parent = Number(env("AIO_PARENT_PID"));
-    const supervisor = isSupervisedChild() && parent > 0 ? parent : Deno.pid;
+    const parent = parentPidOf(env("AIO_PARENT_PID"));
+    const supervisor = isSupervisedChild() && parent ? parent : Deno.pid;
     AppLock.live().find((l) => l.key === slotOf(self))?.handOver(
       placeholderFor(self, supervisor, port),
     );
@@ -673,6 +695,7 @@ async function superviseForever(
     const placed = self ? fileChildPlaceholder(self, child.pid, port) : null;
     const status = await child.status;
     stop.child = null;
+    const held = self ? readLock(slotOf(self)) : null;
     // A placeholder the child never replaced names a dead pid now — gone,
     // so the next reader does not report an abrupt end that did not happen.
     // THAT placeholder only, byte for byte: a lock the child wrote itself
@@ -717,10 +740,7 @@ async function superviseForever(
     // directly. Someone wanted it dead; the supervisor goes too. A clean 0 is
     // `am stop` or the window closing — same answer. A crash after it had
     // been running is the app's own business and its code passes through.
-    if (
-      status.signal || status.code === 0 ||
-      Date.now() - spawnedAt > FAILED_RESTART_WINDOW_MS
-    ) {
+    if (childEndsSession(status, Date.now() - spawnedAt, held, child.pid)) {
       dropWaiting();
       Deno.exit(status.code);
     }

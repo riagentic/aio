@@ -112,8 +112,12 @@ async function runLoop(
       stderr: "piped",
     }).spawn();
     // A loop that never ends is a FAILED test (its exit code is the kill's),
-    // not a hung one.
-    const bound = setTimeout(() => p.kill("SIGKILL"), 10_000);
+    // not a hung one — and the app it started goes too: alive, it held the
+    // pipe open and the read below waited forever (a suite hung 90 min).
+    const bound = setTimeout(() => {
+      p.kill("SIGKILL");
+      new Deno.Command("pkill", { args: ["-KILL", "-f", bin] }).outputSync();
+    }, 10_000);
     let out = "";
     const dec = new TextDecoder();
     const reader = p.stdout.getReader();

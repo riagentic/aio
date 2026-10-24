@@ -189,6 +189,11 @@ Without `useForm`, an input is yours to wire:
 
 - `value` / `checked` **with a handler** — controlled: every render puts the
   control back on the prop, so typed input the handler did not store is undone.
+  One grace: a focused field typed into within the last second, whose keystrokes
+  started no call (a debounced store, a draft variable), keeps its text against
+  a render of the UNCHANGED prop — an unrelated parent render no longer eats
+  what was typed before the debounce fires. A changed prop, or the handler's own
+  render in the keystroke's task, still wins.
 - `defaultValue` / `defaultChecked` — set once when the element is created (and
   written by SSR as the `value` / `checked` attribute); no render writes it
   again. Use it for a field read through `FormData` or a ref.

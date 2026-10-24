@@ -154,6 +154,7 @@ export function initDiagnosticBus(
 }
 
 /** Returns whether diagnostic bus is in dev mode */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function isDiagDev(): boolean {
   return _dev;
 }
@@ -299,6 +300,7 @@ export function diagSubscribe(
 }
 
 /** Expose dedup map size for testing (not part of public API) */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _diagDedupSize(): number {
   return _dedup.size;
 }

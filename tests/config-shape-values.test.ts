@@ -387,3 +387,14 @@ Deno.exit(0);
     }
   },
 });
+
+// `users: "secret"` was walked as a token map — `Object.entries("secret")` —
+// so the tokens "0".."5" each authenticated a user named by one letter.
+Deno.test("users must be a token map, never a string", () => {
+  assert(refused({ users: "secret" }), "a string users map must not boot");
+  assert(refused({ users: ["a"] }), "a list is not a token map");
+  assert(!refused({ users: {} }));
+  assert(
+    !refused({ users: { [crypto.randomUUID()]: { id: "a", role: "u" } } }),
+  );
+});

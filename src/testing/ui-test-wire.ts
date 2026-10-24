@@ -111,7 +111,7 @@ export function _useServerOriginScope(): () => void {
  *  the same one decider serverFns and the WS door use. */
 export function _enforceCellAccess(
   cells: CellDef[],
-  user: AioUser | undefined,
+  viewer: () => AioUser | undefined,
 ): () => void {
   const undo: (() => void)[] = [];
   // The gate applies to CLIENT callers. A cell→cell call is not one: over a
@@ -135,6 +135,7 @@ export function _enforceCellAccess(
       if (typeof bound !== "function") continue;
       const original = bound as (...a: unknown[]) => unknown;
       target[key] = (...args: unknown[]) => {
+        const user = viewer();
         if (!isServerOrigin() && !cellAccessAllowed(rule, user, key, args)) {
           const denial = Promise.reject(
             createAioError(
@@ -418,7 +419,7 @@ export function _reshapedNote(): string {
  *  error by identity. Server code calling one crosses no wire (as `access`
  *  decides it: `isServerOrigin`). Returns the undo. */
 export function _serverFnsOverWire(
-  user: AioUser | undefined,
+  viewer: () => AioUser | undefined,
   enforceAccess: boolean,
 ): () => void {
   const strict = _strict;
@@ -450,6 +451,7 @@ export function _serverFnsOverWire(
     if (lost.length > 0) {
       return Promise.reject(_wireLossError(`${what}()`, lost));
     }
+    const user = viewer();
     return runWithUser(
       user,
       () => invokeServerFn(ns, name, sent, user, !enforceAccess),

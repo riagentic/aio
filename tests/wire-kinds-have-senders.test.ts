@@ -25,6 +25,9 @@ const SENT_INDIRECTLY: Record<string, string> = {
   // `const signal = wasFullReload ? "reload" : "css"` → `enc(signal)`
   reload: "src/server/server-watcher.ts (enc(signal))",
   css: "src/server/server-watcher.ts (enc(signal))",
+  // A whole view is built by hand to carry the cells it covers (`s`):
+  // `{"v":2,"t":"state",…}` in encState().
+  state: "src/server/server-broadcast.ts (encState())",
 };
 
 async function readAll(dir: string): Promise<string> {

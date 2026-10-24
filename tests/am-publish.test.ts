@@ -1184,15 +1184,23 @@ Deno.test("am publish: --dir at a source dir is refused before anything is writt
     );
     await Deno.remove(join(elsewhere, "in"));
     // A channel is a name, never a path: it cannot move the staging dir.
-    const r = await publishExit(["--no-build", "--channel=../src"]);
-    assertEquals(r.code, 1);
+    // Refused before anything is made or recorded — `../escaped` used to
+    // leave `<dir>/escaped` behind, outside `--dir`, under a refusal that
+    // came from `aio ship` after the build.
+    for (const c of ["../src", "../escaped", "a/b", "-x"]) {
+      const r = await publishExit(["--no-build", `--channel=${c}`]);
+      assertEquals(r.code, 1, c);
+      const err = (JSON.parse(r.out.at(-1)!) as { error: string }).error;
+      assertStringIncludes(err, "refusing to publish to channel", c);
+      assertStringIncludes(err, "Nothing was built or written", c);
+    }
     assertEquals(
-      [await exists("src/prod"), await exists("release")],
-      [false, false],
-    );
-    assertEquals(
-      JSON.parse(await Deno.readTextFile(join(dir, ".aio/outputs.json"))),
-      ["release/"],
+      await Promise.all(
+        ["src/prod", "release", "escaped", "a", ".aio/outputs.json"].map(
+          exists,
+        ),
+      ),
+      [false, false, false, false, false],
     );
     const before = await version();
     await Deno.writeTextFile(join(dir, "src", "app.ts"), `fetch("y");`);

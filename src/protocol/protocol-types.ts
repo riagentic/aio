@@ -151,3 +151,29 @@ export type Remote<T extends Record<string, (...a: any[]) => any>> = {
     ? (...a: P) => Promise<Awaited<R>>
     : never;
 };
+
+/** Options for `serverFn(ns, opts)`. */
+export interface ServerFnOptions {
+  /** How long a client call waits for the server's reply before it rejects
+   *  (default 30 000). A call the server holds for a person at a picker
+   *  (`pauseCallDeadlines`) does not count down. Server code calls the
+   *  function directly, so it has no timeout there. */
+  timeoutMs?: number;
+}
+
+/** The client timeout `opts` asks for — refused at the `serverFn()` call, on
+ *  both sides, when it is not a positive finite number of milliseconds. */
+export function serverFnTimeoutMs(
+  ns: string,
+  opts: ServerFnOptions | undefined,
+): number {
+  const ms = opts?.timeoutMs;
+  if (ms === undefined) return 30_000;
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) {
+    throw new TypeError(
+      `serverFn("${ns}", { timeoutMs: ${String(ms)} }) — timeoutMs must be ` +
+        `a positive finite number of milliseconds (default 30000)`,
+    );
+  }
+  return ms;
+}

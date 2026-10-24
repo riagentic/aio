@@ -41,14 +41,18 @@ import {
   probeArtifact,
   type ReleasePatch,
   resolveSigningKey,
+  SAFE_TOKEN,
   type ShipManifest,
   shipRelease,
 } from "../build/ship.ts";
 import { fileSha256, MB } from "../server/updates-check.ts";
+import { unpackArchive } from "../server/updates-apply.ts";
+import { makeTreePatch } from "../server/updates-tree.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
 import { readSfxTrailerOfFile } from "../build/sfx-trailer.ts";
 import { count } from "../diagnostics/fmt.ts";
 import { resolveEntryPath } from "../server/paths.ts";
+import { buildChannel } from "../server/updates-core.ts";
 import {
   firstUseKeyWarning,
   updatesKeyOnFirstUse,
@@ -256,10 +260,69 @@ export function notProbedHere(a: {
   return `the build recorded it as not runnable on the machine that built it`;
 }
 
+/** Run the `zstd` tool for the patch of `name`; throws, naming the tool, when
+ *  it cannot start or fails. */
+async function runZstd(args: string[], name: string): Promise<void> {
+  let run: Deno.CommandOutput;
+  try {
+    run = await new Deno.Command("zstd", {
+      args,
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+  } catch (e) {
+    throw new Error(
+      `--patch-from needs the zstd command line tool (1.4.5 or newer) on ` +
+        `PATH, and it could not be started: ${e}`,
+    );
+  }
+  if (!run.success) {
+    throw new Error(
+      `zstd could not make the patch for ${name} (exit ${run.code}): ${
+        new TextDecoder().decode(run.stderr).trim()
+      }`,
+    );
+  }
+}
+
+/** The tree patch from the `.zip` release `oldZip` to `newZip`, written to
+ *  `out` — both unpacked into a temporary folder first. A reason when the
+ *  release cannot be patched file by file (it holds a symlink). */
+async function zipTreePatch(
+  oldZip: string,
+  newZip: string,
+  out: string,
+): Promise<string | null> {
+  const work = await Deno.makeTempDir({ prefix: "aio-publish-tree-" });
+  try {
+    for (const [zip, to] of [[oldZip, "old"], [newZip, "new"]]) {
+      const got = await unpackArchive(zip!, join(work, to!));
+      if (!got.ok) throw new Error(got.error);
+    }
+    try {
+      await makeTreePatch(
+        join(work, "old"),
+        join(work, "new"),
+        out,
+        (args) => runZstd(args, newZip),
+      );
+    } catch (e) {
+      if (e instanceof Error && e.message.endsWith(" is a symlink")) {
+        return `${e.message}, and a tree patch carries files only`;
+      }
+      throw e;
+    }
+    return null;
+  } finally {
+    await Deno.remove(work, { recursive: true });
+  }
+}
+
 /** The patches that turn the release published earlier in each of `dirs`
  *  into `file` — for the manifest named `manifestName` there (`<dir>/` or
  *  `<dir>/<channel>/`), written beside where `file` is published as
- *  `<file>.<digest it starts from>-<digest it makes>.zst`.
+ *  `<file>.<digest it starts from>-<digest it makes>.zst` — or, for a `.zip`
+ *  release, `.tree`: a patch per changed file (updates-tree.ts).
  *
  *  Made with the `zstd` tool (`--patch-from`, zstd ≥ 1.4.5): publishing may
  *  need a tool, updating never does. `notes` says, per directory, what was
@@ -299,13 +362,15 @@ export async function makePatches(o: {
       ShipManifest
     >;
     const from = String(prev.sha256).toLowerCase();
-    if (["electron-zip", "electron-app", "android"].includes(prev.target!)) {
+    if (["electron-app", "android"].includes(prev.target!)) {
       notes.push(
         `${name}: no patch — a ${prev.target} install is an unpacked ` +
           `folder with no file to patch; it downloads every release whole`,
       );
       continue;
     }
+    // A `.zip` install is patched file by file (updates-tree.ts).
+    const tree = prev.target === "electron-zip";
     if (from === sha256 || patches.some((p) => p.from === from)) continue;
     const old = join(at, "..", prev.url ?? "");
     if (!isFile(old) || await fileSha256(old) !== from) {
@@ -315,26 +380,20 @@ export async function makePatches(o: {
           `from anything else fits no install.`,
       );
     }
-    const file = `${name}.${from.slice(0, 12)}-${sha256.slice(0, 12)}.zst`;
+    const file = `${name}.${from.slice(0, 12)}-${sha256.slice(0, 12)}.${
+      tree ? "tree" : "zst"
+    }`;
     const out = join(o.into, file);
-    let run: Deno.CommandOutput;
-    try {
-      run = await new Deno.Command("zstd", {
-        args: ["-19", `--patch-from=${old}`, o.file, "-o", out, "-f", "-q"],
-        stdout: "null",
-        stderr: "piped",
-      }).output();
-    } catch (e) {
-      throw new Error(
-        `--patch-from needs the zstd command line tool (1.4.5 or newer) on ` +
-          `PATH, and it could not be started: ${e}`,
-      );
-    }
-    if (!run.success) {
-      throw new Error(
-        `zstd could not make the patch for ${name} (exit ${run.code}): ${
-          new TextDecoder().decode(run.stderr).trim()
-        }`,
+    if (tree) {
+      const why = await zipTreePatch(old, o.file, out);
+      if (why) {
+        notes.push(`${name}: no patch from ${prev.version ?? from}: ${why}`);
+        continue;
+      }
+    } else {
+      await runZstd(
+        ["-19", `--patch-from=${old}`, o.file, "-o", out, "-f", "-q"],
+        name,
       );
     }
     const made = Deno.statSync(out).size;
@@ -404,7 +463,21 @@ export async function cmdPublish(
     name?: string;
   };
   const distDir = resolve(root, cfg.build?.out ?? "dist");
-  const channel = flag("channel") ?? cfg.build?.channel ?? "prod";
+  const channel = flag("channel") ?? buildChannel(cfg.build) ?? "prod";
+  // Before anything is built or made: the channel is a directory under
+  // `--dir`, and `shipRelease` refused a bad one only AFTER the build — and
+  // after `<dir>/<channel>` was made, so `--channel=../x` left a folder
+  // OUTSIDE `--dir`, under a refusal that named `aio ship`.
+  if (!SAFE_TOKEN.test(channel)) {
+    fail(
+      `refusing to publish to channel ${JSON.stringify(channel)} — a ` +
+        `channel is a directory name and part of every client's update URL, ` +
+        `so it must match ${SAFE_TOKEN.source} (letters, digits, and . _ + -, ` +
+        `starting alphanumeric). Nothing was built or written.`,
+      mode,
+      `--channel=prod, or fix build.channel in deno.json`,
+    );
+  }
   const outDir = resolve(root, flag("dir") ?? "release");
   const targetsArg = flag("targets");
   // Inside the project, `--dir` answers to the guard the build's `--out`

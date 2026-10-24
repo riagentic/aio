@@ -39,6 +39,23 @@ import {
   readElectronCache,
   type SharedPruneDecision,
 } from "../build/electron-cache.ts";
+import { resolve } from "@std/path";
+import { instances } from "../server/single-instance-lock.ts";
+import { repoRoot } from "./am-cmd-create.ts";
+import { resolveAioRoot } from "./am-cmd-link.ts";
+import {
+  applyVersionPrune,
+  currentLink,
+  isPathPin,
+  latestTag,
+  planVersionPrune,
+  provisioned,
+  readPin,
+  refOfLink,
+  sortVersions,
+  type VersionPruneDecision,
+  versionsDir,
+} from "./am-versions.ts";
 
 /** The flags this verb reads, parsed out of its own argv. A bad value is a
  *  refusal, never a silent default — the number in `--days` decides whether
@@ -68,6 +85,17 @@ export function parsePruneArgs(args: readonly string[]): {
       for (const v of a.slice("--keep=".length).split(",")) {
         if (v.trim()) keep.push(v.trim());
       }
+    } else {
+      // Anything else is a typo, never "no argument": `am prune versoins
+      // --yes` deleted Electron runtimes instead of version checkouts.
+      return {
+        apply,
+        days,
+        keep,
+        error: `am prune: ${JSON.stringify(a)} is not an argument it ` +
+          `takes — it takes --yes (-y), --days=N, --keep=a,b, or the ` +
+          `subcommand \`versions\` first (\`am prune versions --yes\`)`,
+      };
     }
   }
   return { apply, days, keep };
@@ -159,10 +187,135 @@ export function renderSharedPlan(
   return lines.join("\n");
 }
 
+/** The refs `am prune versions` never offers, each with the sentence why:
+ *  `--keep`, what this directory's app and every RUNNING app pin or link,
+ *  the checkout am itself runs from, and the newest release. */
+async function versionProtections(
+  root: string | null,
+  keep: readonly string[],
+): Promise<Map<string, string>> {
+  const protect = new Map<string, string>();
+  const add = (ref: string | null, why: string) => {
+    if (ref && !protect.has(ref)) protect.set(ref, why);
+  };
+  for (const k of keep) add(k, "kept by --keep");
+  const appDirs = new Set([Deno.cwd(), ...instances().map((i) => i.cwd)]);
+  for (const dir of appDirs) {
+    if (!dir) continue;
+    const pin = await readPin(dir);
+    if (pin && !isPathPin(pin)) add(pin, `pinned by ${dir}`);
+    const link = await currentLink(dir);
+    if (link) add(refOfLink(resolve(dir, "dep", link)), `linked by ${dir}`);
+  }
+  for (const own of [repoRoot(), root]) {
+    if (own) add(refOfLink(resolve(own)), "the aio checkout am runs from");
+  }
+  add(root ? await latestTag(root) : null, "the newest release");
+  add(
+    sortVersions(await provisioned())[0]?.raw ?? null,
+    "the newest release on this machine",
+  );
+  return protect;
+}
+
+/** The version store's plan, as a human reads it. Pure. */
+export function renderVersionPlan(
+  root: string,
+  plan: readonly VersionPruneDecision[],
+): string {
+  if (plan.length === 0) {
+    return `No provisioned aio versions (${root}). Nothing to prune.`;
+  }
+  const w = Math.max(4, ...plan.map((d) => d.ref.length));
+  const row = (d: VersionPruneDecision) => `  ${d.ref.padEnd(w)}  ${d.why}`;
+  const gone = plan.filter((d) => !d.keep);
+  const kept = plan.filter((d) => d.keep);
+  const lines = [
+    `aio version store — ${root}`,
+    `One git checkout per version an app was pinned to. Shared by EVERY aio ` +
+    `app on this machine; am knows only the apps here and the running ones.`,
+    "",
+  ];
+  if (gone.length) {
+    lines.push(`WOULD REMOVE (${gone.length}):`, ...gone.map(row), "");
+  }
+  if (kept.length) {
+    lines.push(`KEEPING (${kept.length}):`, ...kept.map(row), "");
+  }
+  lines.push(
+    gone.length
+      ? `Nothing has been deleted. \`am prune versions --yes\` removes ` +
+        `these ${gone.length} (git worktree remove). An app elsewhere pinned ` +
+        `to one gets it back on its next \`am fix\`. Keep one by name: ` +
+        `\`am prune versions --keep=<ref>\`.`
+      : "Nothing to remove.",
+  );
+  return lines.join("\n");
+}
+
+/** `am prune versions [--yes] [--keep=<ref,…>]` — the version store. */
+async function cmdPruneVersions(
+  args: string[],
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  if (args.some((a) => a.startsWith("--days="))) {
+    fail(
+      "--days does not apply to the version store (age decides nothing " +
+        "there: only what no known app uses goes)",
+      mode,
+    );
+  }
+  const parsed = parsePruneArgs(args);
+  if (parsed.error) fail(parsed.error, mode);
+  let aioRoot: string | null;
+  try {
+    aioRoot = resolveAioRoot(args);
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e), mode);
+  }
+  const protect = await versionProtections(aioRoot, parsed.keep);
+  const plan = await planVersionPrune(protect);
+  const root = versionsDir();
+  const doc = (
+    removed: string[] | null,
+    failed: { path: string; error: string }[] = [],
+  ) => ({
+    root,
+    applied: removed !== null,
+    plan,
+    removed: removed ?? [],
+    failed,
+  });
+  if (mode !== "json") out(null, mode, () => renderVersionPlan(root, plan));
+  if (!parsed.apply || plan.every((d) => d.keep)) {
+    if (mode === "json") out(doc(null), mode);
+    return;
+  }
+  const result = await applyVersionPrune(plan);
+  if (result.failed.length > 0) {
+    const summary = `removed ${result.removed.length}; could NOT remove ` +
+      `${result.failed.length}:\n` +
+      result.failed.map((f) => `  ${f.path} — ${f.error}`).join("\n");
+    if (mode === "json") {
+      out({ ...doc(result.removed, result.failed), error: summary }, mode);
+    } else outError(summary, mode);
+    Deno.exit(1);
+  }
+  out(
+    doc(result.removed),
+    mode,
+    () =>
+      `\nRemoved ${result.removed.length}:\n` +
+      result.removed.map((p) => `  ${p}`).join("\n"),
+  );
+}
+
 export async function cmdPrune(
   args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
+  if (args[0] === "versions") return cmdPruneVersions(args.slice(1), flags);
   const mode = detectMode(flags);
   const parsed = parsePruneArgs(args);
   if (parsed.error) fail(parsed.error, mode);

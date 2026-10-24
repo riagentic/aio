@@ -28,6 +28,28 @@ export const MIME: Record<string, string> = {
   ".txt": "text/plain",
   ".md": "text/plain",
   ".xml": "application/xml",
+  // Types `FILE_EXT` (server-static.ts) already calls files and the blob
+  // allowlist already passes, which this map never produced: they went out
+  // as `application/octet-stream`. That is not cosmetic for every one — a
+  // `<track src="captions.vtt">` is REFUSED under any type but `text/vtt`,
+  // and Safari (the iOS web target) will not play media it is not told is
+  // media.
+  ".avif": "image/avif",
+  ".apng": "image/apng",
+  ".bmp": "image/bmp",
+  ".heic": "image/heic",
+  ".m4a": "audio/mp4",
+  ".aac": "audio/aac",
+  ".ogg": "audio/ogg",
+  ".oga": "audio/ogg",
+  ".opus": "audio/ogg",
+  ".flac": "audio/flac",
+  ".m4v": "video/mp4",
+  ".mov": "video/quicktime",
+  ".ogv": "video/ogg",
+  ".vtt": "text/vtt",
+  ".csv": "text/csv",
+  ".webmanifest": "application/manifest+json",
 };
 
 /** Extensions that should be read as text (readTextFile) — everything else is binary (readFile) */

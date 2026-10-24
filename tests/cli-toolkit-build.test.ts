@@ -400,7 +400,8 @@ Deno.test({
     assertEquals(help.code, 0, dec.decode(help.stderr));
     assertStringIncludes(
       dec.decode(help.stdout),
-      "usage: ex-cli-tool <command> [arg...] [flags]",
+      // the binary is named by ITS deno.json title (randomized above)
+      `usage: ${cfg.title} <command> [arg...] [flags]`,
     );
     const typo = await new Deno.Command(bin, {
       args: ["lsit"],

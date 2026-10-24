@@ -103,6 +103,7 @@ const SIGNALS: [keyof Capabilities, RegExp][] = [
 
 /** Every `Deno.*` API name the read/write signals above recognize — the guard
  *  test walks this so a newly used API cannot quietly go unscanned. */
+// aio-ok(dead-wiring): read by the guard test that keeps the scanner's API list complete
 export const _SCANNED_FS_APIS: readonly string[] = [
   "readFile",
   "readTextFile",

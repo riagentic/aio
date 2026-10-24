@@ -359,9 +359,19 @@ function wireControl(
   base: string,
   hasLabel: boolean,
   said: "hint" | "error" | null,
+  required?: boolean,
 ): string | undefined {
   const p = ctrl.props as Record<string, unknown>;
   const group = ctrl.tag === RadioGroup;
+  // `required` painted an asterisk and told assistive tech nothing: the
+  // control's name is the bare label (set above, without the " *"), so a
+  // screen reader announced a required field as optional. ARIA, not the
+  // native `required` — that would add browser validation the app never asked
+  // for. Not on a group or a switch, whose roles do not take it.
+  if (
+    required && !group && ctrl.tag !== Switch &&
+    p["aria-required"] === undefined && p.required === undefined
+  ) p["aria-required"] = "true";
   if (said && p["aria-describedby"] === undefined) {
     p["aria-describedby"] = `${base}-${said}`;
   }
@@ -387,7 +397,9 @@ export function Field(props: FieldProps): VNode {
     typeof label === "string" && label.trim() ? label.trim() : null,
   );
   const said = error ? "error" : hint != null ? "hint" : null;
-  const forId = ctrl ? wireControl(ctrl, base, label != null, said) : undefined;
+  const forId = ctrl
+    ? wireControl(ctrl, base, label != null, said, required)
+    : undefined;
   return h(
     "div",
     {
@@ -1262,8 +1274,10 @@ export function ToastHost(props: Common = {}): VNode {
     {
       ...rest(props, ["class"]),
       class: joinClass("aio-toasts", props.class as string | undefined),
-      role: "status",
-      "aria-live": "polite",
+      // The caller's say wins (`??` — see Spinner), e.g. `aria-live="off"`
+      // for a host whose toasts are announced some other way.
+      role: props.role ?? "status",
+      "aria-live": props["aria-live"] ?? "polite",
     },
     ...items.map((t) =>
       h(
@@ -1332,6 +1346,14 @@ export {
 // ── Markdown ─────────────────────────────────────────────────────────
 
 export { Markdown, type MarkdownProps } from "./markdown.ts";
+// A zoomable, pannable viewport; its camera math is pure. See ./zoom-pan.ts.
+export {
+  fitView,
+  zoomAt,
+  ZoomPan,
+  type ZoomPanProps,
+  type ZoomView,
+} from "./zoom-pan.ts";
 // An embedded web page, with the two traps closed (a reactive `src` is a
 // navigation loop; unmounting destroys the guest's login). See ./browser.ts.
 export { Browser, type BrowserProps, type HostKey } from "./browser.ts";

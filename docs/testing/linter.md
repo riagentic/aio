@@ -184,6 +184,11 @@ Static analysis of `cell()` calls:
   imports it from aio. See [AIR lifecycle](../ui/air-lifecycle.md)
 - A body-level `onCleanup` that tears down something the body did not create
   (use `onUnmount`)
+- **A `useLocal` tuple value read in a closure that outlives the render** (warn)
+  — `const [n, setN] = useLocal(0)` read inside an `onMount`,
+  `addEventListener`, `setTimeout` or `setInterval` callback keeps that render's
+  `n`. Read `x.local` or write with an updater (`x.set((v) => v + 1)`). See
+  [AIR reference](../ui/air-reference.md)
 
 ### 8. Testing
 

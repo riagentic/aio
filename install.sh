@@ -132,6 +132,52 @@ that another user cannot clone. Fix it at the source:
 ${_clone_err:-(git said nothing)}${_hint}"
   fi
 fi
+# newest_version: tag names on stdin → the newest by semver on stdout (nothing
+# when none is orderable). A port of compareVersions/isComparableVersion in
+# src/server/updates-core.ts; tests/install-picks-newest-release.test.ts holds
+# the two to the same answers. POSIX awk (no {m,n} intervals: mawk lacks them),
+# LC_ALL=C so letters compare as ASCII like JS does.
+newest_version() {
+  LC_ALL=C awk '
+    function pieces(pre, out,   n, i, c, cur, kind, k) {
+      n = 0; cur = ""; kind = ""
+      for (i = 1; i <= length(pre); i++) {
+        c = substr(pre, i, 1)
+        if (c == ".") { if (cur != "") out[++n] = cur; cur = ""; kind = ""; continue }
+        k = (c ~ /[0-9]/) ? "d" : "s"
+        if (cur != "" && k != kind) { out[++n] = cur; cur = "" }
+        cur = cur c; kind = k
+      }
+      if (cur != "") out[++n] = cur
+      return n
+    }
+    function cmp(a, b,   ca, cb, pa, pb, na, nb, i, da, db, xa, xb, an, bn, m) {
+      sub(/^v/, "", a); sub(/\+.*/, "", a); sub(/^v/, "", b); sub(/\+.*/, "", b)
+      ca = a; pa = ""; if (index(a, "-")) { ca = substr(a, 1, index(a, "-") - 1); pa = substr(a, index(a, "-") + 1) }
+      cb = b; pb = ""; if (index(b, "-")) { cb = substr(b, 1, index(b, "-") - 1); pb = substr(b, index(b, "-") + 1) }
+      split(ca, da, "."); split(cb, db, ".")
+      for (i = 1; i <= 3; i++) if (da[i] + 0 != db[i] + 0) return da[i] + 0 < db[i] + 0 ? -1 : 1
+      if (pa == "" && pb == "") return 0
+      if (pa == "") return 1
+      if (pb == "") return -1
+      na = pieces(pa, xa); nb = pieces(pb, xb); m = na > nb ? na : nb
+      for (i = 1; i <= m; i++) {
+        if (i > na) return -1
+        if (i > nb) return 1
+        an = xa[i] ~ /^[0-9]+$/; bn = xb[i] ~ /^[0-9]+$/
+        if (an && bn) { if (xa[i] + 0 != xb[i] + 0) return xa[i] + 0 < xb[i] + 0 ? -1 : 1 }
+        else if (an != bn) return an ? -1 : 1
+        else if (xa[i] != xb[i]) return xa[i] < xb[i] ? -1 : 1
+      }
+      return 0
+    }
+    { sub(/^[ \t]+/, ""); sub(/[ \t\r]+$/, "") }
+    /^v?[0-9]+(\.[0-9]+)?(\.[0-9]+)?(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$/ {
+      if (best == "" || cmp($0, best) > 0) best = $0
+    }
+    END { if (best != "") print best }
+  '
+}
 # An explicit ref wins over everything: `AIO_REF=v1.0.0-alpha57` pins a release,
 # `AIO_REF=main` follows the tip, `AIO_REF=<sha>` reproduces a report exactly.
 # The onboarding lab needs it too — without it the lab could only ever test the
@@ -147,9 +193,16 @@ elif [ -n "${AIO_REF:-}" ]; then
   ok "aio $AIO_REF (pinned via AIO_REF)"
   AIO_TAG=""
 else
-# Latest tag reachable from the branch (ancestry-based — robust to version naming).
-AIO_TAG=$(git -C "$AIO_HOME" describe --tags --abbrev=0 "origin/$AIO_BRANCH" 2>/dev/null \
-  || git -C "$AIO_HOME" tag -l 'v*' --sort=-creatordate | head -1)
+# The newest RELEASE: the highest `v*` tag by semver among those merged into
+# the branch — the same rule `am upgrade` / `am create` use (latestTag in
+# src/am/am-versions.ts, ordering from compareVersions in
+# src/server/updates-core.ts: final > prerelease, prerelease compared piecewise
+# so alpha9 < alpha62, build metadata ignored, unorderable tags skipped). It was
+# `git describe --tags` — the NEAREST tag by ancestry, any name: a maintenance
+# v1.2.1 merged after v2.0.0 installed 1.2.1 (a silent downgrade), and a
+# non-release tag (`proof-ci`) was checked out as a release.
+AIO_TAG=$({ git -C "$AIO_HOME" tag -l 'v*' --merged "origin/$AIO_BRANCH" 2>/dev/null \
+  || git -C "$AIO_HOME" tag -l 'v*'; } | newest_version)
 if [ -n "$AIO_TAG" ]; then
   git -C "$AIO_HOME" checkout -q --force "$AIO_TAG" 2>/dev/null
   ok "aio $AIO_TAG"

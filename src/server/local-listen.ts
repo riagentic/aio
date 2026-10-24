@@ -512,6 +512,27 @@ function listenUnixPeer(
   };
 }
 
+/** What is at a local socket path now — for a connect that keeps failing
+ *  (B20: a listener re-made on the same path was unreachable for 10 s once,
+ *  and nothing said whether the path was missing, a stale file, or a socket
+ *  nobody accepted on). A named pipe has no file to look at. Never throws. */
+export function socketPathState(path: string, nowMs = Date.now()): string {
+  if (isPipePath(path)) return "a named pipe (no file to inspect)";
+  try {
+    const st = Deno.lstatSync(path);
+    const age = st.mtime
+      ? `, made ${((nowMs - st.mtime.getTime()) / 1000).toFixed(1)} s ago`
+      : "";
+    return st.isSocket
+      ? `a socket (inode ${st.ino ?? "?"}${age})`
+      : `not a socket (${
+        st.isFile ? "a file" : st.isDirectory ? "a directory" : "other"
+      }${age})`;
+  } catch (e) {
+    return e instanceof Deno.errors.NotFound ? "absent" : `unreadable (${e})`;
+  }
+}
+
 /** Connect to a local socket path. Unix: `Deno.connect({ transport: "unix" })`.
  *  Windows: `CreateFileW` on the pipe with overlapped I/O — the SAME
  *  connection code the server side uses, so there is one read/write path to

@@ -57,9 +57,11 @@ a.json; //      true when --json was given
   non-number for a `number`, a missing `required` flag, and a stray positional
   when no `rest` was declared. Silently ignoring a typo is how an app runs with
   the wrong settings.
-- `--help` / `-h` prints help generated from the spec and exits 0; `--version`
-  prints `name version`. `helpText(spec)` returns the same text for a test to
-  pin.
+- `--help` / `-h` prints help generated from the spec and exits 0 (`-h` is your
+  flag instead when one declares `short: "h"`); `--version` prints
+  `name version` (a spec with no `version` refuses `--version`, unless an aio
+  runtime in the same process answers it). `helpText(spec)` returns the same
+  text for a test to pin.
 - When a boolean flag named `json` is declared and given, refusals go to
   **stdout** as `{"error": "…"}` — the stream a script parses — instead of
   `error: …` on stderr.
@@ -114,6 +116,11 @@ console.log(style.green("ok"), style.dim("(cached)"));
   at every 10% and at `done()`.
 - `spinner(label)` animates on a terminal; on a pipe it prints `label...` once
   and the final line at `stop(final?)`. Its timer never keeps the process alive.
+- Both write to **stderr**, so stdout carries only the program's output:
+  `tool --json | jq` never sees a progress line. They redraw in place only when
+  stderr is a terminal (`CliIO.errTty`; a custom io without it: `tty`), so
+  `tool 2>log` logs plain lines. `{ stream: "out" }` on either draws on stdout
+  instead (the pre-1.0.25 behaviour), redrawing when stdout is a terminal.
 - `style.bold/dim/underline/red/green/yellow/blue/magenta/cyan` wrap in ANSI
   when colour is on and return the string untouched when it is off.
   `styleWith(true|false)` binds an explicit decision; `plainWidth(s)` measures a
@@ -143,7 +150,10 @@ the state again on each change, and takes it once it fits.
 On a terminal each frame is a clean full redraw (screen cleared, cursor hidden,
 restored on `stop()`); on a pipe frames are appended as plain lines, so
 `todo list --watch | tee log` works. Changes in one tick are coalesced into one
-frame. `refresh()` forces a redraw.
+frame. `refresh()` forces a redraw. Ctrl+C during a terminal view always
+restores the cursor; with no SIGINT listener of your own it then exits 130, and
+with one (`Deno.addSignalListener("SIGINT", …)`, as above) the exit — and any
+async cleanup before it — stays yours.
 
 ## `fail(msg)` · `EXIT`
 

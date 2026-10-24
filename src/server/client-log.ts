@@ -139,6 +139,7 @@ export function _pendingWrites(): number {
   return _pending.size;
 }
 
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _rateSlotCount(): number {
   let n = 0;
   for (const slots of _rate.values()) n += slots.size;

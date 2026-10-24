@@ -155,15 +155,21 @@ export function smokePlan(opts: {
 /** The lines of an artifact's own output that mean it did not come up clean:
  *  anything logged at ERROR/FATAL, an uncaught error, and a `REFUSED` line
  *  (aio's refusals are spelled that way — a guest preload, a window). The
- *  smoke's own stop request is not one. Pure. */
-export function logProblems(text: string): string[] {
+ *  smoke's own stop request is not one. `refused: false` drops the `REFUSED`
+ *  rule — for `--help` output, whose prose names the refusal ("An unknown
+ *  --flag … is REFUSED") and failed every `cli` smoke. Pure. */
+export function logProblems(
+  text: string,
+  opts: { refused?: boolean } = {},
+): string[] {
+  const refused = opts.refused ?? true;
   const out = new Set<string>();
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
     const level = /^\d{4}-\d\d-\d\d \S+\s+(ERROR|FATAL)\s/.test(line);
     if (
-      level || /\bREFUSED\b/.test(line) ||
+      level || (refused && /\bREFUSED\b/.test(line)) ||
       /^(?:error: )?Uncaught\b|^error: /.test(line)
     ) {
       // The file log repeats the console line with a `(file:line)` suffix.
@@ -282,6 +288,12 @@ async function launch(
       args,
       cwd: join(box, "cwd"),
       env: {
+        // The throwaway home for anything that reads the OS's own idea of
+        // it (a library's `~/.cache`, a dotfile): a browser or cli run set
+        // only aio's variables and wrote into the developer's. Before the
+        // target's env, which knows where its OS keeps a window's profile.
+        HOME: join(box, "config"),
+        USERPROFILE: join(box, "config"),
         ...(typeof env === "function" ? env(box) : env),
         AIO_APPS_DIR: join(box, "home"),
         XDG_CONFIG_HOME: join(box, "config"),
@@ -680,7 +692,10 @@ export async function smokeCli(file: string): Promise<string[]> {
     if (!st.success) {
       fails.push(`\`--help\` exited ${st.code}:\n      ${tail(run.output())}`);
     }
-    for (const p of logProblems(run.output() + "\n" + appLogs(run.box))) {
+    // aio's help text says "REFUSED" as prose; a refused `--help` exits
+    // non-zero, which the status check above already fails.
+    const text = run.output() + "\n" + appLogs(run.box);
+    for (const p of logProblems(text, { refused: false })) {
       fails.push(`its log: ${p}`);
     }
   }
@@ -692,7 +707,19 @@ export async function smokeCli(file: string): Promise<string[]> {
  *  is none: a nested X server owned by this user (started once, left
  *  running — `nested-display.ts`). Never the session's own display: a build
  *  must not put a window on the desktop of whoever is working there. */
-export function smokeDisplayEnv(): Record<string, string> | null {
+export function smokeDisplayEnv(
+  named: string | undefined = Deno.env.get("AIO_AM_DISPLAY"),
+): Record<string, string> | null {
+  // `AIO_AM_DISPLAY=:N` — a display the developer named (a GPU lab, an Xvfb),
+  // as `am start` honours it: the window opens there and no Xephyr is started.
+  // A Xephyr is itself a window on the real desktop, drawn through its display
+  // driver — on the box where an NVIDIA X driver crashed (feedback/critical.md)
+  // that is the one thing a run must be able to keep off it.
+  if (named && /^:\d+$/.test(named)) {
+    if (!displayIsUp(named)) return null;
+    const auth = Deno.env.get("XAUTHORITY");
+    return auth ? { DISPLAY: named, XAUTHORITY: auth } : { DISPLAY: named };
+  }
   const pick = pickNestedDisplay();
   if (!pick) return null;
   if (!pick.up && !startXephyr(pick.display)) return null;

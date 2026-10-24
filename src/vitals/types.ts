@@ -117,16 +117,6 @@ export type ClientLiveness = {
   frozenSince?: number;
 };
 
-/** Diagnostic report emitted when a client render freeze is detected. */
-export type RenderFreezeReport = {
-  frozenFor: number;
-  lastActionBefore: string | null;
-  lastCell: string | null;
-  unprocessedDeltas: number;
-  memoryBefore?: number;
-  memoryAfter?: number;
-};
-
 /** Point-in-time snapshot of all three vitals layers — render, transport, and loop. */
 export type VitalsSnapshot = {
   render: {

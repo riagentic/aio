@@ -1400,6 +1400,15 @@ export async function loadRoutes(): Promise<Routes> {
     );
   }
   namespaces.add(trojanPrefix);
+  // The client view is answered beside `/ws` in server.ts by its constant.
+  const viewPath = /VIEW_PATH\s*=\s*"(\/__aio\/[^"]+)"/.exec(auth)?.[1];
+  if (!viewPath) {
+    throw new Error(
+      "check-docs: could not read VIEW_PATH from src/server/server-auth.ts" +
+        " — fix the parse, do not delete the check",
+    );
+  }
+  exact.add(viewPath);
   const trojan = await Deno.readTextFile(SRC("src/server/server-trojan.ts"));
   for (const m of trojan.matchAll(/\broute\s*===\s*"([\w-]+)"/g)) {
     exact.add(trojanPrefix + m[1]);

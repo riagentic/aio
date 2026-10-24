@@ -22,6 +22,7 @@ import {
 } from "./electron-renderer-log.ts";
 import { upstreamNoiseMatcherSource } from "../diagnostics/upstream-noise.ts";
 import { redactUrlTokenSource } from "../diagnostics/redact.ts";
+import { APP_ICON_LIMITS, checkAppIcon } from "../protocol/app-icon-check.ts";
 import {
   GUEST_PRELOAD_REFUSED_EVENT,
   GUEST_PRELOAD_URL,
@@ -60,7 +61,8 @@ export type ShellConfig = {
    *  packaged app renders unstyled where dev renders themed, which is the
    *  exact shell-divergence class this whole file exists to prevent. */
   theme?: UiTheme;
-  themeName?: string | number;
+  /** A `HueKey` (build/app-icon.ts), spelled out: electron may not import build. */
+  themeName?: string | number | { key: string | number; neutral: "soft" };
   /** ui.layout — `false` drops the theme's LAYOUT defaults.
    *
    *  `aio-lifecycle.ts` has always SET this on the object it builds here; this
@@ -169,6 +171,9 @@ export type AioMeta = {
    *  this window uses. `electronProfileName`; absent ⇒ the title's slug, which
    *  is what a default-home app has always had. */
   profileName?: string;
+  /** The app's id — names the window's class (X11 `WM_CLASS`, Wayland
+   *  `app_id`) via {@linkcode windowClassName}. Absent ⇒ the title's slug. */
+  appId?: string;
   /** WHERE that profile lives: `~/.<appId>/electron/` — inside the app's own
    *  home, beside `data/` and `logs/`, so it goes with the app (`am remove
    *  --data`, a `--profile` home of its own) and no other app can share it.
@@ -293,6 +298,58 @@ export function electronProfileName(
 }
 
 // ── Reusable CJS template fragments (embedded in generated Electron main.cjs) ──
+
+/** THE class of an app's window — X11 `WM_CLASS`, Wayland `app_id` — and so
+ *  the `.desktop` file a panel matches it to: the app's id (a built app's
+ *  `<binaryName>.desktop`), else the title's slug. Without it every aio window
+ *  was class `electron`, and a panel grouped all aio apps as one program. */
+export function windowClassName(
+  meta: AioMeta | undefined,
+  title?: string,
+): string {
+  return toSlug(meta?.appId ?? meta?.title ?? title ?? "aio-app");
+}
+
+/** Sets the window class ({@linkcode windowClassName}) — before any window
+ *  exists: Chromium reads it (`CHROME_DESKTOP`) at each window's creation.
+ *  Measured, Electron 44 on X11: `app.name`, `app.setName` and a `--class`
+ *  switch all leave `WM_CLASS` at `"electron"`; `app.setDesktopName` sets it.
+ *  The call exists on Linux only. Expects `app` in scope. */
+export function tmplWindowClass(
+  meta: AioMeta | undefined,
+  title?: string,
+): string {
+  return `if (process.platform === 'linux') app.setDesktopName(${
+    JSON.stringify(windowClassName(meta, title) + ".desktop")
+  });
+`;
+}
+
+/** Chromium switches every window shell needs. Electron 41+ on Linux:
+ *  CloudPrintEnable starts mDNS discovery that blocks the print dialog
+ *  (`__aio:print`) on an Avahi timeout. Expects `app` in scope. */
+export function tmplChromiumSwitches(): string {
+  return `app.commandLine.appendSwitch('disable-features', 'CloudPrintEnable');
+`;
+}
+
+/** Accept the self-signed cert `aio --expose` generates for THIS app's own
+ *  origin — and nothing else. The check reads the URL that FAILED (arg 3);
+ *  re-parsing the app's own URL made the condition a constant true for every
+ *  local launch, so any cert error from any host (an intercepting proxy on a
+ *  hostile network answering the page's fetch to a third-party API) was
+ *  silently trusted. Expects `app` in scope. */
+export function tmplCertificateGuard(url: string): string {
+  return `  app.on('certificate-error', (event, _wc, failedUrl, _err, _cert, cb) => {
+    let sameOrigin = false;
+    try { sameOrigin = new URL(failedUrl).origin === new URL(${
+    JSON.stringify(url)
+  }).origin; } catch { sameOrigin = false; }
+    if (sameOrigin) { event.preventDefault(); cb(true); }
+    else cb(false);
+  });
+`;
+}
 
 /** Point Electron's profile (`userData`) at the app's home — right after
  *  `app.name`, before anything reads `getPath('userData')` (the preload, the
@@ -917,10 +974,21 @@ export function tmplBounds(async = false): string {
   // A FULLSCREEN window likewise saves its normal rect (no flag: the next
   // launch opens a normal window, not the screen-sized one).
   const payload = `__aioBoundsPayload(win)`;
+  // Written to a temp file and renamed over the state: a crash mid-write
+  // (the desktop going down with it, feedback/critical.md) left a 0-byte
+  // window-state.json, and the next launch opened from defaults.
   const save = async
-    ? `  try { require('fs/promises').writeFile(stateFile, JSON.stringify(${payload})).catch(() => {}); } catch {}`
+    ? `  try {
+    const fsp = require('fs/promises'), tmp = stateFile + '.' + process.pid + '.tmp';
+    fsp.writeFile(tmp, JSON.stringify(${payload})).then(() => fsp.rename(tmp, stateFile))
+      .catch((e) => console.error("[aio:electron] saveBounds failed:", e));
+  } catch (e) { console.error("[aio:electron] saveBounds failed:", e); }`
     : `  // AIO-272: window state persistence failures should be visible
-  try { fs.writeFileSync(stateFile, JSON.stringify(${payload})); }
+  try {
+    const tmp = stateFile + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(${payload}));
+    fs.renameSync(tmp, stateFile);
+  }
   catch (e) { console.error("[aio:electron] saveBounds failed:", e); }`;
   return `
 const stateFile = path.join(app.getPath('userData'), 'window-state.json');
@@ -974,12 +1042,17 @@ function loadBounds(dw, dh) {
     screens = screen.getAllDisplays().map((d) => d.workArea);
     primary = screen.getPrimaryDisplay().workArea;
   } catch (e) {
+    // No position at all (never the saved one unchecked: it is what puts a
+    // frame off-screen — see EDGE_MARGIN in splash-place.ts), and a size
+    // windowRect made safe for the only screen size known, none.
     console.warn('[aio:electron] the displays could not be read (' + (e && e.message || e) + ') — the window opens where the OS puts it');
-    const out = { width: s.width, height: s.height };
-    if (typeof s.x === 'number' && typeof s.y === 'number') { out.x = s.x; out.y = s.y; }
-    return out;
+    const r = windowRect({ width: s.width, height: s.height }, [], { x: 0, y: 0, width: 1024, height: 768 });
+    return { width: r.width, height: r.height };
   }
   const r = windowRect(s, screens, primary);
+  // A window as big as the screen opens maximized (windowRect made its
+  // normal rect smaller, inside the edge margin).
+  if (r.fills) __aioRestoreMax = true;
   __aioPlaced = { x: r.x, y: r.y, width: r.width, height: r.height };
   __aioPlacedOn = r.screen;
   return { width: r.width, height: r.height, x: r.x, y: r.y };
@@ -1099,7 +1172,7 @@ export function tmplShowWhenPainted(
   } + JSON.stringify(at) + '\\n');
       if (typeof __aioSplashOnWindow === 'function') __aioSplashOnWindow(at, first);
       const p = __aioPlaced;
-      if (first && p && (p.x !== at.x || p.y !== at.y || p.width !== at.width || p.height !== at.height)) {
+      if (first && p && !__aioRestoreMax && (p.x !== at.x || p.y !== at.y || p.width !== at.width || p.height !== at.height)) {
         console.warn('[aio:electron] the window opened at ' + JSON.stringify({ x: at.x, y: at.y, width: at.width, height: at.height }) + ', not where aio placed it (' + JSON.stringify(p) + ') — the splash moves onto it');
       }
     } catch (e) {
@@ -1879,13 +1952,13 @@ export const CONNECT_HTML = `<!DOCTYPE html>
       const tls = el.getAttribute('data-tls') === '1';
       const row = el.closest('.row');
       row.innerHTML = '<form class="pairform">' +
-        '<input class="pin" inputmode="numeric" maxlength="6" placeholder="pair code" spellcheck="false" />' +
+        '<input class="pin" inputmode="numeric" maxlength="8" placeholder="pair code" spellcheck="false" />' +
         '<button type="submit">Pair</button></form>';
       const form = row.querySelector('.pairform');
       form.onsubmit = (e) => {
         e.preventDefault();
         const pin = row.querySelector('.pin').value.trim();
-        if (!/^[0-9]{6}$/.test(pin)) { document.getElementById('err').textContent = 'Enter the 6-digit code shown by the app'; return; }
+        if (!/^([0-9]{6}|[0-9]{8})$/.test(pin)) { document.getElementById('err').textContent = 'Enter the code shown by the app (6 digits, or 8 for an app that pairs by PAKE)'; return; }
         document.getElementById('err').textContent = 'Pairing\\u2026';
         location.href = 'aio-pair:' + encodeURIComponent(JSON.stringify({ host, port, tls, pin }));
       };
@@ -2471,10 +2544,43 @@ export function shellBridgePreload(
 // them back on its own. Exposed ALWAYS (not only when themed) so an app using
 // chrome:"none" can build its own bar out of the same three verbs — the bridge
 // is the capability; the title bar is just one consumer of it.
+// Run-time icons — appIcon() arrives here as icon(spec); the page calls the
+// rest. Checked with THE validator before anything is fetched; an app URL is
+// fetched by the page (its origin, its session), so the main process only
+// ever gets bytes or a data: URL. Each call resolves to the new icon state,
+// or rejects with why (the main process logs the same line).
+const __aioIconCheck = ${checkAppIcon.toString()};
+const __aioIconLim = ${JSON.stringify(APP_ICON_LIMITS)};
+const __aioIconSend = async (spec) => {
+  __aioIconCheck(spec, __aioIconLim); // refuse before fetching anything
+  const s = { ...spec }; // fps as given: the main process says if it clamps
+  for (const k of ['window', 'tray']) {
+    const v = s[k];
+    if (v === undefined || v === null) continue;
+    s[k] = await Promise.all((Array.isArray(v) ? v : [v]).map(async (img) => {
+      if (typeof img !== 'string' || img.startsWith('data:')) return img;
+      const r = await fetch(img);
+      if (!r.ok) throw new Error('appIcon(): ' + img + ' answered HTTP ' + r.status);
+      return new Uint8Array(await r.arrayBuffer());
+    }));
+  }
+  // A refusal comes back as { error } — thrown from the handler, Electron
+  // would log its own stack trace beside the main process's one line.
+  const r = await ipcRenderer.invoke('__aio:icon', s);
+  if (r && r.error) throw new Error(r.error);
+  return r.state;
+};
 contextBridge.exposeInMainWorld('__aioWindow', {
   minimize: () => ipcRenderer.send('__aio:win', 'minimize'),
   maximize: () => ipcRenderer.send('__aio:win', 'maximize'),
   close:    () => ipcRenderer.send('__aio:win', 'close'),
+  icon: (spec) => __aioIconSend(spec),
+  setIcon: (img) => __aioIconSend({ window: img }),
+  setTrayIcon: (img) => __aioIconSend({ tray: img }),
+  animateIcon: (frames, fps) => __aioIconSend({ window: frames, fps }),
+  animateTrayIcon: (frames, fps) => __aioIconSend({ tray: frames, fps }),
+  setTrayTooltip: (text) => __aioIconSend({ tooltip: text }),
+  iconState: () => ipcRenderer.invoke('__aio:iconState'),
 });
 // The page's own window.close() closes THROUGH the window, like the close
 // button and __aioWindow.close(). Left to Chromium it destroys the page
@@ -2488,6 +2594,131 @@ try {
 } catch (e) {
   console.error('[aio] window.close() is not routed through the window: ' + ((e && e.message) || e));
 }`;
+}
+
+/** The largest side, in pixels, of any image aio hands the window or the
+ *  tray (the app's icon.png, the monogram, an appIcon() frame). An icon is
+ *  a WINDOW PROPERTY on X11 (_NET_WM_ICON, 4 bytes a pixel, re-sent on every
+ *  animation frame) and a D-Bus pixmap for the tray: an 8000×8000 PNG under
+ *  the 512 KB byte limit is a 256 MB property, up to 12 times a second, for
+ *  the X server and the panel to swallow. Nothing a desktop shows an icon at
+ *  is larger (Windows' biggest is 256). */
+export const ICON_EDGE = 256;
+
+/** `__aioIconFit(img)`: the image, scaled down to {@linkcode ICON_EDGE}
+ *  when larger. Emitted by both shells before their icon exists. */
+export function tmplIconFit(): string {
+  return `  const __aioIconFit = (img) => {
+    const s = img.getSize();
+    if (s.width <= ${ICON_EDGE} && s.height <= ${ICON_EDGE}) return img;
+    return img.resize(s.width >= s.height ? { width: ${ICON_EDGE}, quality: 'best' } : { height: ${ICON_EDGE}, quality: 'best' });
+  };`;
+}
+
+/** The run-time icon half of {@linkcode tmplTray} — `appIcon()` and the
+ *  page's `__aioWindow` icon calls, both arriving as `__aio:icon`. Images are
+ *  decoded BEFORE anything changes (a bad frame changes nothing); an
+ *  animation loops HERE, so a frame costs no message; `null` puts back the
+ *  app's own icon (`iconExpr`). A change of kind (default/static/animated) is
+ *  one info line in the app log; `__aio:iconState` answers the rest. */
+function tmplRuntimeIcon(iconExpr: string, title: string | undefined): string {
+  return `  // ── Run-time icons (appIcon(), __aioWindow.setIcon / setTrayIcon / …) ──
+  const __aioIconCheck = ${checkAppIcon.toString()};
+  const __aioIconLim = ${JSON.stringify(APP_ICON_LIMITS)};
+  const __aioIconSaid = new Set();
+  const __aioIconBase = Promise.resolve(${iconExpr}).catch(() => null);
+  const __aioIconTip = () => (TRAY && TRAY.tooltip) || ${
+    JSON.stringify(title ?? "aio app")
+  };
+  const __aioIconTimer = { window: null, tray: null };
+  const __aioIconSeq = { window: 0, tray: 0 };
+  const __aioIconNow = { window: null, tray: null };
+  const __aioIconState = { window: 'default', tray: TRAY ? 'default' : 'off', tooltip: null, fps: null, frames: { window: 0, tray: 0 } };
+  let __aioIconKinds = '';
+  const __aioIconShow = (which, img) => {
+    __aioIconNow[which] = img;
+    if (which === 'window') { if (!win.isDestroyed()) win.setIcon(img); return; }
+    const t = globalThis.__aioTray;
+    if (t && !t.isDestroyed()) t.setImage(img);
+  };
+  const __aioIconTrayUp = (t) => {
+    if (__aioIconNow.tray) t.setImage(__aioIconNow.tray);
+    if (__aioIconState.tooltip !== null) t.setToolTip(__aioIconState.tooltip);
+  };
+  const __aioIconDecode = (which, v) => {
+    const { nativeImage } = require('electron');
+    return (Array.isArray(v) ? v : [v]).map((src, i) => {
+      if (typeof src === 'string' && !src.startsWith('data:')) {
+        throw new Error('appIcon(): ' + which + '[' + i + '] is a URL the page did not fetch');
+      }
+      const img = typeof src === 'string' ? nativeImage.createFromDataURL(src) : nativeImage.createFromBuffer(Buffer.from(src));
+      if (img.isEmpty()) throw new Error('appIcon(): ' + which + '[' + i + '] is not an image Electron can read (PNG or JPEG)');
+      return __aioIconFit(img);
+    });
+  };
+  async function __aioIconApply(spec) {
+    const checked = __aioIconCheck(spec, __aioIconLim);
+    const s = checked.spec;
+    for (const n of checked.notes) {
+      if (!__aioIconSaid.has(n)) { __aioIconSaid.add(n); console.warn('⚠ appIcon(): ' + n); }
+    }
+    if (!TRAY && (s.tray !== undefined || s.tooltip !== undefined)) {
+      throw new Error('appIcon(): the tray icon and tooltip need ui.tray — this app has no tray');
+    }
+    const plan = {};
+    for (const which of ['window', 'tray']) {
+      if (s[which] !== undefined) plan[which] = s[which] === null ? null : __aioIconDecode(which, s[which]);
+    }
+    for (const which of Object.keys(plan)) {
+      const seq = ++__aioIconSeq[which];
+      clearInterval(__aioIconTimer[which]);
+      __aioIconTimer[which] = null;
+      const imgs = plan[which];
+      if (imgs === null) {
+        const base = await __aioIconBase;
+        if (seq !== __aioIconSeq[which]) continue; // a later call won
+        if (base && !base.isEmpty()) __aioIconShow(which, base);
+        else console.warn('⚠ appIcon(): the app has no icon of its own to put back on the ' + which + ' — the last one stays');
+        __aioIconState[which] = 'default';
+        __aioIconState.frames[which] = 0;
+        continue;
+      }
+      __aioIconShow(which, imgs[0]);
+      __aioIconState.frames[which] = imgs.length;
+      __aioIconState[which] = imgs.length > 1 ? 'animated' : 'static';
+      if (imgs.length > 1) {
+        let i = 0;
+        __aioIconState.fps = s.fps;
+        __aioIconTimer[which] = setInterval(() => {
+          i = (i + 1) % imgs.length;
+          __aioIconShow(which, imgs[i]);
+        }, Math.round(1000 / s.fps));
+      }
+    }
+    if (s.tooltip !== undefined) {
+      __aioIconState.tooltip = s.tooltip;
+      const t = globalThis.__aioTray;
+      if (t && !t.isDestroyed()) t.setToolTip(s.tooltip === null ? __aioIconTip() : s.tooltip);
+    }
+    const kinds = ['window', 'tray'].map((w) => w + ' ' + __aioIconState[w] +
+      (__aioIconState[w] === 'animated' ? ' (' + __aioIconState.frames[w] + ' frames, ' + __aioIconState.fps + ' fps)' : '')).join(' · ');
+    if (kinds !== __aioIconKinds) {
+      __aioIconKinds = kinds;
+      process.stderr.write('${MAIN_TAG}info] appIcon: ' + kinds + '\\n');
+    }
+    return JSON.parse(JSON.stringify(__aioIconState));
+  }
+  ipcMain.handle('__aio:icon', async (_event, spec) => {
+    try { return { state: await __aioIconApply(spec) }; }
+    catch (e) {
+      const error = String((e && e.message) || e);
+      console.warn('⚠ ' + error);
+      return { error };
+    }
+  });
+  ipcMain.handle('__aio:iconState', () => JSON.parse(JSON.stringify(__aioIconState)));
+  app.on('will-quit', () => { clearInterval(__aioIconTimer.window); clearInterval(__aioIconTimer.tray); });
+`;
 }
 
 /** `ui.tray` — the system tray icon, its menu, and close-to-tray. ONE
@@ -2513,7 +2744,9 @@ export function tmplTray(
   // ── System tray (ui.tray) ──
   const TRAY = ${JSON.stringify(cfg)};
   let __aioHiding = false;
-  ipcMain.on('__aio:focus', () => { if (!win.isDestroyed()) { win.show(); win.focus(); } });
+${
+    tmplRuntimeIcon(iconExpr, title)
+  }  ipcMain.on('__aio:focus', () => { if (!win.isDestroyed()) { win.show(); win.focus(); } });
   // Window controls (__aioWindow, and the page's window.close()). One
   // channel, one switch: a renderer can ask for exactly these three verbs and
   // nothing else. 'close' is win.close() — the SAME cancellable close the
@@ -2633,6 +2866,7 @@ export function tmplTray(
       tray.on('click', () => { if (win.isDestroyed()) return; if (win.isVisible()) win.hide(); else show(); });
       // Keep a reference: a Tray nothing holds is garbage-collected and vanishes.
       globalThis.__aioTray = tray;
+      __aioIconTrayUp(tray); // what appIcon() set before the tray existed
     })();
   }`;
 }

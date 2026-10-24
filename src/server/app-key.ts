@@ -362,9 +362,14 @@ export function readControlKey(
 }
 
 /** Remove the credential (shutdown). Best-effort: a leftover file is inert —
- *  the running app only ever accepts the value it holds in memory. */
-export function removeControlKey(appId: string): void {
+ *  the running app only ever accepts the value it holds in memory.
+ *  `key`: only when the file still holds THIS value — two instances of one
+ *  data home (`singleton: false`) each mint here, and the first to stop
+ *  deleted the credential of the one still running. */
+export function removeControlKey(appId: string, key?: string): void {
+  const path = controlKeyPath(appId);
   try {
-    Deno.removeSync(controlKeyPath(appId));
+    if (key !== undefined && Deno.readTextFileSync(path).trim() !== key) return;
+    Deno.removeSync(path);
   } catch { /* never existed / already gone */ }
 }

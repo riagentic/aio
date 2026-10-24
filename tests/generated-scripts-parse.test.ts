@@ -176,3 +176,104 @@ Deno.test("generated scripts: the §5.4 escape defect is caught", () => {
     "does not parse",
   );
 });
+
+// The rows above build each main with a bare `{ title: "t" }`, so every
+// template branch behind an option — the tray, the splash, a second launch's
+// show file, guest preloads, permissions, a profile dir, the download
+// window's words — was never parsed. Here every option is ON, and every
+// string the app controls is hostile to the quoting it is spliced into
+// (quotes, a backtick, `${`, a backslash, a newline, U+2028, `</script>`).
+Deno.test("generated scripts: every main parses with every option on and hostile strings", () => {
+  const hostile = "a'b\"c`d${x}\\e\n f</script><!-- */";
+  let n = 0;
+  for (const chrome of ["standard", "themed", "none"] as const) {
+    const meta = {
+      title: hostile,
+      width: 900,
+      height: 700,
+      childWindows: true,
+      requireSandbox: true,
+      unsandboxedChildWindows: true,
+      webviewTag: true,
+      guestDownloads: true,
+      permissions: { notifications: ["app"] as const },
+      allowLocalPeers: true,
+      ignoreDebugEnv: true,
+      strictPin: true,
+      shortcuts: { reload: false, print: false },
+      confirmUnload: true,
+      chrome,
+      backgroundColor: { light: "#ffffff", dark: "#000000" },
+      background: { light: "#ffffff", dark: "#000000" },
+      colors: {
+        light: { background: "#fff", text: "#000", bar: "#f00", track: "#0f0" },
+        dark: { background: "#000", text: "#fff", bar: "#f00", track: "#0f0" },
+      },
+      downloadWindow: {
+        heading: hostile,
+        text: hostile,
+        question: hostile,
+        cancel: true,
+      },
+      showWhenPainted: { capMs: 1234 },
+      splash: {
+        page: `/tmp/${hostile}.html`,
+        title: hostile,
+        w: 300,
+        h: 200,
+        mode: "pointer" as const,
+        follow: true,
+        minMs: 1,
+        maxMs: 2,
+        fadeMs: 3,
+        windowShadow: true,
+      },
+      tray: {
+        tooltip: hostile,
+        menu: [
+          { label: hostile, method: "c:m", args: [hostile] },
+          "-" as const,
+          { label: hostile, route: `/${hostile}` },
+        ],
+        closeToTray: true,
+      },
+      profileName: hostile,
+      profileDir: `/tmp/${hostile}`,
+      guestPreloads: { dir: `/tmp/${hostile}`, files: [`${hostile}.js`] },
+      showFile: `/tmp/${hostile}`,
+    };
+    mustParse(
+      `electron main (WS shell, ${chrome}, every option)`,
+      electronMainScript(
+        `http://127.0.0.1:3000/?token=${encodeURIComponent(hostile)}`,
+        meta as never,
+      ),
+    );
+    n++;
+    for (const url of ["http://localhost:3000", "aio://app/"]) {
+      for (const forceProtocol of [false, true]) {
+        for (const httpSocketPath of [undefined, `/tmp/${hostile}.sock`]) {
+          mustParse(
+            `electron main (UDS shell, ${chrome}, ${url}, every option)`,
+            electronMainScriptUDS(url, `/tmp/${hostile}.sock`, {
+              baseDir: `/tmp/${hostile}`,
+              title: hostile,
+              hasCSS: true,
+              iconDir: `/tmp/${hostile}`,
+              defaultIcon: "AAAA",
+              meta: meta as never,
+              httpSocketPath,
+              forceProtocol,
+            }),
+          );
+          n++;
+        }
+      }
+    }
+  }
+  mustParse(
+    "electron client (baked url, strict pin)",
+    electronClientScript(`https://h/${hostile}`, { strictPin: true }),
+  );
+  assertEquals(n, 27);
+});

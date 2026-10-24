@@ -13,6 +13,7 @@ import {
   _watchUnobservedCalls,
 } from "./test-strict.ts";
 import type { CallFailureLedger } from "./test-strict.ts";
+import { _observationLedger } from "./test-strict.ts";
 import { closeWindow } from "./close-window.ts";
 import {
   acceptHostEvents,
@@ -45,6 +46,7 @@ import { contrastCascadeNotice } from "../air/contrast-cascade.ts";
 import { _resetSelectorAudit } from "../air/selector-audit.ts";
 import { _resetUntrackedReadWarnings } from "../air/untracked-read.ts";
 import { _readAsClient, getRegisteredCells } from "../state/cell-reactive.ts";
+import type { AioUser } from "../protocol/protocol-types.ts";
 import { _resetDevWarnings } from "../air/vdom-types.ts";
 import type { ComponentFn } from "../air/vdom-types.ts";
 import type { MountHandle, RootState } from "../air/renderer-types.ts";
@@ -196,6 +198,10 @@ const _windowHolds = new WeakMap<object, number>();
 
 /** Drop one mount's hold on `win`; true when it was the last, and the caller
  *  closes the window. */
+/** The handle's count of queued actions that have not run yet — read by the
+ *  `testUI(App, name, fn)` wrapper when the body throws. @internal */
+export const _QUEUED: unique symbol = Symbol("aio.testUI.queued");
+
 export function _dropWindowHold(win: object): boolean {
   const left = (_windowHolds.get(win) ?? 1) - 1;
   if (left > 0) {
@@ -831,8 +837,18 @@ export async function _buildTestUI(
     // ledger, so a denied call is just "an async method that rejected" and is
     // reported the harness's way — through `settle()` — instead of escaping as
     // an unhandled rejection that kills the whole test module.
+    // WHO the page is: the `user` option when given; otherwise whoever its
+    // session resolved to — a login through the form (`testPageFetch`) signs
+    // the page in mid-test, and from then on it reads and calls as that user,
+    // as its socket would. It stayed anonymous here: the anonymous
+    // `visible.forUser` view, and member-only calls refused.
+    const auth = opts.user === undefined
+      ? await import("../browser/browser-auth-ui.ts")
+      : undefined;
+    const viewer = (): AioUser | undefined =>
+      auth ? auth.authUser.peek() ?? undefined : opts.user ?? undefined;
     const ungate = opts.enforceAccess !== false
-      ? _enforceCellAccess(cells, opts.user ?? undefined)
+      ? _enforceCellAccess(cells, viewer)
       : undefined;
     // The wire, around the gate: the server decodes a frame first and asks
     // `access` about what it decoded. Undone first (restores run in push
@@ -842,7 +858,7 @@ export async function _buildTestUI(
     partial.restore.push(_crossClientWire(cells));
     _reshaped = [];
     partial.restore.push(
-      _serverFnsOverWire(opts.user ?? undefined, opts.enforceAccess !== false),
+      _serverFnsOverWire(viewer, opts.enforceAccess !== false),
     );
     if (opts.wire) partial.restore.push(_useWireConfig(opts.wire));
     if (ungate) partial.restore.push(ungate);
@@ -853,7 +869,7 @@ export async function _buildTestUI(
     // the server's state instead passed a UI test that showed every user's
     // rows. Same identity `_enforceCellAccess` gates calls with.
     partial.restore.push(
-      _readAsClient(opts.user ?? undefined, (def) => def.__aio.uiForUser),
+      _readAsClient(viewer, (def) => def.__aio.uiForUser),
     );
     // What a real worker refuses — a peer read, any method call — refused in
     // process too (boot-refusals.ts). Installed BEFORE the ledger so the
@@ -1145,7 +1161,11 @@ export async function _buildTestUI(
   // next drain threw it a second time, contradicting the guarantee right
   // below. Deciding at drain time is what makes "awaited" mean awaited-ever.
   const _failures: { err: unknown; seen: () => boolean }[] = [];
+  // Actions queued and not yet finished — a body that reads state right after
+  // `ui.X.click()` (no await between) reads it BEFORE the click ran.
+  let _queued = 0;
   function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    _queued++;
     const run = _tail.then(() => _inMount(mountFence, fn));
     // A failure the caller AWAITED (attached a rejection handler to) is
     // delivered there and must NOT resurface at the next drain point — else
@@ -1153,7 +1173,10 @@ export async function _buildTestUI(
     let delivered = false;
     // The tail handler makes un-awaited rejections "handled" (no process
     // unhandledrejection) while recording the failure for the drain.
-    _tail = run.then(() => {}, (e) => {
+    _tail = run.then(() => {
+      _queued--;
+    }, (e) => {
+      _queued--;
       _failures.push({ err: e, seen: () => delivered });
     });
     return {
@@ -2070,7 +2093,9 @@ export async function _buildTestUI(
     }
   }
 
+  const observations = _observationLedger("testUI");
   const api = {
+    [_QUEUED]: () => _queued,
     surface: () => serializeSurface(currentSurface()),
     // The mount's OWN window and document — the same objects `window` and
     // `document` resolve to inside the component. A test that needs the real
@@ -2165,6 +2190,9 @@ export async function _buildTestUI(
           r = pred(subject);
           lastErr = undefined; // it ran
         } catch (e) {
+          // A key the cell does not have stays missing however long we poll:
+          // fail now, not after the 2s retry budget.
+          if ((e as { code?: unknown })?.code === "UNKNOWN_CELL_KEY") throw e;
           lastErr = e;
         }
         if (predicateVerdict(r, "testUI: expectCell")) {
@@ -2284,6 +2312,7 @@ export async function _buildTestUI(
       // error is re-thrown once teardown (and the video) are done.
       let drainErr: { e: unknown } | null = null;
       try {
+        await observations.raise();
         await drain();
         // …and the un-awaited CALLS. `drain()` waits for the test's own action
         // queue, not for a method one of those actions (or the test body)
@@ -2336,6 +2365,14 @@ export async function _buildTestUI(
       return this.dispose();
     },
   };
+
+  // The observation points, tracked: one the test never awaits is awaited by
+  // dispose() and fails THIS test (see `_observationLedger`).
+  for (const k of ["settle", "advance", "expectCell", "waitFor"] as const) {
+    const run = api[k] as (...a: unknown[]) => Promise<void>;
+    (api as AnyDoc)[k] = (...a: unknown[]) =>
+      observations.track(`ui.${k}(…)`, run.apply(api, a));
+  }
 
   // SETTLE ONCE, BEFORE HANDING THE UI OVER.
   //

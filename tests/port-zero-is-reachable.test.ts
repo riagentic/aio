@@ -88,10 +88,15 @@ await new Promise(() => {});
       );
 
       // 2. And something is genuinely listening on it, which the lock alone
-      //    does not prove.
-      const res = await fetch(`http://127.0.0.1:${locked}/`);
+      //    does not prove. (The health route: a server-only app has no page.)
+      const res = await fetch(`http://127.0.0.1:${locked}/__aio/health`);
       await res.body?.cancel();
-      assert(res.status < 500, `the resolved port answered ${res.status}`);
+      assertEquals(res.status, 200, `the resolved port answered ${res.status}`);
+      //    …and its page answers what prod answers: this is the dev server a
+      //    human runs (not libraryMode), so no UI entry → the headless 503.
+      const page = await fetch(`http://127.0.0.1:${locked}/deep/link`);
+      await page.body?.cancel();
+      assertEquals(page.status, 503, "dev answers a UI-less app's page 503");
 
       // 3. And what the app TELLS a client is the same number — the trojan
       //    `config` route (what `am config` reads) used to answer with the

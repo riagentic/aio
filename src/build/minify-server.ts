@@ -664,6 +664,15 @@ export async function runCompile(
       stderr: "inherit",
     }).output();
     if (!r.success) {
+      // Said HERE, where deno is known to be the one that failed — every
+      // other way a compile stops (aio's own refusals) says its own reason.
+      console.error(
+        "deno compile failed — its own message is above this line.\n" +
+          "       fix: resolve what it names (a module it cannot find is " +
+          "usually a server-only import reachable from the entry, or an " +
+          "asset missing from deno.json `compile.include`), then re-run " +
+          "`deno task build`.",
+      );
       const held = await outputHeld(root, argv);
       if (held) console.error(held);
     }

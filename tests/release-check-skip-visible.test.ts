@@ -63,7 +63,12 @@ Deno.test("release check: a heavy tier that did not run names every gate in it",
   for (const g of ["test", "check:mutations", "check:bench", "test:build"]) {
     assertEquals(names.includes(g), true, `${g} is a heavy gate`);
   }
-  assertEquals(names.at(-1), "lab (fresh ubuntu)");
+  // The two that may skip run last, each saying so: the onboarding lab, then
+  // the real X driver (the GPU lab).
+  assertEquals(names.slice(-2), [
+    "lab (fresh ubuntu)",
+    "real X driver (GPU lab)",
+  ]);
 
   const stopped = notRunReport("stopped", 2, names);
   assertStringIncludes(stopped, "NOT RUN: fix the 2 failure(s) above first");

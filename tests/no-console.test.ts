@@ -3,8 +3,10 @@
 // throws `Invalid handle`. Both production spawns that inherit — the Electron
 // window and the update/restart relaunch — retry with the handles discarded.
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { join } from "@std/path";
 import {
   adoptHiddenConsole,
+  firstRunVerdict,
   hiddenConsoleHelper,
   neutralCwd,
   outlivingParent,
@@ -13,6 +15,8 @@ import {
   windowsCommandLine,
   windowsEnvBlock,
 } from "../src/server/no-console.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 import {
   _swapSpec,
   CLOSE_FDS_EXEC,
@@ -512,4 +516,148 @@ Deno.test("adoptHiddenConsole: a process that has a console starts nothing", () 
   );
   assertEquals(attached.created, []);
   assertEquals(attached.calls, ["unload"]);
+});
+
+// `Deno.Command.spawn()` is CreateProcessW on the event loop's thread, and
+// Windows holds the first start of an executable it has not run before.
+// Measured on w11pro (2026-10-24, 10 never-run exes): 540 – 10452 ms inside
+// `spawn()`, the loop stopped as long; after `firstRunVerdict` (10 of 10
+// "given", 0.5 – 8.9 s spent off the loop, its longest pause 18 ms) the real
+// `spawn()` took 2 – 3 ms. An app that starts its window answered nothing
+// meanwhile: `am state` timed out at its 8 s.
+type VerdictOpen = NonNullable<Parameters<typeof firstRunVerdict>[2]>;
+
+Deno.test("firstRunVerdict: off Windows nothing is opened and nothing is started", async () => {
+  const k = fakeConsoleKernel();
+  for (const os of ["linux", "darwin"] as const) {
+    assertEquals(
+      await firstRunVerdict(
+        "/opt/app/electron",
+        os,
+        k.open as unknown as VerdictOpen,
+      ),
+      "not-windows",
+    );
+  }
+  assertEquals(k.calls, []);
+});
+
+Deno.test("firstRunVerdict: the exe is started once suspended, outside the install, ended — and only once per path", async () => {
+  const k = fakeConsoleKernel();
+  const exe = "C:\\Program Files\\app-once\\electron.exe";
+  assertEquals(
+    await firstRunVerdict(exe, "windows", k.open as unknown as VerdictOpen),
+    "given",
+  );
+  // The program alone — no argument of the caller's reaches a process that
+  // is never run — quoted as one, by full path.
+  assertEquals(k.created, [{
+    cmdline: `"${exe}"`,
+    cwd: neutralCwd("windows")!,
+    app: null,
+  }]);
+  // CREATE_SUSPENDED | CREATE_NO_WINDOW: not one instruction runs, and the
+  // process is ENDED, not only let go of — a suspended one never ends itself.
+  const once = [
+    "create 0x8000004",
+    "terminate 0x1234",
+    "close 0x1234",
+    "close 0x5678",
+    "unload",
+  ];
+  assertEquals(k.calls, once);
+  // Judged already: the second spawn of it has nothing left to wait for.
+  assertEquals(
+    await firstRunVerdict(exe, "windows", k.open as unknown as VerdictOpen),
+    "given",
+  );
+  assertEquals(k.calls, once);
+});
+
+Deno.test("firstRunVerdict: a create that fails ends nothing, says so, and is asked again next time", async () => {
+  const calls: string[] = [];
+  const open = (() => ({
+    symbols: {
+      CreateProcessW: () => (calls.push("create"), Promise.resolve(0)),
+      TerminateProcess: () => (calls.push("terminate"), 1),
+      CloseHandle: () => (calls.push("close"), 1),
+    },
+    close: () => void calls.push("unload"),
+  })) as unknown as VerdictOpen;
+  for (let i = 0; i < 2; i++) {
+    assertEquals(
+      await firstRunVerdict("C:\\gone.exe", "windows", open),
+      "CreateProcessW (suspended) failed",
+    );
+  }
+  assertEquals(calls, ["create", "unload", "create", "unload"]);
+});
+
+// The call that waits is the one that must not be on the loop's thread: a
+// synchronous CreateProcessW here would pass the tests above and stop the
+// app exactly as before. And each caller must await it BEFORE its spawn.
+Deno.test("firstRunVerdict: a nonblocking create, awaited before the window's and spawn()'s own start", async () => {
+  const lib = await Deno.readTextFile(
+    new URL("../src/server/no-console.ts", import.meta.url),
+  );
+  assert(
+    /const K32_VERDICT = \{[^}]*CreateProcessW: \{ \.\.\.K32\.CreateProcessW, nonblocking: true \}/
+      .test(lib),
+    "firstRunVerdict's CreateProcessW must be `nonblocking`",
+  );
+  for (
+    const [file, before, after] of [
+      [
+        "../src/electron/electron-spawn.ts",
+        "await firstRunVerdict(bin)",
+        "spawnInheritingOrNull(command)",
+      ],
+      [
+        "../src/server/spawn.ts",
+        "await firstRunVerdict(cmd)",
+        "_spawnWindows(cmd, args, opts, grace)",
+      ],
+    ] as const
+  ) {
+    const src = await Deno.readTextFile(new URL(file, import.meta.url));
+    const v = src.indexOf(before), s = src.indexOf(after);
+    assert(v > 0 && s > v, `${file}: the verdict is awaited before the spawn`);
+  }
+});
+
+Deno.test({
+  name:
+    "firstRunVerdict (windows): a never-run exe is started without stopping the event loop",
+  ignore: Deno.build.os !== "windows", // the hold is Windows' own, on a real file
+}, async () => {
+  const dir = await tempDir("aio-first-run-");
+  try {
+    // Never run before: its bytes are this run's alone.
+    const exe = join(dir, `fresh${EXE}`);
+    await writeProgram(exe, `#!/bin/sh\nexit 0\n# ${crypto.randomUUID()}\n`);
+    let last = performance.now(), pause = 0;
+    const tick = setInterval(() => {
+      const now = performance.now();
+      pause = Math.max(pause, now - last);
+      last = now;
+    }, 5);
+    try {
+      assertEquals(await firstRunVerdict(exe), "given");
+      const t = performance.now();
+      const child = new Deno.Command(exe, {
+        stdin: "null",
+        stdout: "null",
+        stderr: "null",
+      }).spawn();
+      const spawnMs = performance.now() - t;
+      assertEquals((await child.status).code, 0, "the real start still runs");
+      // Without the verdict: 540 ms at best, of 10. With it: 2 – 3 ms.
+      assert(spawnMs < 500, `spawn() held the loop for ${spawnMs} ms`);
+      assert(pause < 500, `the event loop stood still for ${pause} ms`);
+    } finally {
+      clearInterval(tick);
+    }
+  } finally {
+    await dropTempDir(dir);
+  }
 });

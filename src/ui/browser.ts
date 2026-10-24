@@ -184,6 +184,8 @@ interface Mount {
   gone: boolean;
 }
 const _mounts = new WeakMap<HTMLElement, Mount>();
+/** `<Browser>` without a working `<webview>` was said once (`activate`). */
+let _saidNoTag = false;
 
 function mountOf(el: HTMLElement): Mount {
   let m = _mounts.get(el);
@@ -246,6 +248,20 @@ function activate(el: HTMLElement, m: Mount): void {
   const props = m.props;
   if (m.gone || m.guest || !props) return;
   const wv = el as WebviewEl;
+  // A `<webview>` that is not one (no `electron.webviewTag` / `childWindows`,
+  // or no Electron at all) is an unknown element: it renders nothing and
+  // raises nothing, and the page just stays empty. Said once per page.
+  if (
+    typeof (wv as { loadURL?: unknown }).loadURL !== "function" && !_saidNoTag
+  ) {
+    _saidNoTag = true;
+    console.warn(
+      "⚠ <Browser> renders nothing here: this window has no <webview> tag. " +
+        "Enable it with aio.run({ electron: { webviewTag: true } }) " +
+        "(or childWindows: true, which also allows openWindow) — a browser " +
+        "tab has none at all.",
+    );
+  }
   m.guest = wv;
   const kept = props.keepAlive ? _kept.get(props.keepAlive) : undefined;
   if (kept && kept.src === props.src && kept.at && kept.at !== props.src) {

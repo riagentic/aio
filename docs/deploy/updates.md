@@ -102,8 +102,10 @@ directory for published artifacts, a git ref for a repository.
 | `file:///mnt/releases/app`         | a newer semver             | download + swap      |
 | `https://github.com/you/app`       | the ref moved              | re-run the installer |
 
-A **manifest source** is three static files per channel on any host that serves
-files — S3, GitHub Releases, nginx, a Pages site, a mounted share, a USB stick:
+A **manifest source** is two static files per channel on any host that serves
+directories — S3, nginx, a Pages site, a mounted share, a USB stick. Not a
+GitHub Release: its assets are flat, so `<channel>/` cannot exist there
+(`deno task ship github` writes a workflow that publishes to Pages instead):
 
 ```
 <source>/<channel>/<os>-<arch>.json    the manifest
@@ -149,7 +151,11 @@ made from a tree whose config says `prod` is a test build, and letting the
 literal win is exactly the silent "the tester's build updated itself into the
 public release" the stamp exists to prevent. Say something else per run
 (`--channel`, `AIO_UPDATE_CHANNEL`) or per install (`updates.setChannel()`); a
-one-off flag is never pinned.
+one-off flag is never pinned, and neither is the channel a boot resolves — a
+later config change takes effect. An install upgraded from an aio that saved its
+first boot's channel (`data/update-trust.json`) drops that value when it matches
+what the app resolves today; when it differs it is kept (it may be a
+`setChannel` choice) and every boot warns, naming both ways out.
 
 Poll cadence follows the channel: `dev` 1m · `test` 5m · `prod` 6h, jittered,
 and conditional (`If-None-Match`), so an unchanged check costs a 304 and no
@@ -170,7 +176,7 @@ name — so `setChannel("../prod")` throws instead of being pinned.
 ```sh
 deno task ship keygen                      # once, ever
 # → wrote ~/.aio/keys/<app>-release-key.json   (private; never commit it)
-deno task publish                          # signs with that key (--key=<full path> for another; ~ is not expanded)
+deno task publish                          # signs with that key (--key=<path> for another; a leading ~/ is expanded)
 # → ./release/prod/ — upload that directory to <source>/
 ```
 
@@ -273,16 +279,38 @@ updates  1.4.3 is not installed from a patch (none of its 1 starts from the buil
 Everything after the artifact exists is the same update: smoke test, backup,
 swap, confirm, rollback.
 
-|                     |                                                                                                                                                                                                                                                                                                                                    |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| What can be patched | An install that IS one file: a compiled binary or CLI (`binary`), an AppImage (`appimage`, `electron-appimage`).                                                                                                                                                                                                                   |
-| What cannot         | An install unpacked into a folder: `electron-zip` (a Windows `.zip` or one-click `.exe` install), a macOS `.app` (`electron-app`), Android. The archive its manifest hashes is gone once it is unpacked, and no re-packing gives it back byte for byte — these **download every release whole**, and publish says so per artifact. |
-| Format              | One zstd frame made with `zstd -19 --patch-from=<the earlier artifact>`.                                                                                                                                                                                                                                                           |
-| Publishing needs    | The `zstd` command line tool, 1.4.5 or newer, on `PATH` (it is refused, by name, without it). About half a minute and 500 MB of memory per 100 MB artifact.                                                                                                                                                                        |
-| Updating needs      | Nothing: the decoder is part of aio. About 0.1–0.5 s and install + release of memory for a 100 MB artifact.                                                                                                                                                                                                                        |
-| In the manifest     | `patches: [{ from, url, size, sha256 }]` (`from` = SHA-256 of the artifact it starts from) and `patchesSignature`, an Ed25519 signature by the release key over the list AND the release's own signed core. A list that was edited, moved from another release, or lost its signature is not used.                                 |
-| Older clients       | An app built with aio up to 1.0.19 ignores both keys and downloads the whole release, exactly as before — the signed core it verifies is unchanged. A client with patches reading a channel without them does the same.                                                                                                            |
-| Not published       | A patch over half the size of the release (nothing in common with the earlier build); the same build published twice.                                                                                                                                                                                                              |
+**A `.zip` install (`electron-zip`: a Windows `.zip` or one-click `.exe`
+install) is patched file by file.** Its archive is gone once unpacked, so
+`--patch-from` publishes a TREE patch for it (`<artifact>.<from>-<to>.tree`):
+the new release's file list — path, size, SHA-256 — and, for each changed file,
+a zstd frame against the installed file at that path (an added file: a frame of
+its own; an unchanged one: copied). Measured on an Electron app with one UI line
+changed: **27 KB**, where a patch of the whole 174.8 MB zip would have been 33.3
+MB (its deflated server binary differs from the first changed byte on). The
+install fills the staged folder from its own files and the patch, and every file
+must have the list's size and SHA-256 — the list itself is trusted because the
+patch file's digest is in the signed patch list. Any miss (a file changed since
+it was installed, too little memory for one file's patch) empties the staged
+folder and downloads the whole release, said in one line:
+
+```
+updates  made notes 1.4.3 from the installed files and a 27.0 KB patch — the whole release (174.8 MB) was not downloaded
+```
+
+An install with no digest on record (unpacked by hand, never updated) uses the
+release's patch when it carries exactly one. No extra disk: the install's own
+files are the base.
+
+|                     |                                                                                                                                                                                                                                                                                                    |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| What can be patched | An install that IS one file: a compiled binary or CLI (`binary`), an AppImage (`appimage`, `electron-appimage`). A `.zip` install (`electron-zip`), file by file (above).                                                                                                                          |
+| What cannot         | A macOS `.app` (`electron-app`: its sealed bundle ships as `.app.tar.gz`) and Android — these **download every release whole**, and publish says so per artifact. A `.zip` release that holds a symlink gets no tree patch (said by publish).                                                      |
+| Format              | One zstd frame made with `zstd -19 --patch-from=<the earlier artifact>`; for a `.zip`, `aio-tree-patch 1`, a JSON file list, then one such frame per changed file.                                                                                                                                 |
+| Publishing needs    | The `zstd` command line tool, 1.4.5 or newer, on `PATH` (it is refused, by name, without it). About half a minute and 500 MB of memory per 100 MB artifact.                                                                                                                                        |
+| Updating needs      | Nothing: the decoder is part of aio. About 0.1–0.5 s and install + release of memory for a 100 MB artifact.                                                                                                                                                                                        |
+| In the manifest     | `patches: [{ from, url, size, sha256 }]` (`from` = SHA-256 of the artifact it starts from) and `patchesSignature`, an Ed25519 signature by the release key over the list AND the release's own signed core. A list that was edited, moved from another release, or lost its signature is not used. |
+| Older clients       | An app built with aio up to 1.0.19 ignores both keys and downloads the whole release, exactly as before — the signed core it verifies is unchanged. A client with patches reading a channel without them does the same.                                                                            |
+| Not published       | A patch over half the size of the release (nothing in common with the earlier build); the same build published twice.                                                                                                                                                                              |
 
 `--dir` inside the project must be a directory of its own — the rule the build's
 `--out` follows: not the project root, `src/`, an app dir, `.git`, `.aio`, nor
@@ -294,9 +322,9 @@ The long way is the same three steps by hand, if you want to see them:
 
 ```sh
 deno task compile
-deno task ship ./dist/wallet --channel=prod   # signs with ~/.aio/keys/wallet-release-key.json (the `ship keygen` default) when it exists; --key=<path> picks another
-# → wallet.ship.json, next to the artifact. Copy BOTH into <source>/prod/,
-#   with the manifest named <os>-<arch>.json.
+deno task ship ./dist/wallet-1.4.7 --channel=prod   # the versioned artifact the build wrote; signs with ~/.aio/keys/wallet-release-key.json (the `ship keygen` default) when it exists; --key=<path> picks another
+# → wallet-1.4.7.ship.json and <os>-<arch>.json, next to the artifact. Copy the
+#   artifact and <os>-<arch>.json into <source>/prod/ (the next build empties dist/).
 ```
 
 The release is named from `deno.json` (`appId` > `title` > `name`), and every

@@ -101,3 +101,24 @@ Deno.test("describeThrown keeps the app's words where they are readable", () => 
   assertEquals(describeThrown(new Error("boom")), "boom");
   assertEquals(describeThrown("plain"), "plain");
 });
+
+Deno.test("describeThrown: a thrown plain object reports its fields, not [object Object]", () => {
+  // `throw { code: "E_QUOTA", detail: "over" }` is common in app code; the
+  // crash handler and createAioError printed "[object Object]" for it.
+  assertEquals(
+    describeThrown({ code: "E_QUOTA", detail: "over" }),
+    `{"code":"E_QUOTA","detail":"over"}`,
+  );
+  assertEquals(describeThrown(42), "42");
+  assertEquals(describeThrown([1, 2]), "1,2");
+  // A class with its own toString keeps it.
+  assertEquals(describeThrown({ toString: () => "custom" }), "custom");
+  // A value JSON cannot show still answers with its tag.
+  const cyc: Record<string, unknown> = {};
+  cyc.self = cyc;
+  assertEquals(describeThrown(cyc), "[object Object]");
+  assertEquals(
+    createAioError("REDUCE_ERROR", { code: 7 }, {}).message,
+    `{"code":7}`,
+  );
+});

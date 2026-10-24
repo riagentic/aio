@@ -168,6 +168,7 @@ export function testDisplayEnv(): Record<string, string> {
 }
 
 /** Test seam: forget the cached answer. @internal */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetTestDisplay(): void {
   _resolved = null;
   _warned = false;

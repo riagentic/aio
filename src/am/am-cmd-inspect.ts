@@ -44,6 +44,8 @@ import {
 import { bytesOrUnserializable, HEY } from "../diagnostics/fmt.ts";
 import { isLockOwnerAlive } from "../server/single-instance-lock.ts";
 import { waitingMessage, waitingOf, waitingSaid } from "./am-cmd-start.ts";
+import { appIdOnPort } from "./am-cmd-stop.ts";
+import { TRIGGER_ACTIONS } from "./am-help-text.ts";
 
 // ── Constants ───────────────────────────────────────────────
 
@@ -382,6 +384,37 @@ export function groupLogEvents(lines: readonly string[]): string[][] {
   return events.filter((e) => e.some((l) => l.length > 0));
 }
 
+/** The event `am logs --follow` printed last, carried into the next read:
+ *  a multi-line event split across two writes arrives as a header in one read
+ *  and its stack/box lines in the next. Grouped per read, the continuation
+ *  was an event with no header — and a headless event passes every filter, so
+ *  `--level=error` printed the stack of an `INFO` line. */
+export interface FollowCarry {
+  lines: string[];
+  shown: boolean;
+}
+
+/** Pure: the lines to print for one `--follow` read, judged as whole events
+ *  with the carried event re-joined. A carried event that was already printed
+ *  prints only its new lines; one that was held back prints whole once its
+ *  continuation makes it pass (the tail would have shown it that way). */
+export function followEvents(
+  carry: FollowCarry | null,
+  lines: readonly string[],
+  keep: (event: readonly string[]) => boolean,
+): { out: string[]; carry: FollowCarry | null } {
+  const events = groupLogEvents(carry ? [...carry.lines, ...lines] : lines);
+  const out: string[] = [];
+  let next: FollowCarry | null = carry;
+  events.forEach((e, i) => {
+    const ok = keep(e);
+    const old = i === 0 && carry ? carry : null;
+    if (ok) out.push(...(old?.shown ? e.slice(old.lines.length) : e));
+    next = { lines: e, shown: ok || (old?.shown ?? false) };
+  });
+  return { out, carry: next };
+}
+
 /** Log levels, weakest first — `--level=warn` means "warn AND above", the
  *  meaning every other log tool has. */
 const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
@@ -565,6 +598,19 @@ export async function cmdLog(
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
+  // `--port=N` names the app whose log this is — it used to be ignored, so
+  // `am logs --port=<another app>` tailed the cwd app's file instead. Nothing
+  // on N is when a crashed app's log matters most: the cwd / --app app's log,
+  // and said.
+  if (flags.port !== undefined) {
+    const r = await appIdOnPort(flags);
+    if (r.ok) flags = { ...flags, app: r.appId };
+    else if (r.nothingThere) {
+      sayErr(
+        `am: note: ${r.error} — showing ${resolveAmAppId(flags.app)}'s log`,
+      );
+    } else fail(r.error, mode);
+  }
 
   // ONE tail for both files. `--client` used to run a SECOND, hand-written
   // implementation that ignored the output mode entirely (raw `console.log`
@@ -631,6 +677,9 @@ export async function cmdLog(
 
   // Print current tail
   let offset = 0;
+  // The tail's last event, for `--follow` to continue if its next write is
+  // that event's continuation.
+  let tailLast: string[] | undefined;
   try {
     const content = Deno.readTextFileSync(LOG_FILE);
     // EVENTS, not lines. `--lines=N` used to slice the file's last N text
@@ -640,6 +689,7 @@ export async function cmdLog(
     // matches the whole event too: `am log error` keeps the stack that belongs
     // to the error rather than the one line the word appeared on.
     let events = groupLogEvents(content.split("\n"));
+    tailLast = events.at(-1);
     if (filter) {
       const lc = filter.toLowerCase();
       events = events.filter((e) => e.join("\n").toLowerCase().includes(lc));
@@ -717,6 +767,20 @@ export async function cmdLog(
   const name = basename(LOG_FILE);
   let ino = Deno.statSync(LOG_FILE).ino;
   let buf = "";
+  // ONE streaming decoder across reads: a multibyte char split over two reads
+  // (a 64 KB chunk edge, or a writer flushing mid-char) decoded as two U+FFFD
+  // with a fresh decoder per read.
+  let dec = new TextDecoder();
+  const lc = filter?.toLowerCase();
+  const keep = (e: readonly string[]) =>
+    (!lc || e.join("\n").toLowerCase().includes(lc)) &&
+    logEventMatches(e, { level, tag });
+  let carry: FollowCarry | null = tailLast
+    ? {
+      lines: tailLast,
+      shown: n > 0 && keep(tailLast) && logEventMatches(tailLast, structured),
+    }
+    : null;
   for await (const event of watcher) {
     if (event.kind === "access" || event.kind === "remove") continue;
     if (!event.paths.some((p) => basename(p) === name)) continue;
@@ -728,6 +792,8 @@ export async function cmdLog(
         ino = stat.ino;
         offset = 0;
         buf = "";
+        dec = new TextDecoder();
+        carry = null;
       }
       // AIO-213: use try/finally to ensure file handle is always closed
       const file = await Deno.open(LOG_FILE, { read: true });
@@ -736,7 +802,9 @@ export async function cmdLog(
         const chunk = new Uint8Array(65536);
         let bytesRead: number | null;
         while ((bytesRead = await file.read(chunk)) !== null) {
-          const text = new TextDecoder().decode(chunk.subarray(0, bytesRead));
+          const text = dec.decode(chunk.subarray(0, bytesRead), {
+            stream: true,
+          });
           offset += bytesRead;
           buf += text;
           // Output complete lines; buffer partial last line
@@ -753,13 +821,9 @@ export async function cmdLog(
           // `since` is deliberately dropped here: every line arriving now is
           // newer than any past cutoff, and re-applying it would only mis-drop
           // an event whose header we could not parse.
-          let evs = groupLogEvents(toWrite.split("\n"));
-          if (filter) {
-            const lc = filter.toLowerCase();
-            evs = evs.filter((e) => e.join("\n").toLowerCase().includes(lc));
-          }
-          evs = evs.filter((e) => logEventMatches(e, { level, tag }));
-          const filtered = evs.flat().join("\n") + "\n";
+          const r = followEvents(carry, toWrite.split("\n"), keep);
+          carry = r.carry;
+          const filtered = r.out.join("\n") + "\n";
           if (filtered.trim()) await sayDataStream(filtered);
         }
       } finally {
@@ -1830,24 +1894,7 @@ export async function cmdTrigger(
     ? positional.slice(1)
     : positional;
   const wantIdx = leadsWithIndex ? Number(positional[0]) : undefined;
-  const actions = new Set([
-    "click",
-    "dblclick",
-    "type",
-    "setValue",
-    "press",
-    "keyDown",
-    "keyUp",
-    "hover",
-    "focus",
-    "blur",
-    "select",
-    "check",
-    "uncheck",
-    "clear",
-    "scroll",
-    "dragTo",
-  ]);
+  const actions = new Set<string>(TRIGGER_ACTIONS);
   if (!path || !action || !actions.has(action)) {
     // `am surface` reports a form as `events: ["submit"]`, so reaching for
     // `am trigger <form> submit` is the obvious next move — and it lands in a

@@ -111,6 +111,17 @@ function shapeReport(
     }
   }
   stringList("build.platforms", b.platforms, problems);
+  // Not a channel name: every reader (`buildChannel`) takes it as no stamp —
+  // the releases go to "prod" and the app follows its own default chain.
+  if (
+    b.channel !== undefined && (typeof b.channel !== "string" || !b.channel)
+  ) {
+    warnings.push(
+      `build.channel must be a channel name like "prod", got ${
+        got(b.channel)
+      } — ignored: releases go to "prod" and the app follows its default channel`,
+    );
+  }
   if (
     b.out !== undefined && (typeof b.out !== "string" || !b.out.trim())
   ) {

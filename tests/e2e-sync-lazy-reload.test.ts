@@ -1,7 +1,7 @@
-// The sync engine is a LAZY import in the browser runtime (browser-protocol's
+// The sync engine BOOTS lazily in the browser runtime (browser-protocol's
 // `_syncLoader`): a sync cell's first boot awaits it, a non-sync app never
-// requests it. This is the real-browser half of that contract — after a
-// "reload" (a fresh tab: new page, new module graph, the engine fetched again
+// starts it. This is the real-browser half of that contract — after a
+// "reload" (a fresh tab: new page, new module graph, the engine booted again
 // on demand), a sync app converges with what the previous tab wrote, and keeps
 // working: the lazily booted engine replays and routes new ops.
 import { assert } from "@std/assert";

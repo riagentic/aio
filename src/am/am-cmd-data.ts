@@ -916,9 +916,25 @@ export async function cmdRestore(
     // nothing has moved yet.
     let dbStage: string | null = null;
     if (dbTarget !== undefined) {
+      // A restore killed between staging and swap left its staged database
+      // beside `dbPath`: swept when it proves a dead restore made it, else
+      // named — the same rule as data.restoring-* above.
+      for (const left of siblingsOf(dbTarget, ".am-restore-")) {
+        const swept = sweepIncomplete(left);
+        sayErr(
+          swept
+            ? `am: ${swept.removed ? "" : "note: "}${sweptLine(swept)}`
+            : `am: note: ${left} was left by an interrupted restore — ` +
+              `staged database files, not the live ones. Delete it once you ` +
+              `no longer need it.`,
+        );
+      }
+      // The parents this restore creates, so a refusal takes them back.
+      const made = missingDirs(dirname(dbTarget));
       try {
         Deno.mkdirSync(dirname(dbTarget), { recursive: true });
         dbStage = freeSibling(`${dbTarget}.am-restore-${at}`);
+        markIncomplete(dbStage, "am restore");
         const got = await copyDbFiles(
           join(src, DBPATH_DIR, basename(dbTarget)),
           dbStage,
@@ -931,9 +947,18 @@ export async function cmdRestore(
         }
         const sig = hold.interrupted();
         if (sig) throw new Interrupted(sig);
+        // Off before the swap: every entry of the stage moves next to dbPath.
+        Deno.removeSync(join(dbStage, INCOMPLETE_MARK));
       } catch (e) {
         removeTracked(staging);
         if (dbStage !== null) removeTracked(dbStage);
+        for (const dir of made) {
+          try {
+            Deno.removeSync(dir); // empty only — never what someone else put
+          } catch {
+            // aio-ok: not empty, or already gone — then it is not ours to take
+          }
+        }
         failCopy(
           e,
           `restore of ${appId} refused — the backup's database goes back to ` +
@@ -1077,6 +1102,21 @@ function freeSibling(base: string): string {
   );
 }
 
+/** The directories `mkdir -p dir` would create, deepest first. */
+function missingDirs(dir: string): string[] {
+  const out: string[] = [];
+  for (let d = resolve(dir); d !== dirname(d); d = dirname(d)) {
+    try {
+      Deno.lstatSync(d);
+      break;
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) break;
+      out.push(d);
+    }
+  }
+  return out;
+}
+
 /** Sibling directories of `dir` named `<basename(dir)><infix>…`. */
 function siblingsOf(dir: string, infix: string): string[] {
   const prefix = basename(dir) + infix;
@@ -1207,6 +1247,7 @@ function removeTracked(path: string): void {
 }
 
 /** Exported for tests — the copy is the only non-trivial part. */
+// aio-ok(dead-wiring): test seam — exposes copyTree/holdForMaintenance to tests
 export const _internals = {
   copyTree,
   dirSize,

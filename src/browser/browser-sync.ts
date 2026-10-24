@@ -27,7 +27,7 @@ import {
   createLocalStorageOpStorage,
   syncStoragePrefix,
 } from "../sync/browser-storage.ts";
-import type { SyncConfig } from "../sync/types.ts";
+import type { OpRejectedMessage, SyncConfig } from "../sync/types.ts";
 import { resolveSyncCells } from "./sync-cells.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import {
@@ -39,6 +39,7 @@ import type { CellDef, Msg } from "../state/cell-types.ts";
 import { produce } from "immer";
 import { degraded } from "../diagnostics/degraded.ts";
 import { _armAckTimer, _rejectAck, _resolveAck } from "./browser-ack.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 /** How long to wait before re-requesting a catch-up the server just failed.
  *  Short on purpose: a `sync-err` leaves this client stale until it asks
@@ -324,12 +325,7 @@ export function handleSyncMessage(t: string, d: unknown): void {
       return;
     }
     case "op-rejected": {
-      const r = d as {
-        opId: string;
-        cell: string;
-        reason: string;
-        serverNow?: number;
-      };
+      const r = d as OpRejectedMessage;
       watch(
         "sync:rejection",
         _engine.handleRejection(r.cell, r.opId, r.reason, r.serverNow).then(
@@ -395,21 +391,30 @@ export function _retentionMsOf(
   return r === undefined ? undefined : parseRetention(r);
 }
 
+/** Cells already told they cannot run local-first (said once each). */
+const _skipSaid = new Set<string>();
+/** The cells that sync now — the ONE path the boot and a late adoption
+ *  (`adoptBrowserSyncCells`) both take, warning for an adopted cell that
+ *  cannot replay locally. */
+function syncCellsNow(): Map<string, CellDef> {
+  return resolveSyncCells(getRegisteredCells().values(), (id) => {
+    if (_skipSaid.has(id)) return;
+    _skipSaid.add(id);
+    console.warn(
+      `[aio:sync] localFirst adopted '${id}' but this cell cannot replay ops ` +
+        `locally — it keeps round-tripping through the server. (Only ` +
+        `methods-style cells can run local-first.)`,
+    );
+  });
+}
+
 /** Boot the engine for every registered sync cell. Idempotent. */
 export function initBrowserSync(
   send: (raw: string) => void,
 ): SyncEngine | null {
   if (_engine) return _engine;
   // One resolver, shared with the transport's load gate (sync-cells.ts).
-  const cells = resolveSyncCells(
-    getRegisteredCells().values(),
-    (id) =>
-      console.warn(
-        `[aio:sync] localFirst adopted '${id}' but this cell cannot replay ops ` +
-          `locally — it keeps round-tripping through the server. (Only ` +
-          `methods-style cells can run local-first.)`,
-      ),
-  );
+  const cells = syncCellsNow();
   if (cells.size === 0) return null;
   // The per-browser identity lives at `__aio_sync:clientId` — inside the
   // storage's per-cell document namespace. A sync cell with that name would
@@ -462,7 +467,9 @@ export function initBrowserSync(
       // so the engine marked the op applied and advanced the cursor past it:
       // the server had the change, this client never would, and no
       // re-delivery could reach it again. The two facts get two values.
-      console.warn(`[aio:sync] reducer failed for ${cell}:${action}: ${e}`);
+      console.warn(
+        `[aio:sync] reducer failed for ${cell}:${action}: ${thrownText(e)}`,
+      );
       lastReducerError = e;
       return REDUCER_FAILED;
     }
@@ -547,6 +554,28 @@ export function initBrowserSync(
   return _engine;
 }
 
+/** Bring every cell the resolver now names into the running engine.
+ *
+ *  A shell templated at BUILD time (Electron, Android, a static web build)
+ *  learns the server's `localFirst` adoptions from the `cfg` frame, after the
+ *  engine may already have booted for the cells that say `sync: true`
+ *  themselves. The engine's cell set was fixed at boot, so in an app with
+ *  both every ADOPTED cell kept round-tripping for the whole session there
+ *  — no optimistic call, no durable offline queue — while the server-served
+ *  page of the same app ran them locally. Returns the cells added. */
+export function adoptBrowserSyncCells(): string[] {
+  if (!_engine || !_syncCells) return [];
+  const added: string[] = [];
+  for (const [id, def] of syncCellsNow()) {
+    if (_syncCells.has(id)) continue;
+    _syncCells.set(id, def);
+    _confirmed[id] = { ...(def.__aio.state as Record<string, unknown>) };
+    added.push(id);
+    watch("sync:request", _engine.addCell(id, def.__aio.syncConfig!));
+  }
+  return added;
+}
+
 /** Transport lifecycle: flush queued ops on reconnect, mark offline on drop. */
 export function setSyncOnline(online: boolean): void {
   _engine?.setOnline(online);
@@ -573,4 +602,5 @@ export function _resetBrowserSync(): void {
   _unsavedSaid.clear();
   _syncCells = null;
   _storageWarned = false;
+  _skipSaid.clear();
 }

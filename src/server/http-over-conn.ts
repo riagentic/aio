@@ -71,6 +71,7 @@
 
 import type { LocalConn, LocalListener } from "./local-listen.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 /** Header block ceiling — a peer that never sends the blank line cannot grow
  *  the buffer without bound. Matches the common server default. */
@@ -1049,7 +1050,9 @@ async function serveRequest(
       }
       log.error(
         "http",
-        `handler threw for ${method} ${head.target} over ${o.path} — ${e}`,
+        `handler threw for ${method} ${head.target} over ${o.path} — ${
+          thrownText(e)
+        }`,
       );
       // `Deno.serve`'s default answer, byte for byte (bytes, so no
       // Content-Type is invented for it).

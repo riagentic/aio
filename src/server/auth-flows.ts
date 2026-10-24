@@ -99,6 +99,32 @@ export interface AuthFlows {
   /** The app's `allowedOrigins` — admitted by the POST flows' Origin check
    *  exactly as by the server-wide one (filled in by the server). */
   allowedOrigins?: readonly string[];
+  /** The app's `trustProxyHeader` (filled in by the server). Set means a
+   *  trusted reverse proxy fronts the app, so its `X-Forwarded-Proto` says
+   *  which scheme the BROWSER is on — see `servedOverHttps`. */
+  trustProxyHeader?: string;
+}
+
+/** Is the browser on https? `cfg.secure` (this process terminates TLS), or —
+ *  behind a proxy the app trusts (`trustProxyHeader`) — the proxy's
+ *  `X-Forwarded-Proto: https`.
+ *
+ *  The deployment `docs/auth/auth.md` prescribes for the internet is a
+ *  TLS-terminating proxy in front of a plain-http aio. Reading only
+ *  `cfg.secure` there sent every session cookie WITHOUT `Secure` (one visit to
+ *  the http:// name leaks it in clear) and built the OIDC `redirect_uri` as
+ *  `http://…` — which Google, Entra and most providers refuse outright for a
+ *  non-loopback host, so SSO could not work behind the proxy at all, with no
+ *  setting to fix it. Only ever ADDS https: an absent or other value keeps
+ *  what the socket says. */
+export function servedOverHttps(
+  req: Request,
+  cfg: Pick<AuthFlows, "secure" | "trustProxyHeader">,
+): boolean {
+  if (cfg.secure) return true;
+  if (!cfg.trustProxyHeader) return false;
+  const proto = req.headers.get("x-forwarded-proto");
+  return proto?.split(",")[0]?.trim().toLowerCase() === "https";
 }
 
 /** Every auth response is identity-bearing (a user, a session token, a
@@ -274,6 +300,7 @@ async function authRoute(
 ): Promise<Response | null> {
   const route = `${req.method} ${url.pathname.slice("/__aio/auth/".length)}`;
   const cookieName = cfg.cookieName ?? SESSION_COOKIE;
+  const secure = servedOverHttps(req, cfg);
   /** The cookie lives exactly as long as the session it carries — read from
    *  the store's own expiry, not re-derived from `cfg.ttlMs`. With `auth.ttlMs`
    *  unset the token takes the STORE default (`sessions.ttlMs`), and a cookie
@@ -286,7 +313,7 @@ async function authRoute(
     return cookieHeader(
       token,
       Math.max(0, Math.floor(ms / 1000)),
-      cfg.secure,
+      secure,
       cookieName,
     );
   };
@@ -302,7 +329,7 @@ async function authRoute(
     const old = parseLegacy(req);
     return old && cfg.sessions.get(old) ? old : null;
   };
-  const clearLegacy = (): string => cookieHeader("", 0, cfg.secure);
+  const clearLegacy = (): string => cookieHeader("", 0, secure);
   const issueSession = (user: AioUser, status = 200): Response => {
     const token = cfg.sessions.issue(user, { ttlMs: cfg.ttlMs });
     const r = json(
@@ -351,7 +378,7 @@ async function authRoute(
     sessions: cfg.sessions,
     ttlMs: cfg.ttlMs,
     cookie: sessionCookie,
-    secure: cfg.secure,
+    secure,
     signup: oidc.signup === undefined ? cfg.signup : oidc.signup === true,
     requireVerified: cfg.requireVerified === true,
   });
@@ -676,7 +703,7 @@ async function authRoute(
       // fallback read would sign it straight back in on the next request.
       if (legacy) cfg.sessions.revoke(legacy);
       const r = json(200, { ok: true }, {
-        "Set-Cookie": cookieHeader("", 0, cfg.secure, cookieName), // clear
+        "Set-Cookie": cookieHeader("", 0, secure, cookieName), // clear
       });
       if (legacy) r.headers.append("Set-Cookie", clearLegacy());
       return r;

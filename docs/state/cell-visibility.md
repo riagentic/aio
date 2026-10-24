@@ -233,6 +233,14 @@ already stripped.
 >
 > This also applies to **user-less** channels (UDS, `am state`, amui): a filter
 > that requires a user omits the cell there too.
+>
+> A connection's first state is its whole view, so a cell omitted from it is
+> **withdrawn** on the client: a tab where alice signed out and bob signed in
+> (no reload) reads the declared state for that cell, never alice's last copy.
+> Within one connection a later omission withdraws it too: every full state
+> frame names the cells it covers (its subscription, or the whole view), so the
+> client tells a cell the server withheld from one it merely stopped reading. (A
+> client of 1.0.24 or older keeps its last copy until it reconnects.)
 
 ### `forUser` and `sync` cannot both hold
 

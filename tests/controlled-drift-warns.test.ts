@@ -206,3 +206,32 @@ Deno.test("controlled drift: an unmount cancels the re-checks of a portal's cont
     await closeWindow(win);
   }
 });
+
+Deno.test("controlled drift: a call that answers without storing warns once it HAS answered", async () => {
+  const v = signal("ab");
+  let answer = () => {};
+  const warns = await withDom(
+    true,
+    () =>
+      h("input", {
+        id: "srv",
+        value: v.value,
+        // A server-cell call: counted in flight, answered later with no
+        // state change (a server-side cap).
+        onInput: () => {
+          bumpPending("probe:cap", 1);
+          answer = () => bumpPending("probe:cap", -1);
+        },
+      }),
+    async (_root, type) => {
+      type("#srv", "c");
+      // In flight past the grace: not decided yet (the in-flight case above
+      // pins that this alone stays quiet).
+      await sleep(1_200);
+      answer();
+      await sleep(1_200);
+    },
+  );
+  assertEquals(warns.length, 1, warns.join("\n"));
+  assert(warns[0]!.includes('<input id="srv">'), warns[0]);
+});

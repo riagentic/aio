@@ -24,7 +24,7 @@
 // Nothing here is automatic-and-silent: each branch reports what it did to the
 // user's data and where the old bytes went.
 
-import { basename, dirname } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import type { DB } from "../db/types.ts";
 import { createDB } from "../db/async-db.ts";
 import { syncDir, syncFile } from "../db/durable.ts";
@@ -788,4 +788,32 @@ async function pruneQuarantine(
   } catch (e) {
     log.warn(`db: could not prune old quarantined copies — ${e}`);
   }
+}
+
+/** For SQLite's `attempt to write a readonly database`: which of the paths it
+ *  writes this process cannot — the database, its `-wal`/`-shm` (when they
+ *  exist), and the folder they are created in. The refusal named "the data
+ *  directory and the db file" only, and SQLite gives the `-shm` the mode the
+ *  database had when it created it: a database made read-only once (or a run
+ *  under `sudo`) leaves a `-shm` that fails every boot after the database is
+ *  writable again, while the advice points at the one file already fixed.
+ *  Opening for write changes nothing; the folder probe file is removed. */
+export function unwritableDbPaths(dbPath: string): string[] {
+  const out: string[] = [];
+  for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    try {
+      Deno.openSync(p, { write: true }).close();
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) out.push(p);
+    }
+  }
+  const dir = dirname(dbPath);
+  const probe = join(dir, `.aio-write-probe-${crypto.randomUUID()}`);
+  try {
+    Deno.writeFileSync(probe, new Uint8Array(), { createNew: true });
+    Deno.removeSync(probe);
+  } catch {
+    out.push(`${dir} (the folder)`);
+  }
+  return out;
 }

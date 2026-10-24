@@ -607,6 +607,25 @@ mod win {
         const CLSID_SHELL_LINK: Guid = Guid(0x0002_1401, 0, 0, TAIL);
         const IID_SHELL_LINK_W: Guid = Guid(0x0002_14F9, 0, 0, TAIL);
         const IID_PERSIST_FILE: Guid = Guid(0x0000_010B, 0, 0, TAIL);
+        const IID_PROPERTY_STORE: Guid = Guid(
+            0x886D_8EEB,
+            0x8CF2,
+            0x4446,
+            [0x8D, 0x02, 0xCD, 0xBA, 0x1D, 0xBD, 0xCF, 0x99],
+        );
+        /// PKEY_AppUserModel_ID.
+        #[repr(C)]
+        struct PropertyKey(Guid, u32);
+        const AUMID_KEY: PropertyKey = PropertyKey(
+            Guid(0x9F4C_2855, 0x9F79, 0x4B39, [0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3]),
+            5,
+        );
+        /// PROPVARIANT, x64, holding a VT_LPWSTR.
+        #[repr(C)]
+        struct PropVariant(u16, u16, u16, u16, *const u16, usize);
+        const VT_LPWSTR: u16 = 31;
+        const SET_VALUE: usize = 6; // IPropertyStore
+        const COMMIT: usize = 7; // IPropertyStore
 
         // Slots of the two COM interfaces' method tables (shobjidl_core.h,
         // objidl.h), after IUnknown's QueryInterface, AddRef, Release.
@@ -621,6 +640,33 @@ mod win {
             } else {
                 Err(format!("{what} failed (0x{hresult:08X})"))
             }
+        }
+
+        /// Give the link the AppUserModelID `id` (NUL-terminated UTF-16).
+        ///
+        /// SAFETY: `link` must be a live IShellLinkW.
+        unsafe fn set_id(link: *mut c_void, id: &[u16]) -> Result<(), String> {
+            type Query =
+                unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> i32;
+            type SetValue = unsafe extern "system" fn(
+                *mut c_void,
+                *const PropertyKey,
+                *const PropVariant,
+            ) -> i32;
+            type Commit = unsafe extern "system" fn(*mut c_void) -> i32;
+            let mut store = std::ptr::null_mut();
+            check(
+                "QueryInterface(IPropertyStore)",
+                method::<Query>(link, QUERY_INTERFACE)(link, &IID_PROPERTY_STORE, &mut store),
+            )?;
+            let value = PropVariant(VT_LPWSTR, 0, 0, 0, id.as_ptr(), 0);
+            let done = check(
+                "SetValue",
+                method::<SetValue>(store, SET_VALUE)(store, &AUMID_KEY, &value),
+            )
+            .and_then(|()| check("Commit", method::<Commit>(store, COMMIT)(store)));
+            method::<Release>(store, RELEASE)(store);
+            done
         }
 
         pub fn add(title: &str, target: &Path, working_dir: &Path) -> Result<String, String> {
@@ -670,6 +716,16 @@ mod win {
                             "SetWorkingDirectory",
                             method::<Set>(link, SET_WORKING_DIRECTORY)(link, dir.as_ptr()),
                         )?;
+                        // The window's AppUserModelID, so the taskbar files the
+                        // window under this shortcut (its name and icon), and a
+                        // pin of it opens the app — not under "Electron".
+                        // Best effort: the app sets it too, at its next start.
+                        let id = crate::format::app_user_model_id(title);
+                        if !id.is_empty() {
+                            if let Err(e) = set_id(link, &wide(&id)) {
+                                eprintln!("aio SFX: the shortcut has no AppUserModelID: {e}");
+                            }
+                        }
                         let mut file = std::ptr::null_mut();
                         check(
                             "QueryInterface",

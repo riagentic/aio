@@ -130,6 +130,12 @@ Deno.test({
     const appUrl = `${base}/?token=${KEY}`;
 
     // ── the server: aio's own, with every request line written down ──
+    // A page to land on: an app with no UI entry answers `/` 503 in dev as
+    // in prod (the headless-build refusal), and the client would stop there.
+    await Deno.writeTextFile(
+      join(dir, "App.tsx"),
+      `export default function App() {\n  return <div>pinned</div>;\n}\n`,
+    );
     await Deno.writeTextFile(
       join(dir, "server.ts"),
       `import { aio, cell } from "${

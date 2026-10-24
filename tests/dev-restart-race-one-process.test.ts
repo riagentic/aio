@@ -126,10 +126,15 @@ await aio.run({ cells: [c], appId: "dr", persist: false, client: "server-only" }
     return now.find((p) => !before.has(p))!;
   };
   /** The processes once the slow child has booted (or been refused). */
+  // Until ONE is left, up to a minute: under a full Windows suite the losing
+  // child was still booting ~10 s past its slow start, before it could meet
+  // the winner's lock and its supervisor step aside. Ends at the first look
+  // that finds one, so a fast box waits no longer than before.
   const settled = async () => {
     await sleep(SLOW_CHILD_MS + 1_000);
     let last = await procs(entry);
-    for (let i = 0; i < 40 && last.length > 1; i++) {
+    const until = Date.now() + 60_000;
+    while (last.length > 1 && Date.now() < until) {
       await sleep(250);
       last = await procs(entry);
     }
@@ -230,7 +235,9 @@ Deno.test({
         | { pid: number }
         | null;
       assertEquals(held?.pid, child, `the slot names ${held?.pid}`);
-      const r = await w.am("restart", "--json");
+      // The same wait as the start above: 10 s (the default) was not enough
+      // for the relaunched app to answer under a full Windows suite.
+      const r = await w.am("restart", "--json", "--wait=60");
       assertEquals(r.code, 0, r.out);
       const left = await w.settled();
       assertEquals(left.length, 1, `processes left: ${left} (${r.out})`);

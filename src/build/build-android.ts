@@ -16,6 +16,7 @@ import {
   findGradle,
   findJdk,
   GRADLE_MAX_JDK,
+  GRADLE_MIN_JDK,
   gradlewPath,
   type JdkResult,
   misplacedIconHint,
@@ -116,20 +117,26 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   if (!jdk.home) {
     console.error(
       `${NO} no usable JDK found — Android builds need a real JDK ` +
-        `(compiles Java), version 17-${GRADLE_MAX_JDK}`,
+        `(compiles Java), version ${GRADLE_MIN_JDK}-${GRADLE_MAX_JDK}`,
     );
     if (jdk.newestFound > GRADLE_MAX_JDK) {
       console.error(
         `  found JDK ${jdk.newestFound}, but the pinned Gradle (8.14.3) can't ` +
           `run on JDK ${GRADLE_MAX_JDK + 1}+ yet - install a supported one:`,
       );
+    } else if (jdk.newestFound > 0) {
+      console.error(
+        `  found JDK ${jdk.newestFound}, but the Android Gradle plugin needs ` +
+          `JDK ${GRADLE_MIN_JDK}+ - install a supported one:`,
+      );
     } else {
       console.error("  a JRE is not enough (no compiler). install a full JDK:");
     }
     console.error("    - Debian/Ubuntu: sudo apt install openjdk-21-jdk");
     console.error("    - macOS:         brew install openjdk@21");
+    console.error("    - Windows:       winget install Microsoft.OpenJDK.21");
     console.error(
-      `    - or set JAVA_HOME to a JDK 17-${GRADLE_MAX_JDK} that compiles`,
+      `    - or set JAVA_HOME to a JDK ${GRADLE_MIN_JDK}-${GRADLE_MAX_JDK} that compiles`,
     );
     Deno.exit(1);
   }
@@ -175,18 +182,11 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   const applicationId = androidApplicationId(label, cfg.androidApplicationId);
   if (!applicationId) {
     console.error(
-      cfg.androidApplicationId !== undefined
-        ? `${NO} android.applicationId ${
-          JSON.stringify(cfg.androidApplicationId)
-        } is not a valid Android package name — it needs at least two ` +
-          `dot-separated segments, each starting with a letter ` +
-          `(e.g. "com.example.wallet")`
-        : `${NO} APK name "${label}" produces invalid applicationId — must start with a letter`,
+      `${NO} ${_applicationIdRefusal(label, cfg.androidApplicationId)}`,
     );
     Deno.exit(1);
   }
   const appNameKotlin = _appNameKotlin(appTitle ?? binaryName);
-  const appNameXml = _appNameXml(appTitle ?? binaryName);
 
   // Check for user icon — from THE app-dir decider (cfg.appDir)
   const { icon: iconPath, misplaced: misplacedIcon } = await resolveAppIcon(
@@ -207,7 +207,6 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     `version ${appVersion.name} (versionCode ${appVersion.code})`,
   );
 
-  const xmlFiles = new Set(["app/src/main/AndroidManifest.xml"]);
   const templateFiles = [
     "app/build.gradle.kts",
     "build.gradle.kts",
@@ -225,7 +224,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
       "{{APPLICATION_ID}}": applicationId,
       "{{VERSION_CODE}}": String(appVersion.code),
       "{{VERSION_NAME}}": appVersion.name,
-      "{{APP_NAME}}": xmlFiles.has(f) ? appNameXml : appNameKotlin,
+      "{{APP_NAME}}": _appNameFor(f, appTitle ?? binaryName, binaryName),
       "{{ICON_ATTR}}": 'android:icon="@mipmap/ic_launcher"',
       "{{CLEARTEXT_ATTR}}": _cleartextAttr(serverOpts),
       "{{TALKS_TO_SERVER}}": String(talksToServer(serverOpts)),
@@ -234,6 +233,13 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
       // the manifest's declaration and the WebView's refusal message.
       "{{CAMERA_PERMISSION}}": _cameraPermission(cfg.androidCamera),
       "{{CAMERA_DECLARED}}": String(cfg.androidCamera === true),
+      // ONE list for deep links, spent in both halves: the manifest's
+      // filters and the activity that hands the link to the page.
+      "{{DEEP_LINK_FILTERS}}": _deepLinkFilters(cfg.androidSchemes ?? []),
+      "{{DEEP_LINK_ATTR}}": (cfg.androidSchemes ?? []).length
+        ? 'android:launchMode="singleTask"'
+        : "",
+      "{{DEEP_LINKS}}": String((cfg.androidSchemes ?? []).length > 0),
       "{{APP_THEME}}": splash
         ? SPLASH_THEME
         : _appTheme(cfg.androidColorScheme),
@@ -308,7 +314,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     if (doRemote) {
       await _writeConnectPage(
         assetsDir,
-        appNameXml,
+        appTitle ?? binaryName,
         cfg.bakedServer,
         "android",
         cfg.strictPin,
@@ -448,6 +454,59 @@ export function _androidRelease(
     aab: o.aab === true,
     ...(secretWarning ? { secretWarning } : {}),
   };
+}
+
+/** What deno.json's `android` and `build.android` say that no build reads,
+ *  checked on EVERY build (build-config.ts) — warnings, never refusals, so a
+ *  desktop build that passed still passes. A misspelt key (`"Camera": true`,
+ *  `"keystor"`) was ignored silently, and an `android.applicationId` Android
+ *  rejects waited for the one target that reads it. Pure. */
+export function _androidConfigWarnings(config: unknown): string[] {
+  const c = config as
+    | { android?: unknown; build?: { android?: unknown } }
+    | null
+    | undefined;
+  const out: string[] = [];
+  const unknownKeys = (at: string, v: unknown, keys: string[]) => {
+    if (v === undefined) return;
+    if (!v || typeof v !== "object" || Array.isArray(v)) {
+      out.push(`deno.json ${at} must be an object — it is ignored`);
+      return;
+    }
+    for (const k of Object.keys(v)) {
+      if (!keys.includes(k) && !(at === "build.android" && /pass/i.test(k))) {
+        out.push(
+          `deno.json ${at}.${k} is not a key aio reads — the keys are ` +
+            `${keys.join(", ")}`,
+        );
+      }
+    }
+  };
+  unknownKeys("android", c?.android, [
+    "applicationId",
+    "camera",
+    "colorScheme",
+    "schemes",
+  ]);
+  unknownKeys("build.android", c?.build?.android, [
+    "strict",
+    "keystore",
+    "keyAlias",
+    "aab",
+  ]);
+  const id = (c?.android as { applicationId?: unknown } | undefined)
+    ?.applicationId;
+  if (
+    id !== undefined && (typeof id !== "string" || !isValidApplicationId(id))
+  ) {
+    out.push(
+      `deno.json android.applicationId ${JSON.stringify(id)} is not a valid ` +
+        `Android package name — it needs at least two dot-separated ` +
+        `segments, each starting with a letter (e.g. "com.example.wallet"); ` +
+        `an Android build refuses it`,
+    );
+  }
+  return out;
 }
 
 /** The user's release keystore, as the environment (first) or deno.json
@@ -705,6 +764,23 @@ export function _cameraPermission(camera: boolean | undefined): string {
     '  <uses-feature android:name="android.hardware.camera.any" android:required="false" />';
 }
 
+/** The activity's intent filters for deno.json `android.schemes` — one per
+ *  scheme, VIEW + BROWSABLE, so a `myapp://…` link in a browser or another
+ *  app opens this one; nothing without schemes. With any, the activity is
+ *  `singleTask` (`{{DEEP_LINK_ATTR}}`): a link that arrives while the app
+ *  runs reaches the page already open (`onNewIntent`) instead of starting a
+ *  second copy of it inside the sender's task. Pure. */
+export function _deepLinkFilters(schemes: readonly string[]): string {
+  return schemes.map((s) =>
+    `<intent-filter>\n` +
+    `        <action android:name="android.intent.action.VIEW" />\n` +
+    `        <category android:name="android.intent.category.DEFAULT" />\n` +
+    `        <category android:name="android.intent.category.BROWSABLE" />\n` +
+    `        <data android:scheme="${s}" />\n` +
+    `      </intent-filter>`
+  ).join("\n      ");
+}
+
 /** THE decider for "this APK's app lives on a server" — a dev build or a
  *  client. It drives BOTH the manifest's cleartext attribute and the WebView's
  *  navigation rule (`TALKS_TO_SERVER` in MainActivity.kt). The navigation rule
@@ -765,7 +841,10 @@ async function _overlay(root: string, androidDir: string): Promise<string[]> {
 
 export async function _writeConnectPage(
   assetsDir: string,
-  appNameXml: string,
+  /** The app's title as written — HTML-escaped here. Each caller once passed
+   *  its own platform spelling (the manifest's resource escaping put a stray
+   *  `\` before a leading `?`/`@` and doubled every backslash in the tab). */
+  appName: string,
   /** deno.json `build.server` — the address this APK was built to talk to.
    *  Prefilled and auto-connected on first launch, because an installed client
    *  asking its user to type a server the build already recorded is the gap
@@ -788,7 +867,7 @@ ${htmlOpen()}
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${appNameXml}</title>
+  <title>${htmlText(appName)}</title>
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
     body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1a2e;color:#e0e0e0;display:flex;align-items:center;justify-content:center;height:100vh}
@@ -902,8 +981,10 @@ ${
       if(strict&&clear(new URL(bases[i]))){err.textContent='Refused (build.strictPin): pairing over plain http hands the server\\'s key to anyone on the same network. Pair over https.';return}
       ask({base:bases[i],pin:pin}).then(function(r){
         if(r.key)go(bases[i]+'/?token='+encodeURIComponent(r.key));
+        else if(r.final)err.textContent='Pairing failed: '+r.error;
         else if(r.status===401)err.textContent='Invalid or expired pairing code — a code works once, for a few minutes. Run am pair on the server for a new one.';
         else if(r.status===429)err.textContent='Too many wrong codes from this device — wait a minute, then pair with a new code.';
+        else if(r.status&&r.error)err.textContent='Pairing failed: '+r.error;
         else if(r.status)err.textContent='Pairing failed: '+bases[i]+' answered HTTP '+r.status+' — is it a keyed aio server?';
         else if(i+1<bases.length)pair(bases,pin,i+1);
         else err.textContent='Pairing failed: '+r.error+(strict?' (build.strictPin: tried over https only)':'');
@@ -970,11 +1051,21 @@ export async function _readRunOptions(
   cfg: Pick<BuildConfig, "root" | "configEntry">,
   shell: "apk" | "web" = "apk",
 ): Promise<{ ui: ProbedRunOptions["ui"]; script: string }> {
+  // A hand-built config may name no entry: nothing to scan, as before.
+  if (!cfg.configEntry) return { ui: {}, script: "" };
   let src: string;
   try {
     src = await Deno.readTextFile(join(cfg.root, cfg.configEntry));
-  } catch {
-    // aio-ok: no readable entry → nothing to scan; the bundle step owns that error.
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+    // The page never runs the entry, so a missing one builds — but its
+    // aio.run() options (ui.theme, …) are silently not baked in.
+    warn(
+      `the entry ${cfg.configEntry} does not exist — no aio.run() options ` +
+        `are baked into this ${shell === "web" ? "web app" : "APK"}`,
+      `deno.json "entry" names it (src/app.ts when it names none)`,
+      `point deno.json "entry" at the module that calls aio.run()`,
+    );
     return { ui: {}, script: "" };
   }
   // An entry that passes nothing has nothing to bake: it is not run.
@@ -1283,6 +1374,33 @@ export function _appNameXml(title: string): string {
     .replace(/"/g, "&quot;");
 }
 
+/** Text for an HTML element: control characters dropped, `& < > "` escaped.
+ *  Pure. */
+function htmlText(s: string): string {
+  return s
+    // deno-lint-ignore no-control-regex
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** `{{APP_NAME}}` as each generated file must spell it: the manifest's
+ *  label resource, a Kotlin string, and — in `settings.gradle.kts` — the
+ *  GRADLE project name, which Gradle refuses outright for a
+ *  `/ \ : < > " ? * |` in it: a title like "Notes: Work" failed every
+ *  Android build at settings.gradle.kts line 1. That name is never shown to
+ *  anyone, so it is the binary name (a slug). Pure. @internal */
+export function _appNameFor(
+  file: string,
+  title: string,
+  binaryName: string,
+): string {
+  if (file === "app/src/main/AndroidManifest.xml") return _appNameXml(title);
+  return file === "settings.gradle.kts" ? binaryName : _appNameKotlin(title);
+}
+
 /** Fill a generated project file's `{{TOKEN}}`s.
  *
  *  EVERY replacement is a FUNCTION, not a string, and that is the whole point
@@ -1361,6 +1479,22 @@ export function androidApplicationId(
   const sanitized = label.replace(/[^a-z0-9]/g, "");
   if (!sanitized || !/^[a-z]/.test(sanitized)) return null;
   return `app.aio.${sanitized}`;
+}
+
+/** Why {@link androidApplicationId} made no id — and, for a derived one
+ *  (an app named "3D Viewer" → `3dviewer`), the key that fixes it. Pure. */
+export function _applicationIdRefusal(
+  label: string,
+  explicit?: string,
+): string {
+  return explicit !== undefined
+    ? `android.applicationId ${JSON.stringify(explicit)} is not a valid ` +
+      `Android package name — it needs at least two dot-separated segments, ` +
+      `each starting with a letter (e.g. "com.example.wallet")`
+    : `APK name "${label}" produces invalid applicationId app.aio.` +
+      `${label.replace(/[^a-z0-9]/g, "")} — a segment must start with a ` +
+      `letter. Name the app's id yourself: deno.json "android": ` +
+      `{ "applicationId": "com.example.app" }`;
 }
 
 /** The applicationId a placed APK was built with, from its file name — for

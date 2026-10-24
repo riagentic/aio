@@ -45,6 +45,7 @@ import {
   type SsrRender,
 } from "./ssr-render.ts";
 import { attrNameOf, escapeAttr, escapeHtml } from "./ssr-utils.ts";
+import { _assertAttrName } from "./prop-write.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import { firstTime } from "../protocol/said-once.ts";
 
@@ -217,14 +218,28 @@ function _merge(entries: Iterable<HeadInput>): Merged {
     // that carries it are the same name (see `_htmlAttrs`).
     for (const t of e.meta ?? []) {
       const attrs = _htmlAttrs(t);
+      _assertNames(attrs, "meta");
       tags.set(_tagKey("meta", attrs), { kind: "meta", attrs });
     }
     for (const t of e.link ?? []) {
       const attrs = _htmlAttrs(t);
+      _assertNames(attrs, "link");
       tags.set(_tagKey("link", attrs), { kind: "link", attrs });
     }
   }
   return { title, tags: [...tags.values()] };
+}
+
+/** Refuse a tag attribute name no document can hold — on BOTH sides, as the
+ *  element writers do (`_assertAttrName`). `collectHead()` pasted the key into
+ *  its markup verbatim, so a tag built by spreading data
+ *  (`{ ...og, "x onload=alert(1)//": 1 }`) shipped a live handler from the
+ *  server, where the browser's `setAttribute` throws for the same key. */
+function _assertNames(attrs: HeadTag, kind: "meta" | "link"): void {
+  for (const [k, v] of Object.entries(attrs)) {
+    // An omitted attribute (`undefined`/`false`) is written by neither side.
+    if (v !== undefined && v !== false) _assertAttrName(k, kind);
+  }
 }
 
 /** Write the merged head to the live document. Replaces every tag this

@@ -38,11 +38,19 @@ export const WRITE_QUEUE_WARN = 64;
  *  link, megabytes of them may not. */
 export const WS_BUFFER_HIGH_WATER = 4 * 1024 * 1024;
 
-/** The UDS half — a peer whose write queue is not draining. */
-export const udsWriteBacklog = degraded("uds:write-backlog");
+/** The UDS half — a peer whose write queue is not draining. One failure is
+ *  the verdict (`after: 1`): it is only recorded once a whole
+ *  `WRITE_STALL_MS` passed with no write completing, so it is never a burst. */
+export const udsWriteBacklog = degraded("uds:write-backlog", { after: 1 });
 
 /** The WS half — a peer whose socket buffer is not draining. Skipping its
  *  rounds is not silent: a skipped round is a LOST round, so the client is
  *  marked `needsFull` and the next round it is eligible for carries whole
  *  state rather than a patch that assumes the skipped ones landed. */
 export const wsWriteBacklog = degraded("ws:write-backlog");
+
+/** How long a UDS connection may sit over `WRITE_QUEUE_WARN` with NO write
+ *  completing before it is called stalled. Depth alone is a burst detector,
+ *  not a stall detector: 200 calls answered back-to-back queue 200 frames
+ *  for a peer that is reading every one of them. */
+export const WRITE_STALL_MS = 500;

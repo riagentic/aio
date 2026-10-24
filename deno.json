@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.24-beta",
+  "version": "1.0.25-beta",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -131,6 +131,7 @@
     "test:webkit": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_WEBKIT_E2E=1 deno test -A --no-check=remote tests/webkit-ios-route-e2e.test.ts",
     "test:wine": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_WINE_E2E=1 deno test -A --no-check=remote tests/wine-pipe-e2e.test.ts",
     "lab": "deno run -A scripts/lab.ts",
+    "test:gpu-lab": "AIO_APPS_DIR=$INIT_CWD/.aio-test-home AIO_GPU_LAB=1 deno test -A --no-check=remote tests/gpu-lab-window-bounds.test.ts",
     "lab:browser": "deno run -A scripts/lab.ts --browser",
     "lab:old-deno": "deno run -A scripts/lab.ts --old-deno --scenario=install",
     "lab:github": "deno run -A scripts/lab.ts --source=github --browser",

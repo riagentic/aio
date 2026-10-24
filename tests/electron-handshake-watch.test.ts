@@ -106,7 +106,7 @@ class BrowserWindow {
 module.exports = {
   app: {
     on: (e, fn) => { if (e === 'ready') setTimeout(fn, 0); },
-    getPath: () => process.env.AIO_STUB_DIR, commandLine: { appendSwitch() {} },
+    getPath: () => process.env.AIO_STUB_DIR, commandLine: { appendSwitch() {} }, setDesktopName() {},
     quit() {}, name: 'stub',
     whenReady: () => new Promise((r) => setTimeout(r, 0)),
   },

@@ -518,7 +518,22 @@ export function useForm<T extends Record<string, unknown>>(
         // Read eagerly and both go away: the body subscribes, and the props
         // carry the snapshot the render actually described.
         value: f.value,
-        onInput: (e: Event) => f.set((e.target as HTMLInputElement).value),
+        // A NUMBER field bound to a number control stays a number. `.value`
+        // is a string, so `age: { initial: 41 }` held "42" after one
+        // keystroke while `T` (and `bindInput`) said number — `age + 1` was
+        // "421", silently. A number/range control only ever holds a numeric
+        // string or "" (the browser sanitizes), so the parse is exact; an
+        // empty field is NaN, as `valueAsNumber` answers. Any other control (a
+        // text input) keeps the string it has always stored.
+        onInput: (e: Event) => {
+          const el = e.target as HTMLInputElement;
+          f.set(
+            typeof config[name].initial === "number" &&
+              (el.type === "number" || el.type === "range")
+              ? (el.value === "" ? NaN : Number(el.value))
+              : el.value,
+          );
+        },
         onBlur: () => f.touch(),
       };
     },

@@ -6,9 +6,11 @@ what is OPEN, what is DECIDED (so it is not argued again), and measured facts.
 
 ## 1. State
 
-- Current release: 1.0.23-beta (2026-10-21, tagged and pushed). After it: hunt
-  rounds 1–4 (2026-10-21), committed locally, not released; what is left is
-  under "Owner decides" and "Known and small".
+- Current release: 1.0.24-beta (2026-10-23, tagged and pushed). After it: hunt
+  rounds 1–8 (2026-10-24, `245468e3d..f22a1aeeb`), committed locally, then the
+  round-9 fix-all wave and the NVIDIA X-crash fix (feedback/critical.md), not
+  released; the upgrade guide draft is `untracked/hunt-1025/UPGRADE-DRAFT.md`.
+  What is left is under "Owner decides" and "Known and small".
 - Surface frozen since 2026-09-04: additive only, bugfix-only through beta.
   1.0.0 = a date, once releases have been boring for several weeks — the owner's
   call.
@@ -68,6 +70,20 @@ Refused (one line each; long form in `feedback/refused.md`):
   ICU/Deno trimming. (A shared Electron runtime, once refused here, is built in
   1.0.21: `build.electronRuntime: "online"`, which `am create` writes; no key
   stays `"offline"`; the default flip is v2.)
+- `POST /__aio/pair` spends the failure budget before checking the PIN, so a
+  correct PIN from an over-budget address gets 429 ("no fresh allowance of PIN
+  guesses"). Kept.
+- Electron zero-port (IPC): no silent-socket watchdog in the main process
+  (verdict 2026-10-20). Its socket is local (Unix socket / named pipe): a dead
+  server is always a close, and silence is a busy or stopped server, which a
+  reconnect does not fix.
+- Dev: one extra restart at the first dev start for an app whose start rewrites
+  a cell file with the same bytes — `savedWhileStarting` needs a previous
+  start's stamp (`src/server/dev-restart.ts`).
+- Code health: the six hotspot files were cut by pure moves (old paths
+  re-export); `_runPhases` (~200 KB) and `_buildTestUI` (~100 KB) close over
+  their outer locals, so a further cut is a rewrite. 289 silent-catch blocks,
+  ratcheted.
 - Field asks (2026-10-18): `aiol --safe-fix` rewriting an `onInit` `setTimeout`
   to `app.dispatch` (measured unsafe: dispatch runs before later cells'
   `onInit`) · `s.$progress(done, total)` (`s.$commit(minMs)` is it) ·
@@ -94,8 +110,12 @@ Design limits, documented where a user meets them:
 - Handler-less `value`/`checked` controls keep typed text (1.0 behaviour, one
   decider `_keepsTyped`, `tests/air-keeps-typed.test.ts`); the hint names
   `defaultValue`.
-- Update patches cover single-file installs only (`binary`, AppImage). Zip,
-  one-click `.exe`, `.app` and Android installs download whole.
+- Update patches cover single-file installs (`binary`, AppImage) and `.zip`
+  installs (file by file, a tree patch). `.app` and Android installs download
+  whole.
+- A worker cell in a sync burn keeps an embedded/testServer host alive past
+  close: Deno's `Worker.terminate()` does not stop a busy loop (measured:
+  terminate at 313 ms, the process exited at 20 s).
 
 The CA decision (2026-09-21): no intermediate; two locks instead.
 
@@ -122,52 +142,63 @@ or is small and known.
 
 ### Owner decides (each has a recommendation)
 
-- [ ] A refused kit Checkbox/Switch/Input keeps the user's pick (memo-skipped;
+- [x] A refused kit Checkbox/Switch/Input keeps the user's pick (memo-skipped;
       Select/RadioGroup/raw input snap back on the next render). Two snap-back
-      designs broke typing (normalizing handlers, async handlers, late writes,
-      radio groups, IME) — 2026-10-23. Recommended: leave it; document that a
-      refusal should also write state (e.g. re-set the old value) to force a
-      render.
+      designs broke typing — 2026-10-23. Left as is; documented in
+      `docs/ui/kit.md` (Inputs): record each refusal in a field the component
+      reads (a counter) — re-setting the old value is no change (measured
+      2026-10-24).
 
-- [ ] Field reports' asks, additive, not built (2026-10-23): a softer neutral
+- [x] Field reports' asks, additive, not built (2026-10-23): a softer neutral
       tint for warm/magenta hues (an opt-in; `hue` in deno.json fixes the report
       today); a read-only prod probe behind the pairing key (`am state --prod`).
-      Recommended: both wait for a second report.
+      Recommended: both wait for a second report. Built 2026-10-24 (R9):
+      deno.json `"neutral": "soft"`; `am state --prod` (`GET /__aio/view`,
+      tests/prod-view-probe.test.ts).
 
-- [ ] `POST /__aio/pair` spends the failure budget before checking the PIN, so a
-      correct PIN from an over-budget address gets 429 (deliberate: "no fresh
-      allowance of PIN guesses"). Recommended: keep it.
+- [x] German layout: Ctrl+Shift+7 types `/`, so an app that binds BOTH `ctrl+/`
+      and `ctrl+shift+/` fires both. Left as is; documented in
+      `docs/basics/cookbook.md` §17 (bind one of the two).
 
-- [ ] German layout: Ctrl+Shift+7 types `/`, so an app that binds BOTH `ctrl+/`
-      and `ctrl+shift+/` fires both. Narrowing it takes away a binding that
-      works today. Recommended: leave it, document it in the chord docs. Found
-      2026-10-22 (hunt round 4).
-
-- [ ] An `effect` that writes a signal it read in the same run does not run
+- [x] An `effect` that writes a signal it read in the same run does not run
       again (a queue-draining effect stops after one item; Preact/Solid re-run
       it). Re-running would make today's `log.set([...log(), x()])` effects loop
       to the 1000-iteration guard — a break. Recommended: an opt-in
       (`effect(fn, { rerunOnSelfWrite: true })`), the default flip to v2. Found
-      in hunt round 2, 2026-10-21 (`src/state/signal.ts` `effect`).
+      in hunt round 2, 2026-10-21 (`src/state/signal.ts` `effect`). Built
+      2026-10-24 (R9) as the opt-in `effect(fn, { rerunOnSelfWrite: true })`;
+      the default flip is in v2.md.
 
-- [ ] Pairing by code trusts the first certificate it sees. The sound answer is
+- [x] Pairing by code trusts the first certificate it sees. The sound answer is
       a PAKE; designed and probed (CPace on X25519, no new dependency), not
       built: three hand-written implementations, one in Kotlin, and a device
       test (v2 §65). Opt-in in 1.0.x, or v2? Recommended: opt-in, after 1.0.20.
-- [ ] Update patches for directory installs: keep the installed release's
-      archive as the base (one archive of disk per install, 100–190 MB for an
-      Electron zip; ~80 lines client, 15 publisher, half a day with a VM run).
-      `.app.tar.gz` cannot patch without a format change. AppImage and zip patch
-      sizes are not measured.
-- [ ] Android deep links as `android.schemes` (~150 lines + a page event; when
-      an app asks).
-- [ ] `am create` does not write `build.android.strict`: the 1.0.19 linter
+      Built 2026-10-24 (R9) as the opt-in `pairing: { pake: true }`
+      (src/server/cpace.ts, Kotlin client, tests/pairing-pake.test.ts; refused
+      under --expose without TLS).
+- [x] Update patches for directory installs — built as a TREE patch, not a kept
+      archive (measured 2026-10-24, an Electron app, one UI line changed,
+      Windows zip 174.8 MB): a zstd patch of the whole zip is 33.3 MB (the
+      deflated server binary differs from its first change on) and would cost
+      one archive of disk per install; the one-click `.exe` (tar.zstd) 8.0 MB;
+      the two changed files patched one by one 27 KB, no extra disk. An Electron
+      bump inside an offline package (44.1.0 → 44.1.1, electron binary 227.5 MB)
+      is a 38.2 MB per-file patch. `.app.tar.gz` stays whole (sealed bundle).
+      `src/server/updates-tree.ts`, `tests/updates-tree-patch.test.ts`,
+      docs/deploy/updates.md.
+- [x] Android deep links as `android.schemes` (~150 lines + a page event; when
+      an app asks). Built 2026-10-24 (R9): `build.android.schemes` + the page
+      event.
+- [x] `am create` does not write `build.android.strict`: the 1.0.19 linter
       reports any unknown `build.*` key as an ERROR, so a scaffold pinned back
       would fail `deno task lint`. That holds for every future scaffold key
-      (`build.electronRuntime`, written since 1.0.21, included).
-- [ ] `scripts/proof.ts --require-current` as a release gate (report-only
+      (`build.electronRuntime`, written since 1.0.21, included). Fixed
+      2026-10-24 (R9): `am pin <older>` drops the `build.*` keys the older aiol
+      does not know (src/am/am-cmd-pin.ts).
+- [x] `scripts/proof.ts --require-current` as a release gate (report-only
       today). A Windows CI job (YAML in the audit worker's notes; cannot be
-      proven without a push; `continue-on-error`).
+      proven without a push; `continue-on-error`). Done 2026-10-24 (R9):
+      `check:release --require-proof`; ci.yml `test-windows`.
 - [ ] Windows: taskbar pins after the AppUserModelID change (pin a 1.0.19
       window, upgrade, start: does the window join the pin?). `am kill --json`
       there: 1.0.20 adds `"how"`, asks first (app exit 0, was 1), and can say
@@ -183,7 +214,15 @@ or is small and known.
 
 ### Known and small
 
-- [ ] Small, seen in hunt round 7 (2026-10-23): a controlled field holds back a
+- [ ] macOS service loop (`LAUNCHD_LOOP`, src/build/build-service.ts, since
+      1.0.20): a `launchctl bootout` SIGTERM that lands while the loop is
+      starting the app can miss it (the trap passes the stop to `$p` before
+      `p=$!` ran) — the app runs on and launchd SIGKILLs it at ExitTimeOut, no
+      clean stop. Seen once as a hung suite under load (2026-10-25). A
+      resend-until-gone loop (`term()` + `[ -n "$stop" ] && term "$p" &` after
+      the fork) was tried and not yet proven; needs a deterministic test that
+      lands the signal in that window before it ships.
+- [x] Small, seen in hunt round 7 (2026-10-23): a controlled field holds back a
       refusal while an OLDER call to the same method is still out (the in-flight
       start numbers retire oldest-first, `pending-calls.ts`; retiring by the
       call's own number needs every `bumpPending` caller to carry it); sync
@@ -194,9 +233,9 @@ or is small and known.
       payload is not an object; a raw `<input>` with a stable debounced handler
       is reverted by an unrelated parent render (the kit keeps the edit); a
       throw inside Portal content is invisible to SSR, so hydrate discards the
-      server page with a divergence warning (the client ends correct); a worker
-      cell in a sync burn keeps an embedded/testServer host alive past close
-      (Deno cannot interrupt it).
+      server page with a divergence warning (the client ends correct). All five
+      fixed 2026-10-24 (R9: B2 `_staleEcho`, B3 Portal — 1.0.24 SSR output kept,
+      B4 own start number, B5 one low-backlog memo, B6 skipIfRunning).
 
 - [ ] Typing gaps that `check:api` calls breaking (2026-10-23): `BootHandle`'s
       `serverState` is optional (callers write `h.serverState!(…)`); a
@@ -205,31 +244,35 @@ or is small and known.
       (TS2604; `h(ErrorBoundary, …)` works); signup's `verificationSent` is
       typed `true` but answers `false` when the mail failed.
 
-- [ ] Small, seen in hunt round 5 (2026-10-23): `resolveUser` returning a
-      malformed user (a string, no role, empty id) is accepted silently;
-      `onConnect` gets `{ id, role, expiresAt }`, the other hooks
-      `{ id, role }`; aiol counts `return [s.a] = v` as a read.
+- [x] Small, seen in hunt round 5 (2026-10-23): `onConnect` gets
+      `{ id, role, expiresAt }`, the other hooks `{ id, role }`; aiol counts
+      `return [s.a] = v` as a read. (A malformed `resolveUser` user is said and
+      refused since: `src/server/server-auth.ts` `_userShapeFault`.) Fixed
+      2026-10-24 (R9: B7 every hook gets `expiresAt`; B12 aiol destructure).
 
-- [ ] Flake, not reproduced (2026-10-22, 14 shards squeezed onto 4 cores):
+- [x] Flake, not reproduced (2026-10-22, 14 shards squeezed onto 4 cores):
       `tests/am-replay-version-stamp.test.ts` — `cmdReplay` hit `Deno.exit(1)`
       after a BUDGET_REDUCE (21 ms) on the replayed `w:add`, and the next test
       in the file inherited the exit code. 0 of 12 under 6 busy loops on the
       same 4 cores. Next time: stub `Deno.exit` in that test to print which exit
-      fired and the reply that caused it.
+      fired and the reply that caused it. Done 2026-10-24 (R9 B16):
+      tests/am-capture-helper.ts stubs `Deno.exit` and names the reply.
 
-- [ ] `am restore` of a `dbPath` app killed between staging and the swap leaves
+- [x] `am restore` of a `dbPath` app killed between staging and the swap leaves
       `<dbPath>.am-restore-<stamp>/` that nothing sweeps or names (the `data/`
       side has `markIncomplete`; this side has none). And a refusal for an
       unwritable target may already have made its parent folders. Found
-      2026-10-21 (hunt round 2).
+      2026-10-21 (hunt round 2). Fixed 2026-10-24 (R9 B8,
+      src/am/am-cmd-data.ts).
 
-- [ ] `am start --app=<id no app has>` in a project of COMPONENTS still starts
+- [x] `am start --app=<id no app has>` in a project of COMPONENTS still starts
       the default entry under that id (a second lock, a `--fresh` home named
       after it). A single-entry project refuses it since hunt round 1; for
       components the id the default entry runs as is the runtime's rule, which
-      am would have to copy. Found 2026-10-21, pre-existing.
+      am would have to copy. Found 2026-10-21, pre-existing. Fixed 2026-10-24
+      (R9 B9, src/am/am-cmd-start.ts).
 
-- [ ] Boot: an Error built under a call site deep in one long function costs in
+- [x] Boot: an Error built under a call site deep in one long function costs in
       step with that depth — V8 scans each frame's position table up to its call
       site; `Error.stackTraceLimit` does not change it (measured 2026-10-19: 2
       µs → 12 → 58 → 237 µs for a 10 / 1k / 5k / 20k-statement function on the
@@ -245,23 +288,23 @@ or is small and known.
       `recoverInterruptedBuild` +7 — ~45 µs a boot. `createServer`: 7 → 10 µs at
       the watcher start (6 NotFounds, dev only, ≤ 19 µs). `startLifecycle`:
       nothing measurable. Left is regrouping many small statements that bind
-      what later ones use — not mechanical.
-- [ ] Electron zero-port (IPC): no silent-socket watchdog in the main process,
-      by verdict (2026-10-20): its socket is LOCAL (Unix socket / named pipe) —
-      a dead server is always a close — and the server answers nothing it could
-      count (`ping` gets no reply on UDS); silence there is a busy or stopped
-      server, which a reconnect does not fix. The page watchdog is proven on the
-      Android WebView and by fake-socket tests, not in a desktop browser with a
-      black-holed socket; the 20-beat ceiling is unit-tested only.
+      what later ones use — not mechanical. Decided 2026-10-24: stays. ~45 µs a
+      boot is 0.6 % of the 7 ms library-mode bench boot and far less of a real
+      one; the fix is reordering ~650 lines of bindings by hand, a regression
+      risk for no visible gain.
+- [ ] Electron zero-port (IPC) page watchdog (main-process watchdog: decided,
+      §3): proven on the Android WebView and by fake-socket tests, not in a
+      desktop browser with a black-holed socket; the 20-beat ceiling is
+      unit-tested only.
 - [ ] Discovery: the real-socket test assumes a machine hears its own broadcast
       (true on Linux; not run elsewhere).
-- [ ] Dev: one extra restart at dev start for an app whose start rewrites a cell
-      file with the same bytes. `am start` cannot tell "Deno still fetching"
-      from "fetched, app silent" (it reads the last log line). A local-socket
-      listener re-created on the same path right after `shutdown()` in one
-      process was unreachable for 10 s once (test only, not traced).
-- [ ] Sync: a row left by a kill under 1.0.9–1.0.18 still stops the start; the
-      message names the file and a tool-free repair. `am sync drop-op` refused.
+- [x] `am start` cannot tell "Deno still fetching" from "fetched, app silent"
+      (it reads the last log line). A local-socket listener re-created on the
+      same path right after `shutdown()` in one process was unreachable for 10 s
+      once (test only, not traced). Done 2026-10-24: B10 (R9,
+      src/am/am-cmd-start.ts); the socket: a client that cannot connect logs the
+      path's state per dial and warns after 5 s (`UNREACHABLE_SAY_MS`,
+      tests/cli-uds-unreachable-says-why.test.ts) — the next sighting says why.
 - [ ] Android lane: 15/15 on API 35 and API 36, twice each (2026-10-12, load
       11–35). Its taps are not retried. Record the proof at release:
       `AIO_PROOF_RECORD=1 deno task test:android`; WebKit lane green 3/3
@@ -281,11 +324,12 @@ or is small and known.
       tunnelling may also touch
       `record(previous, …, { is: identity(current), moving })` in
       `updates-apply.ts` (folders did not tunnel when measured).
-- [ ] Tests: the chaos fuzz's draws depend on timer order (a `FUZZ_SEED` replay
+- [x] Tests: the chaos fuzz's draws depend on timer order (a `FUZZ_SEED` replay
       is not exact under load); `auth-db-busy-timeout`'s measured unit is not
       confirmed at macOS background priority; own-HOME for test browsers is
-      Linux only; `tests/electron-handshake-watch.test.ts` now runs in the
-      serialized real-window lane.
+      Linux only. Done 2026-10-24 (R9): FakeTime (B19); auth-db-busy 5/5 under
+      `taskpolicy -b`; own-HOME measured on Windows (`browserHomeEnv`) and macOS
+      (said once).
 - [ ] Windows stub: a cut-short download now says "this download is incomplete,
       download it again" (rebuilt and re-pinned 2026-10-20); not yet seen on
       w11pro — open a truncated `.exe` there.
@@ -293,39 +337,24 @@ or is small and known.
       real checkout reuse the mutant's binary); the first `am state` after a
       1.0.19 app boots timed out once (8 s, fixture without `node_modules`). The
       stub's message box for a shortcut it cannot add was never seen.
-- [ ] macOS: Spotlight lists every kept version of an installed app;
-      `pruneVersions` knows one `current`, not a running version (guarded in
-      `run.sh` for the bundle only). Full runs on the Mac keep their ssh session
-      open: a detached job cannot send LAN broadcasts there.
-- [ ] Code health (audit): six hotspots cut by pure moves (old path re-exports
-      all; `check:api` unchanged; same module load order):
-      `single-instance-lock.ts` 185 → 59 KB (+ `lock-dir` 53, `lock-file` 44,
-      `lock-owner` 24, `process-liveness` 11; App ID in `app-id.ts`);
-      `am-cmd-process.ts` 190 → 25 KB (+ `am-launch` 16, `am-cmd-start` 71,
-      `am-cmd-stop` 35, `am-cmd-status` 28, `am-cmd-kill` 22); `ui-test.ts` 205
-      → 35 KB (+ `ui-test-names` 19, `-wire` 24, `-env` 24, `-build` 108 — one
-      function, `_buildTestUI`, ~100 KB of it); `build-compile.ts` 157 → 29 KB
-      (+ `build-dev-exclude` 83, `build-includes` 28, `build-service` 22);
-      `aio-boot.ts` 174 → 78 KB (+ `boot-sync-replay` 42, `boot-restore` 23,
-      `boot-scrub` 22, `boot-db-bindings` 13); `aio.ts` 280 → 218 KB (+
-      `aio-run-entry` 48, `aio-run-config` 18). Left: `_runPhases` (~200 KB) and
-      `_buildTestUI` (~100 KB) — their nested parts close over the outer locals,
-      so a further cut is a rewrite, not a move. 289 silent-catch blocks,
-      ratcheted.
-- [ ] Deno: a close for cause can lose its code to an unread frame
-      (`_closeAfterRead` narrows it; the reconnect's 401 ends it right);
-      `node:dgram` reports EHOSTUNREACH and EPERM as `UNKNOWN` (a VPN firewall's
-      refused multicast send reads `send UNKNOWN`; Node says EPERM).
+- [ ] macOS: Spotlight lists every kept version of an installed app (`.noindex`
+      + `mdimport` are in `src/server/updates-apply.ts`; verify on the Mac);
+      `pruneVersions` keeps the running version since (`previous`,
+      `src/server/install-record.ts`). Full runs on the Mac keep their ssh
+      session open: a detached job cannot send LAN broadcasts there.
 - [ ] Page size: message prose is a fifth of the download; codes would need a
       source convention at ~300 sites (v2 §68).
-- [ ] Refusals: every harness refusal carries a stable `code` (table in
+- [x] Refusals: every harness refusal carries a stable `code` (table in
       docs/debugging/errors.md, pinned by tests/harness-refusal-codes.test.ts).
       Open: the one-line summary HEAD — prepending a line changes each message's
       first line, which an app's test may match; most first lines already are
-      the summary, `DEAD_BOOT`'s is one long line (field report).
-- [ ] Upgrade test breakage: the shapes that go red are a list in
+      the summary, `DEAD_BOOT`'s is one long line (field report). Done
+      2026-10-24 (R9 F12): `errorSummary(err)` beside `errorCode` — the message
+      is untouched.
+- [x] Upgrade test breakage: the shapes that go red are a list in
       `docs/upgrade/README.md`; no machine-readable index or
-      `am migrate --tests` (field report).
+      `am migrate --tests` (field report). Built 2026-10-24 (R9 F15):
+      `am migrate --tests` (src/am/am-test-breakage.ts).
 
 - [ ] Android, from the real-phone round (Saga, Android 14, 2026-10-13):
   - A font-scale or display-size change reloads the page (committed state kept,
@@ -360,15 +389,19 @@ or is small and known.
       owner's: a code-signing certificate, or a false-positive report to
       Microsoft.
 
-- [ ] Field wish (network, 2026-10-17), deferred: `ZoomPan` for `aio/ui` (wheel
-      zoom at cursor, drag pan, fit).
+- [x] Field wish (network, 2026-10-17), deferred: `ZoomPan` for `aio/ui` (wheel
+      zoom at cursor, drag pan, fit). Built 2026-10-24 (R9 F1):
+      src/ui/zoom-pan.ts.
 
-- [ ] Web target: every deploy re-downloads every asset-mount file (the cache is
-      per build). A content-addressed asset cache was tried (2026-10-18, 4
-      review rounds, each found a 🔴: activation race with the 1.0.20 adopt,
-      quota mid-adopt, integrity fetch buffering whole bodies, `#fragment`
-      misses, byte-rewriting hosts) and reverted to the 1.0.20 design plus an
-      ordered, capped install. Needs a design written and attacked BEFORE code.
+- [x] Web target: an unchanged asset-mount file is no longer downloaded per
+      deploy (2026-10-24, design reviewed first). The install copies it from the
+      replaced build's cache when the STORED bytes hash to the new digest — no
+      fill, adopt, markers or shared cache (what the 4 reverted rounds of
+      2026-10-18 each broke); the fetch handler is unchanged; activate drops
+      only caches made before its own (creation order, measured across restarts
+      in Chromium and WebKitGTK). Cap 16 MiB (two 60 MB in-memory copies: WebKit
+      web process ~620 MB). Not run on the iPad: not attached to the Mac on
+      2026-10-24.
 
 - [ ] Windows suite, seen 2 of 4 full runs (2026-10-19), never alone: the first
       test of `tests/updates-patch.test.ts` fails "An async call to left was
@@ -483,6 +516,10 @@ or is small and known.
   `notarytool submit --wait`, `stapler staple`, then re-make the `.app.tar.gz`
   and `.dmg`. Unproven here: no certificate. Authenticode for the Windows `.exe`
   likewise.
+- File two Deno issues (needs the account): a close for cause can lose its code
+  to an unread frame (`_closeAfterRead` narrows it; the reconnect's 401 ends it
+  right); `node:dgram` reports EHOSTUNREACH and EPERM as `UNKNOWN` (a VPN
+  firewall's refused multicast send reads `send UNKNOWN`; Node says EPERM).
 - File the Immer issue (needs the account): `shallowCopy` uses `slice`, V8's
   slow path on a frozen array. Text and a repro that ran are ready (round-3
   notes, `immer-issue.md`).
@@ -564,5 +601,5 @@ in-process and over the real hop, identical state required):
 - a login: form → server → cookie → reload → sign-out in one test —
   `tests/auth-login-joined.test.tsx` (`testPageFetch`).
 
-Still not crossed: the page's socket after a login (cell state there comes from
-`testUI`'s in-process cells; e2e only).
+- the page's socket after a login: the cell state that socket delivers —
+  `tests/auth-login-socket-view.test.tsx` (2026-10-24).

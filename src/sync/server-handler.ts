@@ -207,6 +207,12 @@ export const SYNC_SOCKET_HIGH_WATER = 4 * 1024 * 1024;
 const DRAIN_STALL_MS = 5000;
 const DRAIN_MIN_RATE = 256 * 1024;
 
+/** Per socket over the mark: its lowest backlog seen and when. ONE memo for
+ *  every writer to a socket: `sendTo` and `broadcastRaw` kept one each, so a
+ *  rarely-sending writer judged a peer by a low it saw long ago and closed
+ *  (1013) a peer that had drained in between through the other writer. */
+const _drainLows = new WeakMap<object, { bytes: number; at: number }>();
+
 /** THE drain rule for a writer that cannot skip a frame — `sendTo` here and
  *  the WS broadcaster's `broadcastRaw` (server-broadcast.ts), the two writers
  *  to the same sockets. "Over the mark" alone is not "not draining": a
@@ -215,15 +221,15 @@ const DRAIN_MIN_RATE = 256 * 1024;
  *  the mark, a peer is not draining only when its backlog has grown a whole
  *  mark above its lowest point (the memory bound), or has not reached a new
  *  low for longer than a reader at `DRAIN_MIN_RATE` would need — a peer that
- *  reads nothing hits one of the two within bounded bytes and time. `lows` is
- *  the caller's per-socket memo; true → close the socket.
+ *  reads nothing hits one of the two within bounded bytes and time. The memo
+ *  is shared by every writer (`_drainLows`); true → close the socket.
  *  @internal */
 export function notDraining(
-  lows: WeakMap<object, { bytes: number; at: number }>,
   socket: object,
   held: number,
   now: number,
 ): boolean {
+  const lows = _drainLows;
   if (held <= SYNC_SOCKET_HIGH_WATER) {
     lows.delete(socket);
     return false;
@@ -322,8 +328,6 @@ export function createServerSyncHandler(
    *  one is being answered right now (see `sendTo`). */
   const _asked = new WeakSet<WebSocket>();
   const _firstAnswer = new WeakSet<WebSocket>();
-  /** Per socket over the mark: its lowest backlog seen — see `notDraining`. */
-  const _lows = new WeakMap<object, { bytes: number; at: number }>();
   /** Send ONE already-encoded frame to ONE client, and never lose the reason
    *  it did not arrive.
    *
@@ -368,7 +372,7 @@ export function createServerSyncHandler(
     const held = (socket as { bufferedAmount?: number }).bufferedAmount ?? 0;
     if (
       !gone && !_firstAnswer.has(socket) &&
-      notDraining(_lows, socket, held, Date.now())
+      notDraining(socket, held, Date.now())
     ) {
       deps.log.warn(
         `[sync:server] closing a sync client that is not draining its socket ` +

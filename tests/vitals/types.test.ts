@@ -4,7 +4,6 @@ import type {
   Gauge,
   LoopVitals,
   RenderBudget,
-  RenderFreezeReport,
   VitalAlert,
   VitalHint,
   VitalsConfig,
@@ -91,16 +90,6 @@ Deno.test("types: ClientLiveness shape compiles", () => {
     status: "healthy",
   };
   assertEquals(_cl.status, "healthy");
-});
-
-Deno.test("types: RenderFreezeReport shape compiles", () => {
-  const _rfr: RenderFreezeReport = {
-    frozenFor: 3000,
-    lastActionBefore: "click",
-    lastCell: "ui",
-    unprocessedDeltas: 5,
-  };
-  assertEquals(_rfr.frozenFor, 3000);
 });
 
 Deno.test("types: VitalStatus union covers all values", () => {

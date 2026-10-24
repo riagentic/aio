@@ -55,3 +55,44 @@ Deno.test("crash handler: a null-prototype rejection reason is logged and guarde
     globalThis.removeEventListener("error", absorb);
   }
 });
+
+Deno.test("crash handler: a plain-object reason is logged by its fields, and a failed checkpoint is said", () => {
+  const logged: string[] = [];
+  const said: string[] = [];
+  const realError = console.error;
+  console.error = (...a: unknown[]) => void said.push(a.join(" "));
+  const uninstall = installCrashHandler({
+    log: { error: (msg) => logged.push(msg) },
+    getHealthData: () => ({ cells: {} }),
+    writeEmergencyCheckpoint: () => {
+      throw new Error("disk full");
+    },
+    guardRejections: false,
+  });
+  try {
+    const reason = { code: "E_QUOTA", detail: "over" };
+    const promise = Promise.reject(reason);
+    promise.catch(() => {});
+    globalThis.dispatchEvent(
+      new PromiseRejectionEvent("unhandledrejection", {
+        promise,
+        reason,
+        cancelable: true,
+      }),
+    );
+    assert(
+      logged.some((m) => m.includes(`{"code":"E_QUOTA","detail":"over"}`)),
+      `the reason must be readable, not [object Object]: ${logged}`,
+    );
+    assert(
+      said.some((m) =>
+        m.includes("emergency checkpoint FAILED") &&
+        m.includes("disk full")
+      ),
+      `a checkpoint that failed must be said: ${JSON.stringify(said)}`,
+    );
+  } finally {
+    console.error = realError;
+    uninstall();
+  }
+});

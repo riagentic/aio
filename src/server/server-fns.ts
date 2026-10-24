@@ -24,7 +24,11 @@ import { errorFields } from "../protocol/envelope.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
 import type { AioErrorCode } from "../diagnostics/error.ts";
-import type { Remote } from "../protocol/protocol-types.ts";
+import {
+  type Remote,
+  type ServerFnOptions,
+  serverFnTimeoutMs,
+} from "../protocol/protocol-types.ts";
 import { _onPauseCallDeadlines } from "../state/cell-impl.ts";
 
 /** Every network serverFn call in flight, as the way to tell ITS caller
@@ -244,7 +248,20 @@ export function _useServerFnClientDoor(door: ClientDoor): () => void {
 /** Resolve a namespace to its typed callable map. Server-side impl: returns
  *  the REAL functions (lazy proxy, so import order never matters); the
  *  browser build swaps in the WS proxy with the same signature. */
-export function serverFn<T extends FnMap>(ns: string): Remote<T> {
+export function serverFn<T extends FnMap>(ns: string): Remote<T>;
+/** `serverFn(ns)` with options — `{ timeoutMs }` sets how long a CLIENT call
+ *  waits for the server's reply (default 30 000); server code calls the
+ *  function directly. */
+export function serverFn<T extends FnMap>(
+  ns: string,
+  opts: ServerFnOptions,
+): Remote<T>;
+export function serverFn<T extends FnMap>(
+  ns: string,
+  opts?: ServerFnOptions,
+): Remote<T> {
+  // Refused here as in the browser: the same call must not boot on one side.
+  serverFnTimeoutMs(ns, opts);
   return new Proxy({} as Remote<T>, {
     get(_t, prop) {
       if (typeof prop !== "string") return undefined;
@@ -398,6 +415,7 @@ function notRegistered(ns: string, name: string): {
 }
 
 /** Test isolation. */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetServerFns(): void {
   _registry.clear();
   _access.clear();

@@ -208,8 +208,13 @@ drift is reconciled at boot instead:
   has no value to put in the existing rows and aio will not invent one
 - a column the database has that you **no longer declare** is reported, and
   throws only when it is `NOT NULL` without a default (every `INSERT` would fail
-  on it). Dropping it, and its data, stays your call:
-  `ALTER TABLE t DROP COLUMN c`
+  on it). Its stored values still load into each row's field of that name, but a
+  change to that field is never written back. Dropping it, and its data, stays
+  your call: `ALTER TABLE t DROP COLUMN c`
+- a **constraint** you changed on an existing column — `unique`, or `nullable`
+  either way — is reported: the stored constraint is the one in effect (a
+  `unique: true` added later enforces nothing until you `CREATE UNIQUE INDEX`
+  it; your own unique index counts)
 - a column you **retyped** (`text()` → `integer()`) is reported: SQLite keeps
   the stored type, so values coerce to it (`42` is stored and restored as
   `"42.0"`) until you migrate the column yourself
@@ -303,8 +308,9 @@ whole table in cell state (RAM, and a full re-broadcast per write) or
 hand-wiring a recompute after every mutation and forgetting one.
 
 `reactiveDB(db)` wraps a `DB` so `select()` returns a **live query** instead: it
-re-runs and notifies whenever a write _through the same wrapper_ touches one of
-the tables it reads.
+re-runs and notifies whenever a write _through the same handle_ touches one of
+the tables it reads — through the wrapper, through the handle it wraps
+(`app.db.execute()` beside it), or by the framework persisting a bound table.
 
 ```ts
 import { createDB, reactiveDB } from "aio/server";
@@ -356,20 +362,22 @@ Transactions:
 | Form                           | Invalidates                                                |
 | ------------------------------ | ---------------------------------------------------------- |
 | `transaction([{ sql, … }, …])` | exactly the tables written by the statements, after commit |
-| `transaction(async (tx) => …)` | **every** live query, after commit                         |
+| `transaction(async (tx) => …)` | exactly the tables its `tx.execute`/`tx.query` wrote       |
 
-The callback form cannot see the SQL up front, so it invalidates everything — a
-correct superset that never misses a change, at the cost of re-running views a
-transaction did not touch. Prefer the array form when the statement list is
-known.
+A `DB` that is not a `createDB()` handle (a custom implementation or a test
+fake) has no write feed: there the callback form invalidates **every** live
+query after commit — a correct superset — and only writes through the wrapper
+are seen.
 
 ### The seam
 
-**Writes must go through the wrapper.** A write issued against the underlying
-`DB` — or by another process against the same file — is invisible to the change
-feed, and the live query keeps serving the rows it last read. That is the seam,
-not a bug: the wrapper knows only what passes through it. Wrap once and use the
-wrapper everywhere, or call `refresh()` yourself after an outside write.
+**Writes must go through the same handle.** A `createDB()` handle announces
+every write it commits, so the wrapper sees writes made beside it — including
+the framework's own writes to a bound table, so a live query over a bound table
+follows the state it mirrors. A write by **another process**, or through
+**another `createDB()` handle** on the same file, is invisible to that feed, and
+the live query keeps serving the rows it last read. That is the seam: call
+`refresh()` yourself after an outside write.
 
 ### `ReactiveQuery`
 
@@ -542,6 +550,11 @@ that runs after the callback finished may open its own transaction.
 Inside the callback, use `tx.execute` / `tx.query`. A `db.execute()` (or a
 writing `db.query()`) there queues behind the transaction it is called from, so
 awaiting it never finishes — aio warns once when it sees one.
+
+The callback owns the transaction: return to commit, throw to roll back.
+`tx.execute("COMMIT")` (or `BEGIN` / `END` / `ROLLBACK`) is refused by name — it
+would end the transaction early and leave the rest of the callback in
+autocommit. `SAVEPOINT` / `RELEASE` / `ROLLBACK TO` nest inside it and run.
 
 **Isolation with `readers: 0` (the default).** Every `query()` runs on the
 writer connection, so a `db.query()` from _outside_ the callback, issued while

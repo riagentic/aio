@@ -209,9 +209,10 @@ Deno.test("dirty tracking: 10k rows, one changed row — measured, with a genero
         hinted.toFixed(3)
       } ms per window (was 3.3 ms clone + 3.4 ms diff)`,
   );
-  // Ceilings ~10x above what a slow CI box measures; the point is the ORDER:
-  // the old path was ~7 ms here, and 2 ms would already be a regression.
-  assert(full < 2, `full identity pass took ${full} ms`);
+  // The point is the ORDER: the old path was ~7 ms here. A real 6-core
+  // laptop at below-normal priority measured 2.08 ms for the full pass, so
+  // the ceiling sits under the old path, not 10x above a fast box.
+  assert(full < 4, `full identity pass took ${full} ms`);
   assert(hinted < 0.5, `hinted pass took ${hinted} ms`);
   assert(hinted < full, "the hinted pass must not cost more than the full one");
 });

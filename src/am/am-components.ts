@@ -245,16 +245,6 @@ export function componentByLabel(
   return components.find((c) => c.label === label) ?? null;
 }
 
-/** THE project root for component resolution — the directory holding the
- *  deno.json `am` was invoked against, resolved from the cwd by the SAME rule
- *  every other `am` verb uses (`projectRoot`). `Deno.cwd()` here was a second
- *  decider: from a subdirectory it saw no deno.json, so `am start <label>`
- *  refused with "this project declares no components" — a false fact — while
- *  `am status` resolved the project and saw them. */
-export function componentsRoot(): string {
-  return projectRoot();
-}
-
 /** What a process command (`start`/`stop`/`restart`/`status`) should act on.
  *
  *  `single` is the ordinary repo AND the explicitly-named case: `--app` and
@@ -277,7 +267,12 @@ export function processPlan(
   opts: { app?: string; port?: number; entry?: string },
   root = projectRoot(),
 ): ProcessPlan {
-  const label = args.find((a) => !a.startsWith("-"));
+  // Only words BEFORE a bare `--` can name a component: everything after it is
+  // the app's own (`am start -- seed.json`), and reading it as a label refused
+  // the documented way to hand an app its arguments.
+  const end = args.indexOf("--");
+  const label = (end === -1 ? args : args.slice(0, end))
+    .find((a) => !a.startsWith("-"));
   // An explicit identity is an explicit target. Asking for both a component and
   // an --app is a contradiction, not a refinement, so it is refused rather than
   // resolved by a precedence rule nobody would remember (the same rule

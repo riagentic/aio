@@ -294,7 +294,13 @@ export function runOptionsProbeSource(
   entryUrl: string,
   nonce: string,
 ): string {
-  return `import { aio } from ${JSON.stringify(aioSpecifier)};
+  // The probe runs from stdin, whose base is the app root, not the entry: a
+  // relative specifier (`../lib/aio.ts`) is the entry's, so it is resolved
+  // against the entry here.
+  const spec = /^\.\.?\//.test(aioSpecifier)
+    ? new URL(aioSpecifier, entryUrl).href
+    : aioSpecifier;
+  return `import { aio } from ${JSON.stringify(spec)};
 const TOP = ${JSON.stringify(BAKED_TOP)}, UI = ${JSON.stringify(BAKED_UI)};
 const say = (v) => {
   console.log(${

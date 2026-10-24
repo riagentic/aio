@@ -20,6 +20,7 @@ import { DbFileGoneError, guardDeletedDbFile } from "./sqlite-file-guard.ts";
 import { createHash } from "node:crypto";
 import type { AioUser } from "./aio-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 const DEFAULT_TTL_MS = 30 * 24 * 3_600_000; // 30 days
 
@@ -248,7 +249,9 @@ export function openSessionStore(
       try {
         l();
       } catch (e) {
-        log.warn(`[aio] auth: session revocation listener failed — ${e}`);
+        log.warn(
+          `[aio] auth: session revocation listener failed — ${thrownText(e)}`,
+        );
       }
     }
   };

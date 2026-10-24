@@ -35,10 +35,9 @@ Deno.test("parseCli: --port with an unusable value is refused, not ignored", () 
 });
 
 Deno.test("parseCli: --port=0 means 'pick one'; --port=70000 is refused", () => {
-  // 0 is the universal spelling for an ephemeral port and is what aio does by
-  // default, so it is accepted and leaves `port` unset. Strictness that
-  // refused it would be a regression, not a fix.
-  assertEquals(parseCli(["--port=0"]).port, undefined);
+  // 0 is the universal spelling for an ephemeral port: accepted, and kept as
+  // 0 so it outranks AIO_PORT / aio.run({ port }) (cli-port-zero-outranks).
+  assertEquals(parseCli(["--port=0"]).port, 0);
   assertThrows(() => parseCli(["--port=70000"]), Error, "--port=70000");
   assertThrows(() => parseCli(["--port=-1"]), Error, "--port=-1");
 });

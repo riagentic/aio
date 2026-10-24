@@ -3,7 +3,7 @@
 // "Correct but slower" fails the gate (scripts/check-bench.ts) like a broken
 // test. Each timing metric: warmup + N iterations → median + p95.
 // Run: deno task bench   (writes bench-results.json, gitignored)
-//      deno task bench -- --only=boot,patch-10k   (those metrics alone,
+//      deno task bench --only=boot,patch-10k   (those metrics alone,
 //      merged into the existing results — the gate's retry of a red metric)
 // Gate: deno task check:bench  (compares against scripts/bench-baselines.json)
 import { aio, cell, composeCells } from "../mod.ts";
@@ -70,8 +70,12 @@ const gc: (() => void) | undefined = (globalThis as { gc?: () => void }).gc
 const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const baseDir = await Deno.makeTempDir({ prefix: "aio-bench-" });
+/** The bench's own flag, declared so aio.run()'s CLI parse accepts it with or
+ *  without a bare `--` before it. */
+const appFlags = ["--only="];
 const bootOpts = {
   client: "server-only",
+  appFlags,
   persist: false,
   libraryMode: true,
   baseDir,
@@ -476,6 +480,7 @@ for (const mode of ["NORMAL", "FULL"] as const) {
     cells: [notes],
     appId: `bench-${name}`,
     client: "server-only",
+    appFlags,
     libraryMode: true,
     baseDir,
     appDir: `${baseDir}/${name}`,
@@ -644,6 +649,141 @@ if (want("update-patch-64m", "update-patch-64m-rss")) {
   record("update-patch-64m-rss", "MiB", rss);
 }
 
+// ── 12. compressed responses: the encoded-body memo ───────────────────
+// `encodeResponse` compresses a 200 once and serves the memo after: a
+// response the HANDLER tagged (the static path's ETag) is admitted at once,
+// an untagged one on its SECOND sighting (one-off API replies must not evict
+// the bundle). A hit is a lookup plus a byte compare of the source; a miss is
+// a whole gzip. Both shapes, so a broken admission (every request
+// re-compressed) reads as a ~20x step, not as noise.
+if (want("encode-hit-256k", "encode-admit-64k")) {
+  const { encodeResponse, _clearEncodedCache } = await import(
+    "../src/server/http-encoding.ts"
+  );
+  const req = () =>
+    new Request("http://bench/app.js", {
+      headers: { "Accept-Encoding": "gzip" },
+    });
+  // Varied, seeded text: a repeated line gzips in a blink and a miss would
+  // read like a hit (measured: 0.17 against 0.08 ms at 64 KB; this text,
+  // 0.64 ms).
+  const text = (n: number, salt: number) => {
+    let seed = salt * 7919 + 7;
+    const word = () =>
+      ((seed = (seed * 1103515245 + 12345) % 2147483648) % 1e9).toString(36);
+    let s = "";
+    while (s.length < n) {
+      s += `export const ${word()} = "${word()}${word()}";\n`;
+    }
+    return new TextEncoder().encode(s.slice(0, n));
+  };
+  const serve = async (body: Uint8Array, headers: HeadersInit) => {
+    const r = await encodeResponse(
+      req(),
+      new Response(body.slice(), { status: 200, headers }),
+    );
+    if (r.headers.get("Content-Encoding") !== "gzip") {
+      throw new Error("encode bench: the response was not compressed");
+    }
+    await r.arrayBuffer();
+  };
+  _clearEncodedCache();
+  if (want("encode-hit-256k")) {
+    const js = text(256 * 1024, 0);
+    const h = {
+      "Content-Type": "application/javascript",
+      ETag: '"bench-app-js"',
+    };
+    const samples: number[] = [];
+    for (let i = 0; i < 220; i++) { // first 20 are warmup (the 1st compresses)
+      const t0 = performance.now();
+      await serve(js, h);
+      if (i >= 20) samples.push(performance.now() - t0);
+    }
+    record("encode-hit-256k", "ms/op", samples);
+  }
+  if (want("encode-admit-64k")) {
+    // A fresh untagged body each sample, served three times: the timed third
+    // must be a memo hit (seen twice = admitted).
+    const h = { "Content-Type": "application/json" };
+    const samples: number[] = [];
+    for (let i = 0; i < 120; i++) { // first 20 are warmup
+      const body = text(64 * 1024, i + 1);
+      await serve(body, h);
+      await serve(body, h);
+      const t0 = performance.now();
+      await serve(body, h);
+      if (i >= 20) samples.push(performance.now() - t0);
+    }
+    record("encode-admit-64k", "ms/op", samples);
+  }
+  _clearEncodedCache();
+}
+
+// ── 13. async writers and sync actions queued together ────────────────
+// `dispatch-async` awaits each call alone, so the drain never holds anything
+// behind an async method's first frame. Here one call's first frame queues N
+// async calls (each writes, awaits, writes) and N sync calls while the loop
+// is draining: every async body runs in the loop and leaves its first-frame
+// writes pending, and each lands AHEAD of the sync actions still queued
+// (`queue.splice(ahead++)` in dispatch.ts) — the busy-queue ordering path.
+if (want("dispatch-mixed-queue")) {
+  const N = 200;
+  // deno-lint-ignore prefer-const
+  let q: {
+    aw(): Promise<unknown>;
+    inc(): Promise<unknown>;
+    drive(): Promise<unknown>;
+  };
+  q = cell("bench-mixed", {
+    // Non-transactional, stated: a transactional `aw` would refuse its commit
+    // (another action changed `s.n` while it awaited) — the write-set path is
+    // the live one.
+    transaction: false,
+    state: { n: 0 },
+    methods: {
+      async aw(s) {
+        s.n += 1;
+        await null;
+        s.n += 1;
+      },
+      inc(s) {
+        s.n += 1;
+      },
+      async drive() {
+        const calls: Promise<unknown>[] = [];
+        for (let i = 0; i < N; i++) calls.push(q.aw(), q.inc());
+        await Promise.all(calls);
+      },
+    },
+  });
+  const app = await aio.run({
+    cells: [q as never],
+    appId: "bench-mixed",
+    ...bootOpts,
+  });
+  const n = () =>
+    (app.getState() as Record<string, { n: number }>)["bench-mixed"]!.n;
+  const samples: number[] = [];
+  for (let iter = 0; iter <= 10; iter++) { // iter=0 is warmup
+    const before = n();
+    const t0 = performance.now();
+    await q.drive();
+    const dt = performance.now() - t0;
+    // Every write must have LANDED — a lost one makes this a benchmark of a
+    // bug.
+    if (n() - before !== 3 * N) {
+      throw new Error(
+        `dispatch-mixed-queue: ${n() - before} of ${3 * N} writes landed`,
+      );
+    }
+    if (iter > 0) samples.push(dt / (2 * N));
+  }
+  await app.close();
+  _resetAioRuntime();
+  record("dispatch-mixed-queue", "ms/op", samples);
+}
+
 // ── report ────────────────────────────────────────────────────────────
 const fmt = (v: number) => v >= 100 ? v.toFixed(1) : v.toFixed(3);
 console.log(
@@ -658,12 +798,19 @@ for (const [name, m] of Object.entries(metrics)) {
   );
 }
 
-const resultsPath = new URL("../bench-results.json", import.meta.url);
+// AIO_BENCH_RESULTS: write elsewhere (a test must not touch the repo root).
+const resultsPath = Deno.env.get("AIO_BENCH_RESULTS") ??
+  new URL("../bench-results.json", import.meta.url);
 // `--only` replaces the metrics it measured and keeps the rest of the file.
+// No file yet (a first run with `--only`) keeps nothing.
 const kept: Record<string, Metric> = ONLY
-  ? (JSON.parse(await Deno.readTextFile(resultsPath)) as {
-    metrics: Record<string, Metric>;
-  }).metrics
+  ? await Deno.readTextFile(resultsPath).then(
+    (t) => (JSON.parse(t) as { metrics: Record<string, Metric> }).metrics,
+    (e) => {
+      if (e instanceof Deno.errors.NotFound) return {};
+      throw e;
+    },
+  )
   : {};
 const out = {
   meta: {

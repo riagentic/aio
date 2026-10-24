@@ -284,7 +284,7 @@ Deno.test("mac bundle: its minimum macOS is the higher of aio's floor and the bu
 function runTray(win: Record<string, unknown>) {
   const handlers: Record<string, () => void> = {};
   const app = { on: (ev: string, fn: () => void) => handlers[ev] = fn };
-  const ipcMain = { on: () => {} };
+  const ipcMain = { on: () => {}, handle: () => {} };
   const code = tmplTray(undefined, "null", "t");
   new Function("win", "app", "ipcMain", "require", "__aioQuitting", code)(
     win,

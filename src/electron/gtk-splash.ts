@@ -29,6 +29,28 @@ import type {
   GtkSplashOut,
 } from "./gtk-splash-worker.ts";
 
+/** libgtk, held open by this thread for good (see `gtkWorker`). */
+let gtkPin: Deno.DynamicLibrary<Record<string, never>> | null = null;
+
+/** Open libgtk on THIS thread for the process's life, once — null when it is
+ *  open, else why it could not be. GTK keeps threads and callbacks that run
+ *  libgtk's code after its window is gone. A terminated worker closes its
+ *  library handle, and with no other reference left that unmaps libgtk under
+ *  them: the process segfaults a moment after the splash closes (measured:
+ *  every desktop that loads no GTK module itself — `GTK3_MODULES` unset).
+ *  This handle, never closed, keeps libgtk mapped. Exported so the test
+ *  runner's preload can make the load the process's (tests/preload-ffi.ts). */
+export function pinGtk(): string | null {
+  try {
+    gtkPin ??= Deno.dlopen("libgtk-3.so.0", {});
+    return null;
+  } catch (e) {
+    return `libgtk-3.so.0 could not be opened (${
+      e instanceof Error ? e.message : e
+    })`;
+  }
+}
+
 /** How long GTK has to say whether it can draw. */
 export const GTK_INIT_MS = 5_000;
 
@@ -118,6 +140,9 @@ async function gtkWorker(initMs = GTK_INIT_MS): Promise<
     terminate(): void;
   } | { why: string }
 > {
+  // libgtk stays mapped for the process's life — see pinGtk.
+  const unpinned = pinGtk();
+  if (unpinned) return { why: unpinned };
   let w: Worker;
   try {
     w = new Worker(new URL("./gtk-splash-worker.ts", import.meta.url), {

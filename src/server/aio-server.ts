@@ -11,7 +11,12 @@ import {
   savedWhileStarting,
 } from "./dev-restart.ts";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
-import { _denoJsonMountsNote, _servedAssets, createServer } from "./server.ts";
+import {
+  _denoJsonMountsNote,
+  _runMounts,
+  _servedAssets,
+  createServer,
+} from "./server.ts";
 import { cdpPort, parseCli, VERSION } from "./aio-cli.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UiTheme } from "./aio-types.ts";
@@ -20,7 +25,7 @@ import { createAppPeerGate, createUDSListener, type UDSHandle } from "./uds.ts";
 import { hardenLocalPeer } from "./local-peer.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import { appDirs } from "./app-dirs.ts";
-import { declaredHue } from "../build/app-icon.ts";
+import { declaredThemeHue } from "../build/app-icon.ts";
 import { appDenoJson } from "./aio-run-helpers.ts";
 import type {
   CellPatchStrategy,
@@ -42,10 +47,22 @@ import {
   clientDegradedReport,
   degradedReport,
 } from "../diagnostics/degraded.ts";
-import { cellAccessAllowed } from "./server-auth.ts";
+import {
+  _shapeChecked,
+  armLocalControl,
+  cellAccessAllowed,
+  disarmLocalControl,
+} from "./server-auth.ts";
+import { skipHttpControl } from "./server-static.ts";
+import { provePeer } from "./peer-proof.ts";
 import { DESCRIBE_TYPE, describeFor } from "./peer-describe.ts";
 import type { Access } from "../state/cell-types.ts";
 import { createAioError } from "../diagnostics/error.ts";
+import {
+  createIconReplay,
+  type IconReplay,
+  isIconFrame,
+} from "./icon-replay.ts";
 import {
   _noteShortCall,
   noArgsRefusal,
@@ -93,6 +110,8 @@ export interface TransportConfig {
   security?: import("./security-config.ts").SecurityConfig;
   strictOrigin?: boolean;
   trustProxyHeader?: string;
+  /** `aio.run({ pairing })` — see `AioConfig.pairing`. */
+  pairing?: { pake?: boolean };
   syncIntervalMs?: number;
   /** Extra read-only DEV roots by URL prefix — see `AioConfig.serveDirs`. */
   serveDirs?: Record<string, string>;
@@ -113,6 +132,9 @@ export interface TransportConfig {
   ) => import("../state/cell-compose-types.ts").CellStatus[];
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
+  /** `aio.run({ localConnectHooks })` — the two hooks above also run for a
+   *  window on the local socket. */
+  localConnectHooks?: boolean;
   libraryMode?: boolean;
   /** `electron: { allowLocalPeers }` — the local-peer lockdown's opt-out,
    *  decided here, where the local doors are built. */
@@ -395,6 +417,34 @@ export function _noTlsWarning(
     `TLS-terminating proxy fronts this port. ${undo} for HTTPS.`;
 }
 
+/** `pairing: { pake: true }` on an app that serves no TLS — refused when
+ *  exposed (nothing to bind the exchange to), said when loopback-only (no
+ *  remote client pairs with it at all). null when it applies. Pure. */
+export function _pakeWithoutTls(
+  pake: boolean,
+  expose: boolean,
+  tls: boolean,
+): { refuse: boolean; text: string } | null {
+  if (!pake || tls) return null;
+  if (!expose) {
+    return {
+      refuse: false,
+      text: "pairing: { pake: true } — this app is not exposed, so no remote " +
+        "client pairs with it; PAKE pairing applies under --expose, which " +
+        "serves TLS",
+    };
+  }
+  return {
+    refuse: true,
+    text: "pairing: { pake: true } needs TLS: PAKE binds the pairing to the " +
+      "certificate the client sees, and with tls: false / --no-tls there is " +
+      "none — a relay passes the exchange through and reads the app key on " +
+      "the first plain-http connection. Drop tls: false / --no-tls (aio " +
+      "serves its own certificate under --expose), or serve one with " +
+      "tls: { cert, key } / --tls-cert= --tls-key=; or leave pairing.pake off.",
+  };
+}
+
 /** A cert pair that will not be used, said out loud.
  *
  *  The twin of {@linkcode _noTlsWarning}, and the reasoning is that function's
@@ -449,6 +499,21 @@ export function _unusedCertWarning(source: "flag" | "config"): string {
  *  another process must reach over TCP (a webhook receiver, a `curl` probe, a
  *  browser tab beside the window) is exactly the case where naming the port
  *  is the honest spelling. */
+/** `broadcastUi` for the zero-port shape that runs no HTTP server: the
+ *  socket's clients are all of them. Returns how many received `raw`.
+ *  @internal Exported for its test. */
+export function _udsOnlyBroadcastUi(
+  raw: string,
+  icons: IconReplay,
+  udsBroadcastRef: { fn: ((raw: string) => void) | null },
+  udsClientsRef: { fn: (() => number) | null },
+): number {
+  if (isIconFrame(raw)) icons.remember(raw);
+  const n = udsClientsRef.fn?.() ?? 0;
+  if (n > 0) udsBroadcastRef.fn?.(raw);
+  return n;
+}
+
 export function resolveZeroPort(i: {
   prod: boolean;
   localElectronUds: boolean;
@@ -620,7 +685,7 @@ async function setupTransportInner<S, A>(
     return _budgets.report();
   };
   const _wsUIState = (user?: AioUser) => getUIState(getState(), user);
-  const _udsUIState = () => getUIState(getState());
+  const _udsUIState = (user?: AioUser) => getUIState(getState(), user);
   _bindBudgetOwner(_wsUIState, _budgets);
   _bindBudgetOwner(_udsUIState, _budgets);
 
@@ -698,6 +763,17 @@ async function setupTransportInner<S, A>(
     }
   }
 
+  // `pairing: { pake: true }` binds the exchange to the certificate the
+  // client sees — with no TLS there is none, a relay passes the exchange
+  // through and reads the key on the first plain-http connect.
+  const pakeNoTls = _pakeWithoutTls(
+    config.pairing?.pake === true,
+    expose,
+    !!tlsCert,
+  );
+  if (pakeNoTls?.refuse) throw new Error(pakeNoTls.text);
+  if (pakeNoTls) log.info(pakeNoTls.text);
+
   const _fw = _firewallHint(Deno.build.os, expose, _isLocalhostAddr);
   if (_fw) log.info(_fw);
   // Once per process, and only where it can happen (Windows): the two
@@ -744,14 +820,19 @@ async function setupTransportInner<S, A>(
   // `createServer` reads them again and says what it refuses; with no HTTP
   // server (`skipHttp`) this read is the only one, and says it below.
   const mountRefusals: string[] = [];
-  const _mounts = _servedAssets(
+  const _runAssets = _runMounts(
+    "assets",
     config.assets,
+    (m) => mountRefusals.push(m),
+  );
+  const _mounts = _servedAssets(
+    _runAssets,
     baseDir,
     (m) => mountRefusals.push(m),
   );
   const mountCount = Object.keys(_mounts ?? {}).length;
   const _mountsNote = _denoJsonMountsNote(
-    config.assets,
+    _runAssets,
     _mounts,
     expose && !token && !users && !resolveUser && !sessionResolver &&
       !authFlows,
@@ -1052,12 +1133,60 @@ async function setupTransportInner<S, A>(
   // UDS server does not exist yet when the HTTP server's deps are built.
   const udsClientsRef: { fn: (() => number) | null } = { fn: null };
 
+  // What `appIcon()` set, for a window that connects later — one per app,
+  // read by both doors (icon-replay.ts).
+  const icons = createIconReplay((m) => log.warn("ws", m));
+  // The stop over either door: the HTTP handler's trojan deps, and the
+  // socket of an app with no HTTP server (`skipHttpControl`, below).
+  // libraryMode means aio is embedded (a test, a host process): tearing
+  // down is ours to do, exiting the process is not — the same rule the
+  // signal handlers below already follow.
+  //
+  // NOT libraryMode: this call ends the PROCESS, so every app in it goes
+  // down — including one that is still writing. Stop them all first
+  // (shutdownAllRuntimes), or `am stop app-a` silently truncates app-b's
+  // final snapshot.
+  //
+  // Either way the log says who asked, above the `stopped uptime=…`
+  // line that would otherwise stand alone.
+  const controlStop = (by: "am stop" | "takeover" = "am stop") => {
+    const why = `stop requested over the control API (${
+      by === "takeover" ? "takeover by a new launch" : "am stop"
+    })`;
+    if (!config.libraryMode) {
+      const code = _controlStopExitCode(
+        by,
+        Deno.env.get("AIO_SUPERVISED") === "1" &&
+          Deno.env.get("AIO_STOP_STAYS_DOWN") === "1",
+        isSupervisedChild(),
+      );
+      return stopProcess(
+        code,
+        code === 0
+          ? why
+          : `${why} — under a supervisor (AIO_STOP_STAYS_DOWN=1): ` +
+            `exiting with ${code} so it is not started again`,
+      );
+    }
+    log.info(`${why} — closing this app`);
+    return shutdown();
+  };
+  // No HTTP server, so `createServer` arms no stop credential: armed here,
+  // and dropped by the stub's shutdown, as `createServer`'s does.
+  if (skipHttp) armLocalControl({ appId, prod });
   const server: ServerHandle = skipHttp
     ? {
+      control: skipHttpControl(controlStop),
       broadcast: () => {},
       broadcastRaw: () => {},
       broadcastTT: () => {},
-      shutdown: async () => {},
+      // No HTTP server, so no broadcaster: every UI client is on the socket.
+      // Without this a packaged desktop app's `notify()` and `appIcon()`
+      // reached nobody ("no UI client is connected") with its window open.
+      broadcastUi: (raw) =>
+        _udsOnlyBroadcastUi(raw, icons, udsBroadcastRef, udsClientsRef),
+      iconReplay: () => icons.frames(),
+      shutdown: () => Promise.resolve(disarmLocalControl(appId)),
       clientCount: () => 0,
     }
     : _startServer();
@@ -1081,6 +1210,7 @@ async function setupTransportInner<S, A>(
       width: ui.width,
       height: ui.height,
       getUIState: _wsUIState,
+      iconReplay: icons,
       dispatch: dispatchNetwork,
       // The SERVER-origin path, for `am dispatch --as-server` — the operator
       // escape hatch for a cell whose `access` rule (correctly) refuses every
@@ -1115,6 +1245,10 @@ async function setupTransportInner<S, A>(
       key: tlsCert?.key,
       showStatus: ui.showStatus,
       uiEntry: ui.entry,
+      // The dev server a human runs answers a UI-less app's pages with the
+      // 503 prod gives; a programmatic one (libraryMode: tests, embedders)
+      // keeps the 1.0.24 shell and warns once (see `StaticDeps.headless503`).
+      headless503: !config.libraryMode,
       viewport: ui.viewport,
       headExtra: ui.head,
       chrome: ui.chrome,
@@ -1125,7 +1259,7 @@ async function setupTransportInner<S, A>(
       // The accent follows the app's IDENTITY, not its window title: a title
       // that changes with the route must not recolour the app mid-session.
       themeName: appId || title,
-      hue: declaredHue(appDenoJson()),
+      hue: declaredThemeHue(appDenoJson(), appId || title),
       renderBudget: config.renderBudget,
       wire: config.wire,
       syncCells: config._syncCellIds,
@@ -1145,6 +1279,7 @@ async function setupTransportInner<S, A>(
       operatorCert: !!tlsCert && !tlsCert.selfSigned,
       strictOrigin: config.strictOrigin,
       trustProxyHeader: config.trustProxyHeader,
+      pairingPake: config.pairing?.pake === true,
       syncIntervalMs: config.syncIntervalMs,
       cellPatchStrategies: config._cellPatchStrategies,
       cellFilterFields: config._cellFilterFields,
@@ -1292,39 +1427,8 @@ async function setupTransportInner<S, A>(
             sqlQuery: async (sql: string) => (await asyncDb!.query(sql)).rows,
           }
           : {}),
-        // libraryMode means aio is embedded (a test, a host process): tearing
-        // down is ours to do, exiting the process is not — the same rule the
-        // signal handlers below already follow.
-        //
-        // NOT libraryMode: this call ends the PROCESS, so every app in it goes
-        // down — including one that is still writing. Stop them all first
-        // (shutdownAllRuntimes), or `am stop app-a` silently truncates app-b's
-        // final snapshot.
-        //
-        // Either way the log says who asked, above the `stopped uptime=…`
-        // line that would otherwise stand alone.
-        shutdown: (by = "am stop") => {
-          const why = `stop requested over the control API (${
-            by === "takeover" ? "takeover by a new launch" : "am stop"
-          })`;
-          if (!config.libraryMode) {
-            const code = _controlStopExitCode(
-              by,
-              Deno.env.get("AIO_SUPERVISED") === "1" &&
-                Deno.env.get("AIO_STOP_STAYS_DOWN") === "1",
-              isSupervisedChild(),
-            );
-            return stopProcess(
-              code,
-              code === 0
-                ? why
-                : `${why} — under a supervisor (AIO_STOP_STAYS_DOWN=1): ` +
-                  `exiting with ${code} so it is not started again`,
-            );
-          }
-          log.info(`${why} — closing this app`);
-          return shutdown();
-        },
+        // The stop `am stop` and a takeover ask for: `controlStop`, above.
+        shutdown: controlStop,
         startedAt: Date.now(),
         udsClients: () =>
           udsRef.current
@@ -1383,12 +1487,15 @@ async function setupTransportInner<S, A>(
   }
   for (const line of lockdown.warn) log.warn(line);
   let uds: UDSHandle | null = null;
+  const udsPeerResolver = deps.resolvePeer
+    ? _shapeChecked("resolvePeer", deps.resolvePeer)
+    : undefined;
   if (transport === "uds") {
     const socketPath = resolveSocketPath(appId);
     uds = createUDSListener(
       socketPath,
       _udsUIState,
-      (action) => dispatchNetwork(action),
+      (action, user) => dispatchNetwork(action, user),
       (msg: string) => log.debug(msg),
       clientCounter,
       syncHandler,
@@ -1422,6 +1529,25 @@ async function setupTransportInner<S, A>(
       // required gate refuses everyone, and the client's reconnect loop covers
       // the gap.
       peerGate ? { required: true, gate: peerGate } : undefined,
+      // The WS path's connection hooks, for a desktop window too — opt-in
+      // (`localConnectHooks`): through 1.0.24 they never ran here, and an app
+      // written for that sees no extra connects by default.
+      config.localConnectHooks === true
+        ? { onConnect: config.onConnect, onDisconnect: config.onDisconnect }
+        : undefined,
+      // The per-client bandwidth alarm the WS broadcaster feeds.
+      vitalsSystem?.pressureMonitor ?? undefined,
+      // A `peer()` caller's identity hello: the TCP handshake's decider and
+      // `resolvePeer`, so `access` sees the same user on either door. No
+      // `resolvePeer`: proven or not, it is anonymous — as over TCP.
+      udsPeerResolver
+        ? async (proof) => {
+          const r = await provePeer(proof, appId, udsPeerResolver);
+          return r.ok ? { ok: true, user: r.user } : r;
+        }
+        : undefined,
+      // The icon `appIcon()` set before this window connected.
+      () => icons.frames(),
     );
     udsRef.current = uds;
     const u = uds;
@@ -1458,6 +1584,9 @@ async function setupTransportInner<S, A>(
       status: "started",
       ...(server.trojanPort ? { trojanPort: server.trojanPort } : {}),
       ...(uds ? { socketPath: uds.socketPath } : {}),
+      // Its HTTP door when that is a socket too: `peer()` reaches the blob
+      // store and proves an identity there (peer.ts).
+      ...(httpSocketPath ? { httpSocketPath } : {}),
       // An app with no TCP listener must not leave a port number in the lock
       // that reads like one: 0 is the honest answer, and `am` follows the
       // socket instead (a port-0 lock is valid — see readLock).

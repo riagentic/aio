@@ -8,18 +8,20 @@
 // `ui.X.value` report it as real. The DOM is never touched here: a debounced
 // store (`setTimeout(() => c.setQ(v), 300)`) and a plain-variable draft
 // (`value="" onInput={e => draft = …}`) are legitimate apps that a restore
-// would eat keystrokes from. Instead, after a handler that
-//
-//   • started no cell call (`pendingStarted()` — the ack registry and the
-//     server executor count every call they start),
-//   • returned no promise (it decides later),
-//   • is not mid-IME-composition (the text is not final yet),
-//
-// left the control drifted from the props it last rendered with, it is
+// would eat keystrokes from. Instead, once a handler has decided — at once,
+// or, if it started cell calls (`pendingStarted()` — the ack registry and the
+// server executor count every call they start), when the last of THOSE has
+// answered (a call that stores nothing renders nothing, so the refused text
+// used to stay unsaid) — and is not mid-IME-composition (the text is not
+// final yet), a control left drifted from the props it last rendered with is
 // checked again a second later; still drifted and not typed into since, dev
 // warns once per element.
 
-import { pendingStarted } from "../protocol/pending-calls.ts";
+import {
+  onPendingChange,
+  pendingAmong,
+  pendingStarted,
+} from "../protocol/pending-calls.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import { _controlDrifted, _CTRL } from "./prop-write.ts";
 import { resolveSignalProp } from "./signal-binding.ts";
@@ -36,6 +38,9 @@ const _timers = new Map<CtrlEl, ReturnType<typeof setTimeout>>();
 /** Elements mid-composition → "a call started for it" so far. */
 const _composing = new WeakMap<CtrlEl, boolean>();
 const _warned = new WeakSet<CtrlEl>();
+/** Per element, which handler run is the newest — a call answering for an
+ *  older keystroke must not arm the check while a newer one is out. */
+const _gen = new WeakMap<CtrlEl, number>();
 
 /** Called by the handler wrapper once a handler returned; `started` is
  *  `pendingStarted()` from just before it ran. */
@@ -51,6 +56,8 @@ export function _afterHandler(
   // Further input: the clock restarts from this one.
   clearTimeout(_timers.get(el));
   _timers.delete(el);
+  const gen = (_gen.get(el) ?? 0) + 1;
+  _gen.set(el, gen);
   const decidedLater = started !== pendingStarted() ||
     typeof (returned as { then?: unknown } | null)?.then === "function";
   if ((e as { isComposing?: boolean }).isComposing) {
@@ -69,7 +76,23 @@ export function _afterHandler(
     return;
   }
   // After the render the handler's own writes queued (a microtask behind it).
-  if (!decidedLater) queueMicrotask(() => _arm(el));
+  // It decided later: check once it HAS decided. A call that answered with no
+  // state change (a server-side cap, a refusal) queues no render either, so
+  // the field kept the refused text with no word at all. The calls it started
+  // are waited on; a promise with none counted (an in-process call, an async
+  // handler) gets the same one-second grace a debounced store has — nothing
+  // is attached to it, so its rejection reaches the runtime as before.
+  const starts: number[] = [];
+  for (let s = started + 1; s <= pendingStarted(); s++) starts.push(s);
+  const armIfNewest = () => {
+    if (_gen.get(el) === gen) queueMicrotask(() => _arm(el));
+  };
+  if (!pendingAmong(starts)) return armIfNewest();
+  const off = onPendingChange(() => {
+    if (pendingAmong(starts)) return;
+    off();
+    armIfNewest();
+  });
 }
 
 function _drifted(el: CtrlEl): boolean {

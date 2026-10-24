@@ -229,6 +229,8 @@ module.exports = {
     exit: (c) => process.exit(c),
     name: 'stub',
     whenReady: () => new Promise((r) => setTimeout(r, 0)),
+    commandLine: { appendSwitch: () => {} },
+    setDesktopName: () => {},
   },
   BrowserWindow: class {
     constructor(o) { this.opts = o; this.webContents = { on(){}, send(){}, setWindowOpenHandler(){}, session: {} }; }

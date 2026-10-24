@@ -7,6 +7,7 @@
 import { readDenoJson } from "../server/deno-json.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
 import {
+  buildChannel,
   DATA_CONTRACT_MARK,
   isComparableVersion,
   markedDataContract,
@@ -20,6 +21,7 @@ import { basename, dirname, join, resolve as resolvePath } from "@std/path";
 import { createHash } from "node:crypto";
 import { resolveAppDir, resolveEntry } from "./config-rules.ts";
 import { homedir } from "../server/paths.ts";
+import { DIST_DIR } from "../server/app-files.ts";
 import { buildVersionFor, unpublishableReason } from "./build-version.ts";
 import {
   flagVocabulary,
@@ -1313,7 +1315,13 @@ export async function shipRelease(
     patches?: ReleasePatch[];
   },
 ): Promise<ShipManifest> {
-  const binary = await Deno.readFile(opts.binaryPath);
+  let binary: Uint8Array;
+  try {
+    binary = await Deno.readFile(opts.binaryPath);
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+    throw new Error(missingArtifactMessage(opts.binaryPath));
+  }
   // BEFORE the hash, the capability scan and the signature: is this file an
   // artifact at all?
   //
@@ -1431,8 +1439,7 @@ export async function shipRelease(
     }
     sign = parseSigningKey(keyText, key.path);
   }
-  const channel = opts.channel ??
-    (typeof buildCfg.channel === "string" ? buildCfg.channel : "prod");
+  const channel = opts.channel ?? buildChannel(buildCfg) ?? "prod";
   // Refuse at the PRODUCER, not only at the consumer. `verifyManifestClaims`
   // is the one decider for a manifest that arrives over the wire; this is the
   // same rule applied where the mistake is actually made, so a bad channel or
@@ -1539,6 +1546,33 @@ export async function shipRelease(
   return manifest;
 }
 
+/** The refusal for an artifact path that does not exist. The build writes a
+ *  VERSIONED file (`dist/<name>-<version>`), so `ship dist/<name>` — the
+ *  obvious spelling — met a raw `No such file or directory`. Name what IS
+ *  there under that prefix. */
+function missingArtifactMessage(path: string): string {
+  const dir = dirname(path);
+  const stem = basename(path);
+  const near: string[] = [];
+  try {
+    for (const e of Deno.readDirSync(dir)) {
+      if (
+        e.isFile && e.name.startsWith(`${stem}-`) &&
+        !e.name.endsWith(".json")
+      ) near.push(join(dir, e.name));
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  near.sort();
+  return `${NO} ${path} does not exist. ` +
+    (near.length
+      ? `The build names its artifact with the version — did you mean ` +
+        `${near.join(" or ")}?`
+      : `Point ship at the BUILT artifact: \`deno task build\` writes ` +
+        `${join(dir, `${stem}-<version>`)}.`);
+}
+
 /** The exact lines a publisher must run to turn what `aio ship` just wrote into
  *  a channel directory a client can read. Pure, so the CLI and a test read the
  *  same text.
@@ -1551,16 +1585,60 @@ export async function shipRelease(
 export function publishInstructions(
   m: ShipManifest,
   artifactFile: string,
+  /** Where the files ARE, as the publisher typed them — the CLI passes the
+   *  binary's path and the manifest beside it, so the `cp` lines run from
+   *  where `ship` ran (bare names failed for `ship dist/app`: nothing called
+   *  `app` is in the cwd). `channelDir`: `--channel-dir`, which already holds
+   *  the manifest — only the artifact is left to copy into it. */
+  where: {
+    artifact?: string;
+    manifest?: string;
+    channelDir?: string;
+    /** The files are in the build's staging dir (`dist/`), which the next
+     *  build empties — said, with the flag that writes somewhere that stays. */
+    staged?: boolean;
+  } = {},
 ): string {
   const fetched = manifestFileName(m.platform);
+  const q = (p: string) =>
+    /^[\w@%+=:,./-]+$/.test(p) ? p : `'${p.replaceAll("'", `'\\''`)}'`;
+  const artifact = where.artifact ?? artifactFile;
+  // The name the client fetches the artifact by, when it is not the file's.
+  const named = m.url && !/[\/\\]|^[a-z][a-z0-9+.-]*:/i.test(m.url) &&
+      m.url !== basename(artifact)
+    ? m.url
+    : "";
+  const into = (dir: string) => q(`${dir}/${m.channel}/${named}`);
+  const copy = where.channelDir
+    ? [
+      // The dir as typed, like the cp line below — `join` rewrote
+      // `/srv/rel` to `\\srv\\rel` on Windows, so the two lines disagreed.
+      `publish: ${where.channelDir}/${m.channel}/${fetched} is written — copy the artifact beside it:`,
+      ``,
+      `  cp ${q(artifact)} ${into(where.channelDir)}`,
+      ``,
+      `then serve ${where.channelDir} as <your-release-base>`,
+    ]
+    : [
+      `publish: copy these TWO files into <your-release-base>/${m.channel}/`,
+      `  ${artifactFile}`,
+      `  ${fetched}      <- the manifest, under the name the client FETCHES`,
+      ``,
+      `  mkdir -p out/${m.channel}`,
+      `  cp ${q(artifact)} ${into("out")}`,
+      `  cp ${q(where.manifest ?? fetched)} out/${m.channel}/`,
+    ];
+  const staged = where.staged && !where.channelDir
+    ? [
+      ``,
+      `NOTE: these files are in dist/, which the next build EMPTIES — copy`,
+      `      them now, or re-run with --channel-dir=<dir> to write the channel`,
+      `      layout somewhere that stays.`,
+    ]
+    : [];
   return [
-    `publish: copy these TWO files into <your-release-base>/${m.channel}/`,
-    `  ${artifactFile}`,
-    `  ${fetched}      <- the manifest, under the name the client FETCHES`,
-    ``,
-    `  mkdir -p out/${m.channel}`,
-    `  cp ${artifactFile} out/${m.channel}/`,
-    `  cp ${fetched} out/${m.channel}/`,
+    ...copy,
+    ...staged,
     ``,
     `then: aio.run({ updates: "<your-release-base>" })`,
     `      the client requests <your-release-base>/${m.channel}/${fetched}`,
@@ -2040,6 +2118,11 @@ if (import.meta.main) {
           : "UNSIGNED — clients refuse this unless the app sets " +
             "`updates: { allowUnsigned: true }`"
       }\n\n` +
-      publishInstructions(m, m.url ?? m.name),
+      publishInstructions(m, m.url ?? m.name, {
+        artifact: bin,
+        manifest: join(dirname(bin), manifestFileName(m.platform)),
+        channelDir: flag("channel-dir"),
+        staged: resolvePath(dirname(bin)) === resolvePath(DIST_DIR),
+      }),
   );
 }

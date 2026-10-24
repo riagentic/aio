@@ -152,6 +152,15 @@ function setKey(
   } else obj[k] = v;
 }
 
+/** At an array node: every cursor whose segment is a non-final persist `*`,
+ *  ALSO advanced past it (the index consumed the `*`) — or null when none. A
+ *  final `*` keeps its element-wise reading. */
+function starIndexStep(cur: readonly Cursor[]): Cursor[] | null {
+  const step = cur.filter((c) => c.path[c.d] === "*" && c.d < c.path.length - 1)
+    .map((c) => ({ path: c.path, d: c.d + 1 }));
+  return step.length ? [...cur, ...step] : null;
+}
+
 const cursorKey = (cur: readonly Cursor[]): string =>
   cur.map((c) => `${c.d}:${c.path.join(".")}`).sort().join("|");
 
@@ -198,9 +207,18 @@ export function deepExcludePaths(
 
   const build = (v: object, act: Active, decl: unknown): unknown => {
     if (Array.isArray(v)) {
+      // A persist `*` names any key in that place, and an index IS the key
+      // in an array's place: `list.*.secret` must drop each element's
+      // `secret`. Taking only the element-wise reading spent the `*` on the
+      // element's own fields, looked for `secret` one level too deep, and
+      // wrote the excluded value to the store. Both readings apply.
+      const step = wildcard ? starIndexStep(act.cur) : null;
+      const elAct = step
+        ? { cur: step, key: memos ? cursorKey(step) : "" }
+        : act;
       let changed = false;
       const out = v.map((el) => {
-        const next = walk(el, act);
+        const next = walk(el, elAct);
         if (next !== el) changed = true;
         return next;
       });
@@ -296,13 +314,15 @@ export function restoreExcluded(
   if (segs.length === 0 || now === null || typeof now !== "object") return now;
   if (Array.isArray(now)) {
     let changed = false;
+    // The index consumes a non-final persist `*` too — `deepExcludePaths`'
+    // array rule (`starIndexStep`), mirrored: both readings, one after the other.
+    const indexStar = wildcard && segs[0] === "*" && segs.length > 1;
     const out = now.map((el, i) => {
-      const next = restoreExcluded(
-        el,
-        Array.isArray(was) ? was[i] : undefined,
-        segs,
-        wildcard,
-      );
+      const prev = Array.isArray(was) ? was[i] : undefined;
+      let next = restoreExcluded(el, prev, segs, wildcard);
+      if (indexStar) {
+        next = restoreExcluded(next, prev, segs.slice(1), wildcard);
+      }
       if (next !== el) changed = true;
       return next;
     });

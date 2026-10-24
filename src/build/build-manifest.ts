@@ -14,6 +14,7 @@
 import { join, resolve } from "@std/path";
 import { readDenoJson } from "../server/deno-json.ts";
 import { DIST_DIR } from "../server/app-files.ts";
+import { isShipManifestName } from "./build-shape.ts";
 
 /** What a fleet build records about itself. */
 export type BuildManifest = {
@@ -162,9 +163,31 @@ export function strayOutEntries(
     ),
   );
   return entries.filter((e) =>
-    !e.startsWith(".") && e !== "manifest.json" && !listed.has(e) && !staged(e)
+    !e.startsWith(".") && e !== "manifest.json" && !listed.has(e) &&
+    !staged(e) && !isShipOutputOf(listed, e)
   ).sort();
 }
+
+/** What `aio ship` / `am publish` wrote beside the artifacts `prev` lists —
+ *  `<artifact>.ship.json` (ship's documented default place) and
+ *  `<os>-<arch>.json` — among `entries`. A clean rebuild removes them with
+ *  the release they describe; they are not "no build put there". Sorted.
+ *  Pure. */
+export function shipOutputEntries(
+  prev: BuildManifest | null,
+  entries: readonly string[],
+): string[] {
+  const listed = new Set(
+    (prev?.targets ?? []).flatMap((t) =>
+      (t.artifacts ?? []).map((a) => a.file)
+    ),
+  );
+  return entries.filter((e) => isShipOutputOf(listed, e)).sort();
+}
+
+const isShipOutputOf = (artifacts: ReadonlySet<string>, e: string) =>
+  isShipManifestName(e) ||
+  (e.endsWith(".ship.json") && artifacts.has(e.slice(0, -".ship.json".length)));
 
 /** The warnings for android targets whose applicationId differs from the one
  *  the previous build recorded for the same target. Only for a DERIVED id —

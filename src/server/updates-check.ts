@@ -31,6 +31,7 @@ import {
 } from "./updates-owned.ts";
 import { moveFile, renameOverSync } from "../diagnostics/rename-over.ts";
 import { DOWNLOAD_STALL_MS } from "../electron/electron-runtime-fetch.ts";
+import { describeThrown } from "../diagnostics/fmt.ts";
 
 /** What an install remembers between runs. Lives beside the app's data,
  *  inside the backup unit, because losing it silently downgrades security. */
@@ -40,6 +41,11 @@ export type TrustStore = {
   key?: JsonWebKey;
   /** The channel this install follows, once someone chose one explicitly. */
   channel?: string;
+  /** Who wrote `channel`: `"setChannel"`, on every write since this field
+   *  exists. A `channel` without it was written by an older aio, which ALSO saved
+   *  whatever the first boot resolved to — see `pinnedChannel` in
+   *  updates-boot.ts for how such a value is read. */
+  channelBy?: "setChannel";
   /** Legacy: the last manifest ETag, cached after ANY successful fetch.
    *  No longer read — see `etagCurrent`. Kept in the type so an old trust
    *  file round-trips instead of losing the field on the next write. */
@@ -277,10 +283,14 @@ export function pinKey(
 export function cacheCurrentEtag(
   dataDir: string,
   etag: string | undefined,
-  opts: { dismissed: boolean },
+  opts: {
+    dismissed: boolean;
+    /** The verdict it is cached under — see `TrustStore.etagCurrentFor`. */
+    for: NonNullable<TrustStore["etagCurrentFor"]>;
+  },
 ): void {
   if (!etag || opts.dismissed) return;
-  writeTrust(dataDir, { etagCurrent: etag });
+  writeTrust(dataDir, { etagCurrent: etag, etagCurrentFor: opts.for });
 }
 
 // ── fetching ────────────────────────────────────────────────────────────────
@@ -343,17 +353,6 @@ function fetchFailure(e: unknown, url: string, ms: number): string {
       `is unreachable or stalled; the next check tries again`;
   }
   return e instanceof Error ? e.message : String(e);
-}
-
-/** Is this actually a ship manifest, or just an object that reached us?
- *
- *  Checked rather than cast, because it USED to be cast: four of seven
- *  malformed bodies reached the user as a raw `TypeError` from deep inside the
- *  decision code ("Cannot read properties of undefined (reading 'os')"), which
- *  names neither the manifest nor the field. Every field validated here is one
- *  the client goes on to decide with. */
-export function isShipManifest(m: unknown): m is ShipManifest {
-  return manifestProblem(m) === null;
 }
 
 /** What is wrong with it, naming the field — "malformed" alone sends someone
@@ -798,6 +797,10 @@ async function writeAll(file: Deno.FsFile, data: Uint8Array): Promise<void> {
 export const MB = (n: number) =>
   n < 1_000_000 ? `${n} bytes` : `${(n / 1_000_000).toFixed(1)} MB`;
 
+/** `MB(n)`, plus the exact byte count once `MB` rounds it — below 1 MB the
+ *  bytes are already the figure ("20743 bytes (20743 bytes)" said it twice). */
+const exactly = (n: number) => n < 1_000_000 ? MB(n) : `${MB(n)} (${n} bytes)`;
+
 /** Download an artifact, verifying its size and digest as the bytes arrive.
  *
  *  The file is written into a 0700 staging directory beside the destination —
@@ -896,6 +899,9 @@ export async function downloadArtifact(opts: {
   if (opts.owner) made(opts.owner, stage);
   const staged = join(stage, "artifact");
   let done = false;
+  // Set once the staged file exists: an error after it is a write (EFBIG,
+  // ENOSPC mid-file), and its raw OS text names neither file nor release.
+  let writing = false;
   // Re-armed on every chunk: fires only when the host stops sending.
   const stallMs = opts.stallMs ?? DOWNLOAD_STALL_MS;
   const stall = new AbortController();
@@ -929,6 +935,7 @@ export async function downloadArtifact(opts: {
     // broadcast, and per chunk that was ~4000 of them for one desktop update.
     let reported = -1;
     const file = await Deno.open(staged, { createNew: true, write: true });
+    writing = true;
     try {
       for await (const chunk of body) {
         seen += chunk.length;
@@ -938,8 +945,8 @@ export async function downloadArtifact(opts: {
             ok: false,
             error:
               `${opts.url} is sending more than the ${
-                MB(opts.expectSize)
-              } (${opts.expectSize} bytes) the manifest promised (${seen} ` +
+                exactly(opts.expectSize)
+              } the manifest promised (${seen} ` +
               `bytes and counting) — aborted`,
           };
         }
@@ -968,8 +975,8 @@ export async function downloadArtifact(opts: {
         error:
           // Exact bytes beside the rounded size: an off-by-a-few download
           // read "sent 186.7 MB, but the manifest promises 186.7 MB".
-          `${opts.url} sent ${MB(seen)} (${seen} bytes), but the manifest ` +
-          `promises ${MB(opts.expectSize)} (${opts.expectSize} bytes) — it ` +
+          `${opts.url} sent ${exactly(seen)}, but the manifest ` +
+          `promises ${exactly(opts.expectSize)} — it ` +
           `does not match the manifest, and a truncated artifact is ` +
           `never installed`,
       };
@@ -1012,9 +1019,9 @@ export async function downloadArtifact(opts: {
       error: stall.signal.aborted
         ? `${opts.url} sent nothing for ${stallMs / 1000}s — the download ` +
           `stalled and was aborted; the next check tries again`
-        : e instanceof Error
-        ? e.message
-        : String(e),
+        : writing
+        ? `${opts.url} → ${staged}: ${describeThrown(e)}`
+        : describeThrown(e),
     };
   } finally {
     clearTimeout(stallTimer);

@@ -53,6 +53,7 @@ export const DENO_JSON_READ_KEYS = new Set<string>([
   "build",
   "version",
   "hue", // the identity colour instead of the appId's hash (declaredHue)
+  "neutral", // "soft": near-grey neutrals under that colour (declaredNeutral)
   // Read by BOTH: `build-includes.ts` embeds each mount in the binary (and the
   // web and Android builds package it), and the server serves it
   // (`_servedAssets`), under whatever `aio.run({ assets })` adds.
@@ -271,6 +272,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "persistMode",
   "users",
   "key",
+  "pairing",
   "resolveUser",
   "resolvePeer",
   "peerTypes",
@@ -288,6 +290,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "assets", // read-only dirs served in dev AND prod (see CellsConfig.assets)
   "client",
   "keepServer",
+  "localConnectHooks", // onConnect/onDisconnect for local-socket windows too
   "transport",
   "takeover",
   "serverUrl",
@@ -384,11 +387,13 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "assets", // read-only dirs served in dev AND prod (see CellsConfig.assets)
   "client",
   "keepServer",
+  "localConnectHooks", // onConnect/onDisconnect for local-socket windows too
   "transport",
   "takeover",
   "serverUrl",
   "users",
   "key",
+  "pairing",
   "resolveUser",
   "resolvePeer",
   "peerTypes",
@@ -523,6 +528,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   ],
   client: ['"electron"', '"electron" | "browser" | "cli" | "server-only"'],
   keepServer: ["false", "keep server running after client closes"],
+  localConnectHooks: [
+    "false",
+    "onConnect/onDisconnect also fire for a desktop window on the local socket (UDS / named pipe), with no user",
+  ],
   transport: ['"auto"', '"uds" | "ws" | "auto" — IPC transport'],
   takeover: ["false", "kill the running instance and take its lock"],
   serverUrl: ["", "connect to remote server instead of starting one"],
@@ -624,6 +633,10 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   key: [
     "omitted",
     "--expose auth key: string=fixed, true=generated+persisted; omitted defaults to a generated key when exposed without per-user auth (alpha52); false=OPEN (explicit opt-out)",
+  ],
+  pairing: [
+    "{ pake: false }",
+    "{ pake: true } — PIN pairing by CPace (8-digit codes): the code never crosses the wire and the exchange is bound to the TLS certificate the client sees; refuses older clients",
   ],
   resolveUser: [
     "",
@@ -759,6 +772,7 @@ export const CONFIG_GROUPS: [string, string[]][] = [
     "assets",
     "client",
     "keepServer",
+    "localConnectHooks",
     "transport",
     "takeover",
     "serverUrl",
@@ -783,6 +797,7 @@ export const CONFIG_GROUPS: [string, string[]][] = [
   ["Auth", [
     "users",
     "key",
+    "pairing",
     "resolveUser",
     "resolvePeer",
     "peerTypes",
@@ -1045,15 +1060,27 @@ export function validateConfig(
       const near = nearestOf(k, validKeys);
       return near ? `${k} (did you mean "${near}"?)` : k;
     });
-    log.error(
-      teachMessage(
-        `unknown ${label}(s): ${named.join(", ")}`,
-        `remove them, or fix the spelling — the full list of valid keys is below`,
-      ),
-    );
-    log.error(`\nValid configuration:\n`);
-    log.error(formatValidConfig());
-    exit(1);
+    // `security` booted with any key through 1.0.24 and its apps still
+    // must: said loudly, not refused (the frozen-surface rule).
+    if (label === "security") {
+      log.warn(
+        teachMessage(
+          `unknown security key(s): ${named.join(", ")} — IGNORED, so the ` +
+            `response hardening they name is NOT applied`,
+          `fix the spelling; valid keys: ${[...validKeys].join(", ")}`,
+        ),
+      );
+    } else {
+      log.error(
+        teachMessage(
+          `unknown ${label}(s): ${named.join(", ")}`,
+          `remove them, or fix the spelling — the full list of valid keys is below`,
+        ),
+      );
+      log.error(`\nValid configuration:\n`);
+      log.error(formatValidConfig());
+      exit(1);
+    }
   }
   // Enumerated VALUES, not just keys. A key allowlist catches `ui: { chrom: … }`
   // and waves `ui: { chrome: "Themed" }` straight through to the default — a
@@ -1166,6 +1193,57 @@ export function validateConfig(
     ));
     exit(1);
   }
+  // The Electron SECURITY switches are read for truthiness (`strictPin` for
+  // `=== true`), so `unsandboxedChildWindows: "false"` turned the opt-in ON
+  // and `strictPin: "true"` left the pin off — in silence. Booted through
+  // 1.0.24: said, not refused. (`allowLocalPeers` is said where it is read,
+  // aio-server.ts.)
+  for (const w of label === "electron" ? electronBooleanProblems(obj) : []) {
+    if (_reportedConflicts.has(w)) continue;
+    _reportedConflicts.add(w);
+    log.warn(teachMessage(
+      w,
+      "write true or false",
+      "docs/clients/electron.md",
+    ));
+  }
+  // `ui.tray` booted with any value through 1.0.24: said, not refused (the
+  // frozen-surface rule). Once per text — the config is validated twice.
+  for (const w of label === "ui" ? trayProblems(obj.tray) : []) {
+    if (_reportedConflicts.has(w)) continue;
+    _reportedConflicts.add(w);
+    log.warn(teachMessage(
+      w,
+      'use tray: true, or { tooltip: "…", menu: [{ label: "…", method: ' +
+        '"cell:method", args: [], route: "/…" } | "-"], closeToTray: true }',
+      "docs/clients/electron.md",
+    ));
+  }
+  const badCsp = label === "security" ? cspWordRefusal(obj.csp) : null;
+  if (badCsp) {
+    const near = typeof obj.csp === "string"
+      ? nearestOf(obj.csp.trim().toLowerCase(), ["basic", "strict", "off"])
+      : null;
+    // Warned, not refused: it booted through 1.0.24, and is still sent as
+    // given — the frozen-surface rule.
+    log.warn(teachMessage(
+      badCsp,
+      near
+        ? `did you mean ${JSON.stringify(near)}?`
+        : `use "basic", "strict", "off", or a full policy such as "default-src 'self'"`,
+    ));
+  }
+  const badPairing = Object.hasOwn(NESTED_CONFIGS, label)
+    ? null
+    : pairingRefusal(obj.pairing);
+  if (badPairing) {
+    log.error(teachMessage(
+      badPairing,
+      "use pairing: { pake: true } to pair by PAKE, or leave it out",
+      "docs/auth/auth.md",
+    ));
+    exit(1);
+  }
   if (
     label === "splash" && obj.show !== undefined &&
     typeof obj.show !== "function"
@@ -1223,6 +1301,7 @@ export function validateConfig(
 const _reportedConflicts = new Set<string>();
 
 /** Test seam: forget which conflicts have already been reported. @internal */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetConfigConflicts(): void {
   _reportedConflicts.clear();
 }
@@ -1445,7 +1524,28 @@ export const NESTED_CONFIGS: Record<string, () => Set<string>> = {
   sessions: () => VALID_SESSIONS_KEYS,
   tls: () => VALID_TLS_KEYS,
   updates: () => VALID_UPDATES_KEYS,
+  pairing: () => VALID_PAIRING_KEYS,
+  // `security: { hedaers: false }` / `{ cps: "strict" }` — the response
+  // hardening the author asked for, silently not applied.
+  security: () => VALID_SECURITY_KEYS,
 };
+
+/** Every key of `aio.run({ pairing })` (aio-types.ts). */
+export const VALID_PAIRING_KEYS: Set<string> = new Set(["pake"]);
+
+/** Why `aio.run({ pairing: { pake } })` is not usable — null when it is.
+ *  Refused, not warned: a security opt-in read as OFF would be an app that
+ *  believes it is protected (and the key is new — nothing boots with it
+ *  today). Pure. */
+export function pairingRefusal(v: unknown): string | null {
+  // Its shape (an object) is SHAPE_VALUES' gate; this is the one inside it.
+  if (!v || typeof v !== "object") return null;
+  const pake = (v as { pake?: unknown }).pake;
+  if (pake !== undefined && typeof pake !== "boolean") {
+    return `pairing.pake must be true or false, not ${JSON.stringify(pake)}`;
+  }
+  return null;
+}
 
 /** Every key of `aio.run({ splash })` (aio-types.ts). */
 export const VALID_SPLASH_KEYS: Set<string> = new Set(["show"]);
@@ -1552,6 +1652,124 @@ const DOWNLOAD_WINDOW_KEYS = [
   "bar",
   "cancel",
 ];
+
+/** The `electron` switches that are booleans, and how each is READ — every
+ *  one but `strictPin` for truthiness. Pure. */
+const ELECTRON_BOOLEANS: Record<string, "truthy" | "strict"> = {
+  requireSandbox: "truthy",
+  unsandboxedChildWindows: "truthy",
+  webviewTag: "truthy",
+  guestDownloads: "truthy",
+  ignoreDebugEnv: "truthy",
+  strictPin: "strict",
+};
+
+/** The `electron` booleans set to something that is not a boolean, each with
+ *  what it is read as — `[]` when none. Pure. */
+export function electronBooleanProblems(
+  electron: Record<string, unknown>,
+): string[] {
+  const out: string[] = [];
+  for (const [k, read] of Object.entries(ELECTRON_BOOLEANS)) {
+    const v = electron[k];
+    if (v === undefined || v === null || typeof v === "boolean") continue;
+    const on = read === "strict" ? false : !!v;
+    out.push(
+      `electron.${k} is ${describeValue(v)}, not true or false — it is ` +
+        `read as ${on ? "ON" : "OFF"}`,
+    );
+  }
+  return out;
+}
+
+const TRAY_KEYS = ["tooltip", "menu", "closeToTray"];
+const TRAY_ITEM_KEYS = ["label", "method", "args", "route"];
+
+/** What in `ui.tray` the window will not do as written — `[]` when nothing.
+ *  The main process reads it leniently (a non-object is no tray, an item
+ *  without a label is skipped, `closeToTray` is read for truthiness) and a
+ *  click on an item whose `method` is not `"cell:method"` dispatches
+ *  nothing — every one of them silent, and only visible once someone opens
+ *  the tray menu of the shipped app. Pure. */
+export function trayProblems(v: unknown): string[] {
+  if (v === undefined || v === null || typeof v === "boolean") return [];
+  const at = "ui.tray";
+  const show = (x: unknown) => JSON.stringify(x) ?? String(x);
+  if (typeof v !== "object" || Array.isArray(v)) {
+    return [
+      `${at} is ${show(v)} — not true/false or an object, so NO tray is shown`,
+    ];
+  }
+  const out: string[] = [];
+  const o = v as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    if (!TRAY_KEYS.includes(k)) {
+      const near = nearestOf(k, TRAY_KEYS);
+      out.push(
+        `${at}.${k} is not a key aio reads${
+          near ? ` (did you mean "${near}"?)` : ""
+        } — it does nothing`,
+      );
+    }
+  }
+  if (o.tooltip !== undefined && typeof o.tooltip !== "string") {
+    out.push(`${at}.tooltip is ${show(o.tooltip)} — not a string`);
+  }
+  if (o.closeToTray !== undefined && typeof o.closeToTray !== "boolean") {
+    out.push(
+      `${at}.closeToTray is ${show(o.closeToTray)} — not true or false; it ` +
+        `is read for truthiness, so "false" and 1 both hide the window on close`,
+    );
+  }
+  if (o.menu === undefined) return out;
+  if (!Array.isArray(o.menu)) {
+    out.push(`${at}.menu is ${show(o.menu)} — not a list, so no item is shown`);
+    return out;
+  }
+  o.menu.forEach((it, i) => {
+    const p = `${at}.menu[${i}]`;
+    if (it === "-") return;
+    if (!it || typeof it !== "object" || Array.isArray(it)) {
+      out.push(`${p} is ${show(it)} — not an item or "-", so it is skipped`);
+      return;
+    }
+    const m = it as Record<string, unknown>;
+    if (typeof m.label !== "string" || !m.label) {
+      out.push(`${p} has no label — the item is skipped`);
+    }
+    for (const k of Object.keys(m)) {
+      if (!TRAY_ITEM_KEYS.includes(k)) {
+        const near = nearestOf(k, TRAY_ITEM_KEYS);
+        out.push(
+          `${p}.${k} is not a key aio reads${
+            near ? ` (did you mean "${near}"?)` : ""
+          } — it does nothing`,
+        );
+      }
+    }
+    if (
+      m.method !== undefined &&
+      !(typeof m.method === "string" && m.method.includes(":"))
+    ) {
+      out.push(
+        `${p}.method is ${show(m.method)} — not "cell:method", so a click ` +
+          `dispatches nothing`,
+      );
+    }
+    if (m.args !== undefined && !Array.isArray(m.args)) {
+      out.push(
+        `${p}.args is ${show(m.args)} — not a list, so the method is called ` +
+          `with no arguments`,
+      );
+    }
+    if (m.route !== undefined && (typeof m.route !== "string" || !m.route)) {
+      out.push(
+        `${p}.route is ${show(m.route)} — not a route, so it is ignored`,
+      );
+    }
+  });
+  return out;
+}
 
 /** Why `v` is not a valid `electron.downloadWindow` — `null` when it is, or
  *  is absent. A misspelled key is a look the app believes it set. Pure. */
@@ -1713,6 +1931,39 @@ export const VALID_SESSIONS_KEYS: Set<string> = new Set(["ttlMs"]);
 /** Every key of the object spelling of `tls` (aio-types.ts). */
 export const VALID_TLS_KEYS: Set<string> = new Set(["cert", "key"]);
 
+/** Every key of `SecurityConfig` (security-config.ts). */
+export const VALID_SECURITY_KEYS: Set<string> = new Set([
+  "headers",
+  "csp",
+  "frameOptions",
+  "referrerPolicy",
+  "hsts",
+  "permissionsPolicy",
+  "cspDirectives",
+  "cspNonce",
+  "compress",
+]);
+
+/** `security.csp` that is one bare word but not a mode — `"Strict"`,
+ *  `"stirct"`, `"none"`. Any string other than the three modes is used
+ *  VERBATIM as the policy, so such a word went out as a one-token
+ *  `Content-Security-Policy` naming no directive the browser knows: the page
+ *  ran with no CSP at all while the author believed it was strict. A real
+ *  policy names a directive, and every directive but `sandbox` has a `-`. */
+export function cspWordRefusal(v: unknown): string | null {
+  if (typeof v !== "string" || ["basic", "strict", "off"].includes(v)) {
+    return null;
+  }
+  const word = v.trim();
+  if (!/^[A-Za-z]+$/.test(word) || word.toLowerCase() === "sandbox") {
+    return null;
+  }
+  return `security.csp is ${
+    JSON.stringify(v)
+  }, which is neither a mode ("basic", "strict", "off") nor a policy — it ` +
+    `is sent verbatim as the Content-Security-Policy and enforces nothing`;
+}
+
 /** Every key of `UpdatesConfig` (updates-core.ts). */
 export const VALID_UPDATES_KEYS: Set<string> = new Set([
   "source",
@@ -1759,6 +2010,7 @@ export const SHAPE_VALUES: Record<string, ConfigShape> = {
   checkIntegrityOnBoot: "boolean",
   strictOrigin: "boolean",
   keepServer: "boolean",
+  localConnectHooks: "boolean",
   takeover: "boolean",
   freezeState: "boolean",
   singleton: "boolean",
@@ -1804,7 +2056,11 @@ export const SHAPE_VALUES: Record<string, ConfigShape> = {
   security: "object",
   electron: "object",
   splash: "object",
+  pairing: "object",
   cellDefaults: "object",
+  // `users: "secret"` was walked as a token map: `Object.entries("secret")`
+  // made the tokens "0".."5" — a one-digit credential per letter.
+  users: "object",
 };
 
 /** Refuse every {@linkcode SHAPE_VALUES} key whose value is not the shape the
@@ -1997,6 +2253,36 @@ export function configConflicts(
         `(false silences this)`,
       doc: "docs/auth/auth.md",
     });
+  }
+  // ── 1a2. auth.oidc.redirectUri — sent VERBATIM, so it must be a URL ──
+  // New key, nothing booted with a bad one: refused, not warned. A relative
+  // or non-http value reached the provider as-is and failed on ITS page.
+  if (oidc && oidc.redirectUri !== undefined) {
+    const v = oidc.redirectUri;
+    let ok = false;
+    if (typeof v === "string") {
+      try {
+        const p = new URL(v).protocol;
+        ok = p === "https:" || p === "http:";
+      } catch {
+        /* aio-ok: not a URL — `ok` stays false and is refused below */
+      }
+    }
+    if (!ok) {
+      out.push({
+        level: "error",
+        keys: ["auth.oidc.redirectUri"],
+        what:
+          `auth.oidc.redirectUri is ${
+            JSON.stringify(v)
+          } — it is sent to the provider verbatim, so it must be an absolute ` +
+          `http(s) URL`,
+        fix: `set it to the callback URI registered with the provider, e.g. ` +
+          `"https://app.example.com/__aio/auth/oidc/callback" — or drop it ` +
+          `to derive it from the request`,
+        doc: "docs/auth/auth.md",
+      });
+    }
   }
   // ── 1b. an allowedOrigins entry no request can ever match ────────────
   const origins = cfg.allowedOrigins;
@@ -2203,11 +2489,9 @@ export function configConflicts(
         level: "error",
         keys: ["transport", "client"],
         what:
-          `transport: "uds" with client: "${client}" — the local socket is honoured as ` +
-          `written, but only the Electron client speaks it. The server will come up on a ` +
-          `socket a ${
-            client === "browser" ? "browser" : client
-          } client cannot connect to`,
+          `transport: "uds" with client: "${client}" — refused: an explicit "uds" is ` +
+          `never downgraded and only the Electron client speaks it, so this app would ` +
+          `listen on a socket a ${client} client cannot connect to. The server does not start`,
         fix:
           `use transport: "ws" (or drop transport and let "auto" decide — it picks uds only ` +
           `for a local electron app)`,
@@ -2419,6 +2703,115 @@ export function configConflicts(
         });
       }
     }
+  }
+
+  // ── 13. auth credentials of a type nothing reads as written ──────────
+  // Every reader asks `auth` and `key` for truthiness or `typeof "string"`, so
+  // `auth: "false"` switched the password+TOTP flows ON, and `key: 123` /
+  // `key: ""` fell through to a GENERATED key — the fixed key the author wrote
+  // admitted nobody, with no line saying why.
+  if (
+    cfg.auth !== undefined && cfg.auth !== null &&
+    typeof cfg.auth !== "boolean" &&
+    (typeof cfg.auth !== "object" || Array.isArray(cfg.auth))
+  ) {
+    out.push({
+      // Warned, not refused: it booted through 1.0.24 (frozen surface).
+      level: "warn",
+      keys: ["auth"],
+      what:
+        `auth is ${
+          JSON.stringify(cfg.auth)
+        }, which is neither true/false nor a block of options — any non-empty ` +
+        `value turns the built-in password login on`,
+      fix: "use auth: true, auth: false, or auth: { … }",
+      doc: "docs/auth/auth.md",
+    });
+  }
+  if (
+    cfg.key !== undefined && cfg.key !== null &&
+    ((typeof cfg.key !== "string" && typeof cfg.key !== "boolean") ||
+      cfg.key === "")
+  ) {
+    out.push({
+      // Warned, not refused: it booted through 1.0.24 (frozen surface).
+      level: "warn",
+      keys: ["key"],
+      what:
+        `key is ${
+          JSON.stringify(cfg.key)
+        }, which is not a usable shared key — an exposed app would ignore it ` +
+        `and generate one of its own, so the key you meant admits nobody`,
+      fix: 'use a non-empty string (key: Deno.env.get("APP_KEY")), true for ' +
+        "a generated persisted key, or false for no shared key",
+      doc: "docs/auth/auth.md",
+    });
+  }
+
+  // ── 13a. a trustProxyHeader no request can carry ─────────────────────
+  // Every reader asks it for truthiness, then hands it to `Headers`, which
+  // coerces with String(). So a FALSY value (`false`, `0`) is "unset", and a
+  // truthy non-string names the header its String() spells (`true` reads a
+  // header called "true") — both booted and served on 1.0.24, so both still
+  // do, said loudly. Only a name `Headers` refuses (a trailing space, a colon,
+  // an object's "[object Object]") is refused: it threw on EVERY request — 500 to everything.
+  const tph = cfg.trustProxyHeader;
+  const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+  if (
+    tph !== undefined && tph !== null && typeof tph !== "string" && !tph
+  ) {
+    out.push({
+      level: "warn",
+      keys: ["trustProxyHeader"],
+      what:
+        `trustProxyHeader is ${
+          JSON.stringify(tph)
+        }, which is not a header name — it is read as unset: no proxy hop is ` +
+        `trusted and the TCP peer is the client`,
+      fix:
+        'drop it, or name the header your proxy overwrites, e.g. "x-forwarded-for"',
+      doc: "docs/auth/auth.md",
+    });
+  } else if (
+    tph && !HEADER_NAME.test(String(tph))
+  ) {
+    out.push({
+      level: "error",
+      keys: ["trustProxyHeader"],
+      what:
+        `trustProxyHeader is ${
+          JSON.stringify(tph)
+        }, which is not an HTTP header name — every request would fail ` +
+        `reading it and answer 500`,
+      fix: 'name the header your proxy overwrites, e.g. "x-forwarded-for"',
+      doc: "docs/auth/auth.md",
+    });
+  } else if (tph && typeof tph !== "string") {
+    out.push({
+      level: "warn",
+      keys: ["trustProxyHeader"],
+      what:
+        `trustProxyHeader is ${
+          JSON.stringify(tph)
+        }, not a string — it is read as the header named "${
+          String(tph)
+        }" — no proxy writes that, so any caller that sends it picks its own ` +
+        `client IP for the abuse budgets`,
+      fix: 'name the header your proxy overwrites, e.g. "x-forwarded-for"',
+      doc: "docs/auth/auth.md",
+    });
+  }
+
+  // ── 14. `users` beside `resolveUser` — the map is never read ────────
+  if (cfg.users !== undefined && typeof cfg.resolveUser === "function") {
+    out.push({
+      level: "warn",
+      keys: ["users", "resolveUser"],
+      what: "users and resolveUser are both set, and resolveUser wins: no " +
+        "token in the static users map authenticates anyone",
+      fix: "drop users, or look the token up in it from inside resolveUser",
+      doc: "docs/auth/auth.md",
+    });
   }
 
   return out;

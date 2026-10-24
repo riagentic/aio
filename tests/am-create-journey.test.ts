@@ -252,17 +252,28 @@ Deno.test("am create --json: absolute dir, and git as a reason — never a bare 
       doc.git === "initialized" || doc.git === "skipped: git not found",
       `git: ${doc.git}`,
     );
-    // The first commit leaves the seeded lock out: the first build fills it,
-    // and a committed seed made that build "-dirty" (seen on a Mac, 1.0.21).
+    // The first commit holds the COMPLETE lock — the bytes the app's first
+    // `deno task` writes. A committed seed (aio's JSR side only) made the
+    // first build "-dirty" (seen on a Mac, 1.0.21); a seed left untracked
+    // was "-dirty" as soon as the developer committed before building.
     if (doc.git === "initialized") {
       const git = (...args: string[]) =>
         new TextDecoder().decode(
           new Deno.Command("git", { args, cwd: doc.dir as string }).outputSync()
             .stdout,
         );
-      assertEquals(git("ls-files", "deno.lock"), "", "deno.lock committed");
+      assertEquals(git("ls-files", "deno.lock"), "deno.lock\n");
       assert(git("ls-files").includes("deno.json"), "nothing committed");
-      assertEquals(git("status", "--porcelain", "--untracked-files=no"), "");
+      assertEquals(git("status", "--porcelain"), "");
+      // What the app's first task resolves leaves the committed lock as is.
+      const cached = await new Deno.Command(Deno.execPath(), {
+        args: ["cache", "src/app.ts"],
+        cwd: doc.dir as string,
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      assert(cached.success, "deno cache src/app.ts failed");
+      assertEquals(git("status", "--porcelain"), "", "the first task moved it");
     }
   } finally {
     await Deno.remove(tmp, { recursive: true });

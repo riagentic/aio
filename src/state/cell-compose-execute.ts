@@ -10,6 +10,7 @@ import { tagSource } from "./cell-types.ts";
 import type { ReduceContext } from "./cell-compose-reduce.ts";
 import { routeEffect } from "./route-effect.ts";
 import { resolveCall } from "./cell-impl.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 /** A framework effect reached the ROOT executor, which is not the thing that
  *  runs it.
@@ -105,6 +106,7 @@ export function buildRootExecutor(
       // a resource it arms nothing, so it is not a wrong runtime: the effect
       // is recorded (testCell reads it) and otherwise inert.
       notify: () => {},
+      appIcon: () => {}, // inert like notify: it arms nothing
       app: () => {},
     });
     if (frameworkKind !== null) {
@@ -185,7 +187,7 @@ export function buildRootExecutor(
           }),
         );
       } else {
-        log.error("cell", `${f.__aio.id} executor threw: ${e}`);
+        log.error("cell", `${f.__aio.id} executor threw: ${thrownText(e)}`);
       }
       countCellError(f.__aio.id);
     }

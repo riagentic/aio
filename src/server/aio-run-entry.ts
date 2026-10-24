@@ -9,6 +9,7 @@
 import { validateMemoryConfig } from "../diagnostics/memory-monitor.ts";
 import { refuseRetired } from "../state/removals.ts";
 import { runtimeCount } from "./shutdown.ts";
+import { exitAfterFatalStart } from "./aio-lifecycle.ts";
 import {
   appLoggerInstalled,
   log,
@@ -20,6 +21,7 @@ import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
 import { validateSchedules } from "../state/schedule.ts";
 import { dbPathOf, isolateOf } from "./config-sources.ts";
 import {
+  appHome,
   dbPathOutsideHomeError,
   homeRequested,
   planAppDirs,
@@ -61,7 +63,9 @@ import {
 } from "./single-instance-lock.ts";
 import { assertDenoVersion } from "./deno-version.ts";
 import { removalMessage, removalOf } from "../state/removals.ts";
-import { resolve } from "@std/path";
+import { join, resolve } from "@std/path";
+import { formatText } from "../diagnostics/logger-format.ts";
+import { now } from "../diagnostics/logger-types.ts";
 import { composeAsyncHooks, composeHooks, resolvePlugins } from "./plugin.ts";
 import { releaseProcessListenersIfIdle } from "./shutdown.ts";
 import type { AioApp, CellsConfig } from "./aio-types.ts";
@@ -72,8 +76,8 @@ import {
   validateCallableConfig,
   validateConfig,
 } from "./config.ts";
-import { describeThrown } from "../diagnostics/fmt.ts";
-import { declaredHue } from "../build/app-icon.ts";
+import { describeThrown, thrownText } from "../diagnostics/fmt.ts";
+import { declaredHue, declaredNeutral } from "../build/app-icon.ts";
 import { appDenoJson } from "./aio-run-helpers.ts";
 import { _run, electronRuntimeAnswer } from "./aio.ts";
 import {
@@ -172,6 +176,7 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     // the same exemption for the same reason. A levelled line would also stamp
     // a timestamp and a category on the answer to "what did I type wrong".
     console.error(e instanceof Error ? e.message : String(e));
+    noteInExistingLog(cfg as { appId?: unknown; appDir?: unknown } | null, e);
     Deno.exit(1);
   }
   if (parseCli().help) {
@@ -275,7 +280,8 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     dev: isDevBoot(),
   });
   if (_plugins.names.length) {
-    const _pluginErr = (e: unknown) => log.error(`plugin hook error: ${e}`);
+    const _pluginErr = (e: unknown) =>
+      log.error(`plugin hook error: ${thrownText(e)}`);
     fc = {
       ...fc,
       routes: Object.keys(_plugins.routes).length
@@ -409,8 +415,10 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
   // file belongs to Deno and other tools keep their own sections in it, so the
   // right answer is to name the key and where it belongs.
   _warnMisplacedDenoJson();
-  // deno.json `hue` is refused at boot, not at the first icon it would draw.
+  // deno.json `hue` and `neutral` are refused at boot, not at the first icon
+  // or stylesheet they would draw.
   declaredHue(appDenoJson());
+  declaredNeutral(appDenoJson());
   // Multi-instance (perfect-aio D2): several aio.run() calls may coexist in
   // one process — each app's cells bind exclusively (bindCell throws on a
   // def already bound to another app), each appId takes its own singleton
@@ -938,8 +946,11 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     // stays unconfirmed — a failed start the judge counts — even when it
     // exits cleanly.
     let confirmed = false;
+    /** A fatal `onStart` failed: the exit is deferred (it runs the shutdown
+     *  first), so the confirms below would otherwise still record it. */
+    let fatal = false;
     const confirmOnce = (atExit = false) => {
-      if (confirmed || fc.libraryMode) return;
+      if (confirmed || fatal || fc.libraryMode) return;
       if (slots.window.holds(atExit, () => confirmOnce())) return;
       confirmed = true;
       removeEventListener("unload", onCleanExit);
@@ -961,11 +972,12 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
       // as the lifecycle's; under `libraryMode` (no `Deno.exit` allowed) the
       // app is closed instead, so the embedder is not left holding a broken one.
       const failed = (e: unknown) => {
-        log.error(`onStart hook error: ${e}`);
+        log.error(`onStart hook error: ${thrownText(e)}`);
         if (!fc.fatalOnStart) return;
         log.error("fatalOnStart is true — exiting due to onStart failure");
+        fatal = true;
         if (fc.libraryMode) void app.close();
-        else Deno.exit(1);
+        else void exitAfterFatalStart();
       };
       try {
         const r = fc.onStart(app) as unknown;
@@ -1006,6 +1018,42 @@ const CONFIRM_BACKSTOP_MS = 30_000;
 /** Refusals already written to the log, so one refusal is one line whichever
  *  catch saw it first. */
 const _saidRefused = new WeakSet<object>();
+
+/** A command-line refusal, said on the console before any logger exists,
+ *  ALSO appended to the app's `app.log` — when its logs folder is already
+ *  there. A double-clicked app (Explorer, Finder `open`, a .desktop file) has
+ *  no console: the reason was nowhere, and `app.log` ended at the last good
+ *  run. Never creates a home or a folder, installs no logger (the reasons
+ *  above); a first start, or a home that cannot be named, keeps the console
+ *  line alone, as before. */
+function noteInExistingLog(
+  cfg: { appId?: unknown; appDir?: unknown } | null,
+  e: unknown,
+): void {
+  try {
+    const appId = resolveAppId(
+      typeof cfg?.appId === "string" ? cfg.appId : undefined,
+    );
+    const logs = join(
+      appHome(appId, typeof cfg?.appDir === "string" ? cfg.appDir : undefined),
+      "logs",
+    );
+    if (!Deno.statSync(logs).isDirectory) return;
+    Deno.writeTextFileSync(
+      join(logs, "app.log"),
+      formatText({
+        ts: now(),
+        lvl: "error",
+        cat: "boot",
+        msg: `refused — the app did not start: ${describeThrown(e)}`,
+      }) + "\n",
+      { append: true },
+    );
+  } catch {
+    // aio-ok: no logs folder yet (a first start) or no home to name — the
+    // console line already said it, which is all there was before.
+  }
+}
 
 /** A BOOT THAT REFUSES SAYS WHY IN THE LOG.
  *

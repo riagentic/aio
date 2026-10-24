@@ -32,6 +32,7 @@ import {
 } from "../state/removals.ts";
 import { appSourceFiles } from "./app-source-scope.ts";
 import { DENO_JSON_NAMES, readFrameworkPinSync } from "../server/deno-json.ts";
+import { scanTestBreakages } from "./am-test-breakage.ts";
 
 /** Order a release series so `--from` can mean "after this".
  *
@@ -170,6 +171,7 @@ export async function cmdMigrate(
     ? undefined
     : readFrameworkPinSync(root).pin ?? undefined;
   const from = explicit ?? pinned;
+  if (args.includes("--tests")) return reportTests(root, from, explicit, mode);
   const findings = await scanMigrations(root, from);
 
   if (mode === "json") {
@@ -221,4 +223,50 @@ export async function cmdMigrate(
   // Non-zero: this is a gate someone can put in CI, and a migration report that
   // exits 0 is one a pipeline scrolls past.
   Deno.exit(1);
+}
+
+/** `am migrate --tests`: the test shapes an upgrade past `from` turns red,
+ *  oldest release first — the order the suite would fail in. A PREDICTION,
+ *  so exit 0 either way (unlike a retired spelling, which is certain). */
+async function reportTests(
+  root: string,
+  from: string | undefined,
+  explicit: string | undefined,
+  mode: ReturnType<typeof detectMode>,
+): Promise<void> {
+  const tests = await scanTestBreakages(root, from);
+  if (mode === "json") {
+    out({
+      from: from ?? null,
+      fromSource: explicit ? "flag" : from ? "pin" : null,
+      tests,
+    }, mode);
+    return;
+  }
+  const since = from ? `after ${from}` : "in the whole index";
+  if (tests.length === 0) {
+    out(`✓ no test shape here that a release ${since} turns red`, mode);
+    return;
+  }
+  const lines = [
+    `${tests.length} place${
+      tests.length === 1 ? "" : "s"
+    } a release ${since} ` +
+    `can turn red — in the order they would fail:`,
+    "",
+  ];
+  for (const t of tests) {
+    lines.push(
+      `  ${t.file}:${t.line}  ${t.id}   [fails from ${t.since}]`,
+      `      ${t.text}`,
+      `      why: ${t.what}`,
+      `      fix: ${t.fix}`,
+      `      see: ${t.guide}`,
+      "",
+    );
+  }
+  lines.push(
+    "A prediction from the source, not a verdict: run the suite to confirm.",
+  );
+  out(lines.join("\n"), mode);
 }

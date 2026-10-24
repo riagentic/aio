@@ -257,6 +257,7 @@ export function overlappedStatus(buf: Uint8Array): number {
 }
 
 /** `hEvent` back out of an `OVERLAPPED` (the inverse of the encoder). */
+// aio-ok(dead-wiring): the encoder's inverse, for the ABI round-trip test
 export function overlappedEvent(buf: Uint8Array): bigint {
   return new DataView(buf.buffer, buf.byteOffset).getBigUint64(24, true);
 }

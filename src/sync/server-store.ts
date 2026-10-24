@@ -136,6 +136,7 @@ function nextServerTs(): number {
 }
 
 /** TEST ONLY: simulate a process restart (issuer forgets, next call re-seeds). */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetServerTsForTest(): void {
   _lastServerTs = 0;
   _seededDbs = new WeakSet<DB>();

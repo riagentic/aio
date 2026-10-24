@@ -42,8 +42,10 @@ import {
   withChannel,
 } from "./updates-core.ts";
 import {
+  cacheCurrentEtag,
   currentCommit,
   downloadArtifact,
+  ensureWritable,
   fetchInstallManifest,
   fileSha256,
   forgetInstalledDigest,
@@ -56,6 +58,7 @@ import {
   writeTrust,
 } from "./updates-check.ts";
 import { artifactFromPatch } from "./updates-patch.ts";
+import { treeFromPatch } from "./updates-tree.ts";
 import { prefetchSharedElectron } from "./updates-electron.ts";
 import {
   artifactPath,
@@ -94,6 +97,7 @@ import {
 import {
   assertNotInTheWay,
   claim,
+  forget,
   isOwn,
   made,
   setAsideChanged,
@@ -108,6 +112,7 @@ import { rebuildFromGit } from "./updates-rebuild.ts";
 import { retireProfile } from "./updates-retire.ts";
 import { isServiceSupervised } from "./aio-lifecycle.ts";
 import { splitRuntimeVersion } from "./app-version.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 export type UpdatesRuntimeDeps = {
   config: ResolvedUpdates;
@@ -273,6 +278,31 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     }
   }
 
+  /** Why this install cannot take `m` where it runs, or null when it can —
+   *  asked BEFORE the offer is shown (`.katana/updates.md`: every layout
+   *  "either applies updates or says exactly why it cannot, before the offer
+   *  is shown — including when the install directory is not writable"). The
+   *  same two refusals `apply` makes before a byte is downloaded; asked only
+   *  there, a binary in a folder its user cannot write was OFFERED, and the
+   *  button answered "cannot stage an update". A source run has no artifact
+   *  to replace (`apply` refuses it on its own). `m` null: a git rebuild,
+   *  which stages beside the running file. */
+  async function installBlocker(m: ShipManifest | null): Promise<
+    string | null
+  > {
+    if (deps.artifact === undefined && installedTarget() === "source") {
+      return null;
+    }
+    const isMacApp = m !== null && releaseTarget(m) === "electron-app";
+    const isDirectory = m?.target === "electron-zip" || isMacApp;
+    const current = isDirectory ? (deps.artifact ?? installDir()) : targetOf();
+    // No folder to replace: `apply` names that itself.
+    if (!current) return null;
+    if (isMacApp) return macAppUpdateBlocker(current);
+    const w = await ensureWritable(dirname(current));
+    return w.ok ? null : w.error;
+  }
+
   async function checkManifest(opts: CheckOptions): Promise<CheckResult> {
     const trust = readTrust(deps.dataDir);
     // Sent only for the verdict it was cached under — see `etagCurrentFor`.
@@ -380,6 +410,16 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     });
 
     if (d.kind === "offer") {
+      const blocker = await installBlocker(m);
+      // An error like any failed check: what an earlier check offered is
+      // left as it was, and its apply names the same refusal.
+      if (blocker) {
+        return {
+          kind: "error",
+          error: `${m.version} is available, but this install cannot apply ` +
+            `it: ${blocker}`,
+        };
+      }
       offered = m;
       blocked = null;
       return {
@@ -403,12 +443,10 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     // not be cached either: the release is still there, the user just said no,
     // and caching that answer turns the next honest check into a 304 that
     // reports "you are the latest" — false, and permanent.
-    if (
-      got.etag && d.kind === "current" && !d.reason.includes("was dismissed")
-    ) {
-      writeTrust(deps.dataDir, {
-        etagCurrent: got.etag,
-        etagCurrentFor: { version: deps.appVersion, url, prerelease: pre },
+    if (d.kind === "current") {
+      cacheCurrentEtag(deps.dataDir, got.etag, {
+        dismissed: d.reason.includes("was dismissed"),
+        for: { version: deps.appVersion, url, prerelease: pre },
       });
     }
     if (d.kind === "incompatible") {
@@ -443,6 +481,14 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       dismissed: opts.dismissed,
     });
     if (d.kind === "offer") {
+      const blocker = await installBlocker(null);
+      if (blocker) {
+        return {
+          kind: "error",
+          error: `${d.version} is available, but this install cannot apply ` +
+            `it: ${blocker}`,
+        };
+      }
       return {
         kind: "offer",
         update: {
@@ -645,6 +691,30 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     // the phase true rather than hopeful.
     phase("downloading");
     progressOf("app");
+    // A `.zip` install is made file by file from the folder installed here
+    // and a tree patch (updates-tree.ts), every file checked against the
+    // patch's signed list; any miss empties the staged folder and downloads
+    // the whole release.
+    const fromTree =
+      !kept && m.target === "electron-zip" && m.patches !== undefined
+        ? await (async () => {
+          await Deno.mkdir(staged);
+          made(deps.dataDir, staged);
+          const got = await treeFromPatch({
+            manifest: m,
+            manifestUrl: manifestUrl(config.source, channel, platform),
+            installed: current,
+            installedSha256: readTrust(deps.dataDir).installedSha256,
+            staged,
+            dataDir: deps.dataDir,
+          });
+          if (got === null || "why" in got) {
+            await Deno.remove(staged, { recursive: true });
+          }
+          return got;
+        })()
+        : null;
+    const treeMade = fromTree !== null && "patch" in fromTree;
     // A single-file install first tries the release's patch against the file
     // installed here (updates-patch.ts). What a patch makes goes through the
     // same size and digest check as a download, and ANY miss — said in one
@@ -665,7 +735,9 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         bytes: fromPatch.bytes,
       })
       : null;
-    const miss = fromPatch && "why" in fromPatch
+    const miss = fromTree && "why" in fromTree
+      ? fromTree.why
+      : fromPatch && "why" in fromPatch
       ? fromPatch.why
       : patched && !patched.ok
       ? patched.error
@@ -684,11 +756,19 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
             MB(m.size)
           }) was not downloaded`,
       );
+    } else if (fromTree && "patch" in fromTree) {
+      log.info(
+        "updates",
+        `made ${m.name} ${m.version} from the installed files and a ` +
+          `${MB(fromTree.patch.size)} patch — the whole release (${
+            MB(m.size)
+          }) was not downloaded`,
+      );
     }
-    if (!kept && !patched?.ok) {
+    if (!kept && !patched?.ok && !treeMade) {
       log.info("updates", `downloading ${m.name} ${m.version} from ${url}`);
     }
-    const dl = kept || patched?.ok
+    const dl = kept || patched?.ok || treeMade
       ? { ok: true as const }
       : await downloadArtifact({
         url,
@@ -722,18 +802,31 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     // between must not slip through. For a .zip this checks the ARCHIVE, which
     // is what the manifest hashes, and it happens before a single file is
     // unpacked anywhere near the install.
-    const verified = await verifyDownload(download, m, expectations());
+    // A folder made from a tree patch has no archive: its files were each
+    // checked against the patch's list, which the manifest's signed patch
+    // list vouches for — the manifest's own claims are checked here as for
+    // a download.
+    const verified = treeMade
+      ? await verifyManifestClaims(m, expectations())
+      : await verifyDownload(download, m, expectations());
     if (!verified.ok) {
       await Deno.remove(download).catch(() => {});
+      if (treeMade) await Deno.remove(staged, { recursive: true });
       throw new Error(`refusing to install: ${verified.reason}`);
     }
+    // No archive was downloaded: none stays on the record for a retry.
+    if (treeMade) forget(deps.dataDir, download);
     log.info("updates", `verified ${m.version} — ${verified.reason}`);
 
     if (isDirectory) {
       // Made empty and put on record as that very folder, then filled.
-      await Deno.mkdir(staged);
-      made(deps.dataDir, staged);
-      const unpacked = isMacApp
+      if (!treeMade) {
+        await Deno.mkdir(staged);
+        made(deps.dataDir, staged);
+      }
+      const unpacked = treeMade
+        ? { ok: true as const }
+        : isMacApp
         ? await unpackAppTarball(download, staged)
         : await unpackArchive(download, staged);
       // The archive stays, on the record, until this update is confirmed or
@@ -1350,7 +1443,9 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       ok = await config.canApply();
     } catch (e) {
       // A hook that throws is not permission. Fail closed.
-      return `the app's updates.canApply hook threw (${e}) — refusing to ` +
+      return `the app's updates.canApply hook threw (${
+        thrownText(e)
+      }) — refusing to ` +
         `install, because a guard that cannot answer is not a yes`;
     }
     if (ok) return null;
@@ -1462,6 +1557,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // against a manifest from the channel the user just left.
       writeTrust(deps.dataDir, {
         channel: next,
+        channelBy: "setChannel",
         etag: undefined,
         etagCurrent: undefined,
       });

@@ -199,6 +199,10 @@ Deno.test('transport: "uds" is honoured as written — so a client that cannot s
     const c = one({ transport: "uds", client });
     assertEquals(c.level, "error");
     assertStringIncludes(c.what, "cannot connect to");
+    // level error = the boot exits: the text says refusal, never "will come up"
+    assertStringIncludes(c.what, "refused");
+    assertStringIncludes(c.what, "does not start");
+    assert(!c.what.includes("will come up"), c.what);
     assertStringIncludes(c.fix, 'transport: "ws"');
   }
   assertEquals(configConflicts({ transport: "uds", client: "electron" }), []);
@@ -619,4 +623,68 @@ Deno.test("allowedOrigins: the grammar has ONE decider", async () => {
       );
     }
   }
+});
+
+// `auth: "false"` turned the password login ON (every reader asks it for
+// truthiness); `key: 123` / `key: ""` fell through to a GENERATED key, so the
+// fixed key the author wrote admitted nobody; `users` beside `resolveUser` is
+// never read. Each booted without a word.
+Deno.test("auth/key of an unreadable type, and users shadowed by resolveUser", () => {
+  // Warned, not refused: each booted through 1.0.24 (frozen surface).
+  for (const auth of ["false", "yes", 1, ["x"]]) {
+    const c = one({ auth });
+    assertEquals(c.level, "warn", JSON.stringify(auth));
+    assertEquals(c.keys, ["auth"]);
+  }
+  for (const key of [123, ["k"], {}, ""]) {
+    const c = one({ key });
+    assertEquals(c.level, "warn", JSON.stringify(key));
+    assertEquals(c.keys, ["key"]);
+  }
+  const shadow = one({ users: {}, resolveUser: () => null });
+  assertEquals(shadow.level, "warn");
+  assertEquals(shadow.keys, ["users", "resolveUser"]);
+  // The spellings the types accept say nothing.
+  for (
+    const cfg of [
+      { auth: true },
+      { auth: false },
+      { auth: { signup: false } },
+      { key: true },
+      { key: false },
+      { key: "a-long-enough-key" },
+      { users: {} },
+      { resolveUser: () => null },
+    ]
+  ) assertEquals(configConflicts(cfg), [], JSON.stringify(cfg));
+});
+
+// `trustProxyHeader: "X-Forwarded-For "` (a trailing space) booted, then every
+// request threw "Invalid header name" reading it and answered 500 — refused.
+// A value that WORKED on 1.0.24 still boots, said: falsy is "unset", and a
+// truthy non-string names the header its String() spells (`true` → "true").
+Deno.test("trustProxyHeader: refused only where every request would 500", () => {
+  for (const tph of ["X-Forwarded-For ", "x:y", {}]) {
+    const c = one({ trustProxyHeader: tph });
+    assertEquals([c.level, c.keys], ["error", ["trustProxyHeader"]]);
+  }
+  for (const tph of [true, 1, false, 0]) {
+    const c = one({ trustProxyHeader: tph });
+    assertEquals([c.level, c.keys], ["warn", ["trustProxyHeader"]], `${tph}`);
+  }
+  assertStringIncludes(
+    one({ trustProxyHeader: true }).what,
+    'the header named "true"',
+  );
+  assertStringIncludes(one({ trustProxyHeader: false }).what, "read as unset");
+  for (const tph of ["x-forwarded-for", "X-Real-IP", "cf-connecting-ip", ""]) {
+    assertEquals(configConflicts({ trustProxyHeader: tph }), []);
+  }
+});
+
+// …and what `true` does at runtime is what the warning says: `Headers`
+// coerces it to the name "true" — it neither throws nor is ignored.
+Deno.test('trustProxyHeader: true reads the header named "true"', () => {
+  const h = new Headers({ "true": "203.0.113.7" });
+  assertEquals(h.get(true as unknown as string), "203.0.113.7");
 });

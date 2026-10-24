@@ -10,7 +10,11 @@ import {
 // The offline-queue depth is one fact — the browser client reads the same
 // constant. This file had its own 100 beside it.
 import { WS_MAX_QUEUE } from "../protocol/protocol-types.ts";
-import { connectLocal, type LocalConn } from "./local-listen.ts";
+import {
+  connectLocal,
+  type LocalConn,
+  socketPathState,
+} from "./local-listen.ts";
 import {
   backoffDelay,
   FRAME_TOO_LARGE_CLOSE,
@@ -31,6 +35,7 @@ import { _releaseCellBindings } from "../state/cell-reactive.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import {
   ackMethodKey,
+  type AckRegistry,
   createAckRegistry,
   SETTLES_CALLS,
 } from "../protocol/ack-registry.ts";
@@ -64,13 +69,16 @@ import {
 
 import { log } from "../diagnostics/logger-api.ts";
 import { redactUrlToken } from "../diagnostics/redact.ts";
-import { count } from "../diagnostics/fmt.ts";
+import { count, describeThrown, thrownText } from "../diagnostics/fmt.ts";
 import { createLineReader } from "../protocol/line-reader.ts";
 
 /** How often a CLI client says "still here". Matches the browser's heartbeat
  *  interval; the server's `frozen` threshold is 2000 ms, so this has to be
  *  comfortably inside it. */
 const CLI_HEARTBEAT_MS = 1000;
+/** A local-socket client failing to connect this long says so once, at
+ *  warn, with what the socket path is (B20). */
+export const UNREACHABLE_SAY_MS = 5_000;
 
 /** Written heartbeats with no frame back after which a connection that has
  *  answered a ping before is dead — the page's ceiling (`SILENT_BEATS_DEAD`
@@ -148,6 +156,15 @@ function offlineRefusal(what: string): Error {
   );
 }
 
+/** A call on a client that was close()d: never sent, never queued — the
+ *  queue it would wait in is never drained again, so it hung for ever. */
+function closedRefusal(type: string): Error {
+  return new Error(
+    `[aio:cli] "${type}" was NOT sent — this client is closed (close() is ` +
+      `final; connect again to call)`,
+  );
+}
+
 /** The wire action of a call by name — the frame a bound method sends. */
 function callAction(cell: string, method: string, args: unknown[]): Msg {
   if (
@@ -220,6 +237,24 @@ function _chunkTo(
   settled.then(off, off);
 }
 
+/** A chunk is the server answering for the call: each one restarts its ack
+ *  clock, so `ackTimeoutMs` bounds the SILENCE of a streamed call, never a
+ *  stream that is still delivering (a 20 s chat reply under the 15 s default
+ *  was rejected mid-reply). `unwrite` + `armTimer` = stop and restart it. */
+function _alive(
+  pending: AckRegistry,
+  cid: string,
+  onChunk: (value: unknown) => void,
+): (value: unknown) => void {
+  return (value) => {
+    if (pending.isWritten(cid)) {
+      pending.unwrite(cid);
+      pending.armTimer(cid);
+    }
+    onChunk(value);
+  };
+}
+
 /** Deliver one `chunk` frame. A listener that throws is reported, and the
  *  call goes on — its result still arrives. */
 function _routeChunk(routes: ChunkRoutes, d: unknown): void {
@@ -228,7 +263,7 @@ function _routeChunk(routes: ChunkRoutes, d: unknown): void {
   try {
     routes.get(cid)?.(value);
   } catch (e) {
-    log.warn("cli", `a stream's onChunk threw: ${e}`);
+    log.warn("cli", `a stream's onChunk threw: ${thrownText(e)}`);
   }
 }
 
@@ -251,7 +286,7 @@ function statusEmitter() {
         try {
           fn(now);
         } catch (e) {
-          log.warn("cli", `an onStatus listener threw: ${e}`);
+          log.warn("cli", `an onStatus listener threw: ${thrownText(e)}`);
         }
       }
     },
@@ -285,7 +320,11 @@ function _readyDeadline<S>(
   ms: number | undefined,
   resolve: (s: S) => void,
   reject: (e: Error) => void,
-): { settle: (s: S) => void; abandon: () => void } {
+): {
+  settle: (s: S) => void;
+  abandon: () => void;
+  refuse: (e: Error) => void;
+} {
   let done = false;
   let timer: number | undefined;
   // NaN is not "no deadline" by accident: it is said (and then is none).
@@ -316,6 +355,16 @@ function _readyDeadline<S>(
       done = true;
       if (timer !== undefined) clearTimeout(timer);
       resolve(s);
+    },
+    // The server ANSWERED the first connection with a refusal (401/403/429):
+    // no retry inside the deadline can turn that into a yes, so the caller
+    // who set one is told now, with the server's status — not the generic
+    // line when the deadline runs out. No deadline: `ready` waits, as before.
+    refuse: (e: Error) => {
+      if (done || timer === undefined) return;
+      done = true;
+      clearTimeout(timer);
+      reject(e);
     },
     // close() before the first state. The deadline used to stay armed past
     // close(): it fired later and told an already-closed client to "call
@@ -448,6 +497,17 @@ type DenoWebSocket = new (
   opts: { headers: Record<string, string> },
 ) => WebSocket;
 
+/** The status a refused WebSocket handshake carries in Deno's error text
+ *  (`… Invalid status code: 401`), when it is a refusal no retry turns into
+ *  a yes: 401, 403, 429. Pure. @internal */
+export function _refusedStatus(reason: string): number | undefined {
+  const m = /Invalid status code: (\d{3})\b/.exec(reason);
+  const status = m ? Number(m[1]) : undefined;
+  return status === 401 || status === 403 || status === 429
+    ? status
+    : undefined;
+}
+
 /** What a terminal client says when the server's frame is over its runtime's
  *  message ceiling — every reconnect, because the app is getting no state at
  *  all. Pure, so the hint and the chapter link are pinned by
@@ -527,6 +587,10 @@ export function _connectCli<S>(
      *  intent. `"fail"`: it rejects AT ONCE and is never sent later — right
      *  for a service call whose answer is only worth having now. */
     offline?: CliOffline;
+    /** Where the app is NOW — asked before every reconnect; a URL other than
+     *  the current one is followed (`peer()` re-reads the lock files, since a
+     *  restarted app binds a new port). Undefined: stay on the current URL. */
+    retarget?: () => string | undefined;
   },
 ): CliLink<S> {
   assertCliUrl(url);
@@ -568,6 +632,12 @@ export function _connectCli<S>(
   // `connectCli` can be called more than once in a process, and one client's
   // disconnect must never settle another's pending calls (D2).
   const _ack = _ackCeiling(opts?.ackTimeoutMs);
+  /** cid → action type of every call still awaiting its ack, and the
+   *  `type\0message` of the last calls refused — a `reduce-error` diag for a
+   *  throw THIS client's call already rejects with is not said twice (TCP
+   *  printed it as `server diagnostic`, UDS never did). */
+  const _callTypes = new Map<string, string>();
+  const _rejectedRecently = new Set<string>();
   const _pending = createAckRegistry(
     () => _ack,
     (m) => log.warn(m),
@@ -924,10 +994,12 @@ export function _connectCli<S>(
 
   let _readyResolve: ((s: S) => void) | null = null;
   let _readyAbandon: (() => void) | null = null;
+  let _readyRefuse: ((e: Error) => void) | null = null;
   const ready = new Promise<S>((r, j) => {
     const d = _readyDeadline<S>(url, opts?.readyTimeoutMs, r, j);
     _readyResolve = d.settle;
     _readyAbandon = d.abandon;
+    _readyRefuse = d.refuse;
   });
   // An unhandled rejection is not the point of the deadline — a caller that
   // never awaits `ready` (the normal UI case) must not crash the process.
@@ -1006,6 +1078,16 @@ export function _connectCli<S>(
 
   function connect(): void {
     if (ws || closed || connecting) return;
+    const moved = wasConnected ? opts?.retarget?.() : undefined;
+    if (moved !== undefined && moved !== url) {
+      assertCliUrl(moved);
+      log.info(
+        "cli",
+        `${redactUrlToken(url)} → ${redactUrlToken(moved)}: the app ` +
+          `restarted on a new address — following it`,
+      );
+      url = moved;
+    }
     const t = opts?.token;
     const h = opts?.headers;
     const hdrs = async () => h ? await h() : {};
@@ -1239,9 +1321,19 @@ export function _connectCli<S>(
               severity?: string;
               message?: string;
               hint?: string;
+              detail?: unknown;
             }
             | null;
-          if (d && d.severity === "error" && typeof d.message === "string") {
+          const at = (d?.detail as { actionType?: unknown } | undefined)
+            ?.actionType;
+          const ownRejection = d?.type === "reduce-error" &&
+            typeof at === "string" &&
+            ([..._callTypes.values()].includes(at) ||
+              _rejectedRecently.has(`${at}\0${d.message}`));
+          if (
+            d && d.severity === "error" && typeof d.message === "string" &&
+            !ownRejection
+          ) {
             log.error(
               "cli",
               `server diagnostic: ${d.message}${d.hint ? ` (${d.hint})` : ""}`,
@@ -1287,6 +1379,26 @@ export function _connectCli<S>(
           );
           return;
         }
+        case "icon": {
+          // The app's run-time icon (appIcon()): no icon here, so the line.
+          const d = (frame.d ?? {}) as Record<string, unknown>;
+          const what = ["window", "tray", "tooltip"].filter((k) =>
+            Object.hasOwn(d, k)
+          )
+            .map((k) =>
+              k === "tooltip"
+                ? `tooltip ${JSON.stringify(d.tooltip)}`
+                : `${k} ${
+                  d[k] === null
+                    ? "default"
+                    : Array.isArray(d[k]) && (d[k] as unknown[]).length > 1
+                    ? "animated"
+                    : "static"
+                }`
+            );
+          log.info("cli", `appIcon: ${what.join(" · ")}`);
+          return;
+        }
         case "chunk":
           _routeChunk(_chunks, frame.d);
           return;
@@ -1298,6 +1410,15 @@ export function _connectCli<S>(
           if (_retryRefusedCall(d)) return;
           _written.delete(cid);
           if (ok === false) {
+            const t = _callTypes.get(cid);
+            if (t !== undefined) {
+              _rejectedRecently.add(`${t}\0${d.error}`);
+              if (_rejectedRecently.size > 64) {
+                _rejectedRecently.delete(
+                  _rejectedRecently.values().next().value!,
+                );
+              }
+            }
             // `wireError`, not `new Error(error)`: it carries the server's
             // `code` through onto `err.code`, so `errorCode(err)` tells an
             // access denial from the app's own throw without matching text.
@@ -1446,6 +1567,29 @@ export function _connectCli<S>(
       }
       ws = null;
       if (closed) return;
+      // The server said no to the FIRST connection, at once: a caller with a
+      // deadline hears it now, with the status, instead of after the whole
+      // deadline as "the address, the token or the certificate is wrong".
+      const refused = wasConnected ? undefined : _refusedStatus(closeReason);
+      if (refused !== undefined) {
+        _readyRefuse?.(
+          Object.assign(
+            new Error(
+              `[aio:cli] ${shownUrl} refused the connection (${refused}) — ${
+                refused === 429
+                  ? "too many failed attempts from here; wait, then retry " +
+                    "with the right credential"
+                  : refused === 401
+                  ? "the token is wrong, missing or expired (or an identity " +
+                    "proof did not verify — the other app's log says which)"
+                  : "this caller is not allowed in"
+              }. Reconnection continues in the background; call close() to ` +
+                `stop it.`,
+            ),
+            { status: refused },
+          ),
+        );
+      }
       // A frame this runtime cannot take: 64 MiB is Deno's WebSocket message
       // ceiling and there is no option to raise it, so reconnecting gets the
       // same frame and the same death. Say so — every time, because the app is
@@ -1476,7 +1620,11 @@ export function _connectCli<S>(
         log.error(
           "cli",
           `cannot reach ${shownUrl}${
-            ev.code === 1008 ? ` (${ev.reason || "unauthorized"})` : ""
+            ev.code === 1008
+              ? ` (${ev.reason || "unauthorized"})`
+              : refused !== undefined
+              ? ` (refused: ${refused})`
+              : ""
           } — check the server is running and the URL/token match its share link (still retrying)${tlsHint}`,
         );
       }
@@ -1522,6 +1670,7 @@ export function _connectCli<S>(
     action: Msg,
     onChunk?: (value: unknown) => void,
   ): Promise<unknown> => {
+    if (closed) return Promise.reject(closedRefusal(action.type));
     if (_failOffline && !_isUp()) return Promise.reject(offlineRefusal(url));
     const cid = crypto.randomUUID();
     // deferTimer: the clock belongs to the FRAME, not to the call. The
@@ -1532,7 +1681,10 @@ export function _connectCli<S>(
       methodKey: ackMethodKey(action),
       deferTimer: true,
     });
-    if (onChunk) _chunkTo(_chunks, cid, onChunk, ackd);
+    _callTypes.set(cid, action.type);
+    const settled = () => void _callTypes.delete(cid);
+    ackd.then(settled, settled);
+    if (onChunk) _chunkTo(_chunks, cid, _alive(_pending, cid, onChunk), ackd);
     try {
       _trySend(
         { ...action, cid, ...(onChunk ? { stream: true } : {}) } as {
@@ -1581,6 +1733,9 @@ export function _connectCli<S>(
     // vanished with no error: a silent write loss in the window a
     // reconnecting client spends most of its time in.
     send(action: { type: string; payload?: unknown }): void {
+      // Warned, not thrown: a fire-and-forget send during shutdown must not
+      // start throwing where it used to vanish.
+      if (closed) return log.warn("cli", closedRefusal(action.type).message);
       _trySend(action);
     },
 
@@ -1698,11 +1853,22 @@ export function _connectCliUDS<S>(
      *  intent. `"fail"`: it rejects AT ONCE and is never sent later — right
      *  for a service call whose answer is only worth having now. */
     offline?: CliOffline;
+    /** The peer proof (`x-aio-peer` header value) for THIS (re)connect, or
+     *  undefined for none: sent as the connection's identity hello, and its
+     *  verdict awaited before `ready` — a refusal fails loud, never falls
+     *  back to anonymous. */
+    proof?: () => Promise<string | undefined>;
   },
 ): CliLink<S> {
   const _failOffline = opts?.offline === "fail";
   // Same per-connection registry as the WS client — see connectCli.
   const _ack = _ackCeiling(opts?.ackTimeoutMs);
+  /** cid → action type of every call still awaiting its ack, and the
+   *  `type\0message` of the last calls refused — a `reduce-error` diag for a
+   *  throw THIS client's call already rejects with is not said twice (TCP
+   *  printed it as `server diagnostic`, UDS never did). */
+  const _callTypes = new Map<string, string>();
+  const _rejectedRecently = new Set<string>();
   const _udsPending = createAckRegistry(
     () => _ack,
     (m) => log.warn(m),
@@ -1722,12 +1888,20 @@ export function _connectCliUDS<S>(
 
   let _readyResolve: ((s: S) => void) | null = null;
   let _readyAbandon: (() => void) | null = null;
+  let _readyRefuse: ((e: Error) => void) | null = null;
   const ready = new Promise<S>((r, j) => {
     const d = _readyDeadline<S>(socketPath, opts?.readyTimeoutMs, r, j);
     _readyResolve = d.settle;
     _readyAbandon = d.abandon;
+    _readyRefuse = d.refuse;
   });
   ready.catch(() => {}); // see connectCli — an unawaited ready must not crash
+  /** This connection's identity hello, until the server judged it: its state
+   *  frames are the ANONYMOUS view and are set aside — the verdict is followed
+   *  by this caller's own. */
+  let _helloCid: string | undefined;
+  /** Refusal reasons already said at ERROR — see the hello's `ack`. */
+  const _helloRefusals = new Set<string>();
 
   let _udsQueueNoted = false;
   /** Written actions by cid — what a door refusal (`retryAfterMs`) re-sends. */
@@ -1889,9 +2063,18 @@ export function _connectCliUDS<S>(
     }
   }
 
+  /** When the current run of failed dials began (0: connected, or none yet),
+   *  and whether it was said: the B20 instrument. */
+  let failingSince = 0;
+  let failingSaid = false;
   function connect(): void {
     if (conn || closed) return;
-    connectLocal(socketPath)
+    let proof: string | undefined;
+    (opts?.proof ? opts.proof() : Promise.resolve(undefined))
+      .then((p) => {
+        proof = p;
+        return connectLocal(socketPath);
+      })
       .then((c) => {
         // close() ran while this dial was in flight. Adopting the connection
         // kept a live socket and a read loop on a closed client, open until
@@ -1903,10 +2086,26 @@ export function _connectCliUDS<S>(
           return;
         }
         conn = c;
+        failingSince = 0;
+        failingSaid = false;
         writer = c.writable.getWriter();
-        retry = 0;
+        // With an identity hello, the backoff resets on its OK verdict only:
+        // a refused hello reconnects on the growing backoff, not every 1 s.
+        if (!proof) retry = 0;
 
-        // A3: announce our wire-protocol version before anything else.
+        // The identity hello is the FIRST frame (the server judges it before
+        // anything behind it runs); then, A3, our wire-protocol version.
+        _helloCid = proof ? crypto.randomUUID() : undefined;
+        if (proof) {
+          writer!.write(
+            encoder.encode(
+              enc("type", { kind: "peer", proof, cid: _helloCid }) + "\n",
+            ),
+          ).catch(() => {
+            // aio-ok: a dead socket ends the read loop below, which rejects
+            // the in-flight calls and reconnects with a fresh hello
+          });
+        }
         writer!.write(
           encoder.encode(enc("proto", protoHello(VERSION)) + "\n"),
         ).catch(() => {});
@@ -1959,6 +2158,28 @@ export function _connectCliUDS<S>(
                     const d = (frame.d ?? {}) as AckPayload;
                     const { cid, ok, value } = d;
                     if (typeof cid !== "string") continue;
+                    if (cid === _helloCid) {
+                      _helloCid = undefined;
+                      if (ok !== false) retry = 0;
+                      else {
+                        // Refused: the server closes this connection, and
+                        // the reconnect sends a fresh proof — never none.
+                        const why = d.error ?? "no reason given";
+                        const e = new Error(
+                          `[aio:cli] ${socketPath} refused this caller's ` +
+                            `identity — ${why}`,
+                        );
+                        // Once per distinct reason; a repeat is debug.
+                        if (_helloRefusals.has(why)) {
+                          log.debug("cli", e.message);
+                        } else {
+                          _helloRefusals.add(why);
+                          log.error("cli", e.message);
+                        }
+                        _readyRefuse?.(e);
+                      }
+                      continue;
+                    }
                     // Refused at the door, never ran: re-sent, not failed.
                     if (_udsRetryRefused(d)) continue;
                     if (ok === false) {
@@ -1980,6 +2201,22 @@ export function _connectCliUDS<S>(
                     // this one negotiated and threw it away, so on the socket
                     // path nothing could answer the question.
                     if (theirs) rememberPeerHello(theirs);
+                    // A server that does not judge identity hellos (an older
+                    // aio) sends no verdict: its calls run anonymous — said.
+                    if (
+                      _helloCid &&
+                      (frame.d as { peerHello?: unknown } | undefined)
+                          ?.peerHello !== true
+                    ) {
+                      _helloCid = undefined;
+                      log.warn(
+                        "cli",
+                        `${socketPath}: this app's aio predates proven calls ` +
+                          `over its local socket — this caller's calls carry ` +
+                          `NO identity there (update it, or start it with a ` +
+                          `port)`,
+                      );
+                    }
                     // Unreadable stops loudly, as the WS twin above does.
                     const result = theirs
                       ? negotiateProtocol(protoHello(VERSION), theirs)
@@ -2017,6 +2254,8 @@ export function _connectCliUDS<S>(
                     continue;
                   case "state":
                   case "patches": {
+                    // The anonymous view, sent before the identity verdict.
+                    if (_helloCid) continue;
                     _status.set(true);
                     _wireSettled(); // no `cfg` came before it: none will
                     // onResync is NOT optional: without it a patch that fails
@@ -2029,7 +2268,6 @@ export function _connectCliUDS<S>(
                         "cli",
                         "UDS patch did not apply (desync) — " +
                           "requesting a full snapshot",
-                        { detail: String() },
                       );
                       writer?.write(encoder.encode(enc("resync") + "\n"))
                         .catch(() => {});
@@ -2092,13 +2330,31 @@ export function _connectCliUDS<S>(
           }
         })();
       })
-      .catch(() => {
-        if (!closed) {
-          reconnectTimer = setTimeout(
-            connect,
-            backoffDelay(retry++),
+      .catch((err) => {
+        if (closed) return;
+        // Each failed dial, with what the path is (debug); a run of them
+        // past UNREACHABLE_SAY_MS once at warn — so an outage says WHY.
+        const now = Date.now();
+        if (!failingSince) failingSince = now;
+        const why = `${
+          (err as { code?: string })?.code ?? describeThrown(err)
+        }`;
+        const at = socketPathState(socketPath, now);
+        log.debug(
+          `local socket ${socketPath}: connect failed (${why}); the path is ${at}`,
+        );
+        if (!failingSaid && now - failingSince >= UNREACHABLE_SAY_MS) {
+          failingSaid = true;
+          log.warn(
+            `local socket ${socketPath} unreachable for ${
+              ((now - failingSince) / 1000).toFixed(1)
+            } s (${why}); the path is ${at} — still retrying`,
           );
         }
+        reconnectTimer = setTimeout(
+          connect,
+          backoffDelay(retry++),
+        );
       });
   }
 
@@ -2109,6 +2365,7 @@ export function _connectCliUDS<S>(
     action: Msg,
     onChunk?: (value: unknown) => void,
   ): Promise<unknown> => {
+    if (closed) return Promise.reject(closedRefusal(action.type));
     if (_failOffline && !writer) {
       return Promise.reject(offlineRefusal(socketPath));
     }
@@ -2119,7 +2376,9 @@ export function _connectCliUDS<S>(
       methodKey: ackMethodKey(action),
       deferTimer: true,
     });
-    if (onChunk) _chunkTo(_chunks, cid, onChunk, ackd);
+    if (onChunk) {
+      _chunkTo(_chunks, cid, _alive(_udsPending, cid, onChunk), ackd);
+    }
     let sent: { written: boolean; queued: boolean };
     try {
       sent = _udsTrySend(
@@ -2160,6 +2419,7 @@ export function _connectCliUDS<S>(
     ready,
 
     send(action: { type: string; payload?: unknown }): void {
+      if (closed) return log.warn("cli", closedRefusal(action.type).message);
       _udsTrySend(action);
     },
 

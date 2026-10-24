@@ -15,7 +15,7 @@
 // the drift this file exists to make impossible.
 
 /** One pending call: the shared promise, its settlers, and its deadline. */
-import { bumpPending } from "./pending-calls.ts";
+import { finishPending, startPending } from "./pending-calls.ts";
 
 type PendingEntry = {
   promise: Promise<unknown>;
@@ -29,6 +29,8 @@ type PendingEntry = {
    *  The server-side twin is `perfBudget.methods[key].timeout: "warn"`. */
   mode: "reject" | "warn";
   methodKey: string | undefined;
+  /** `startPending`'s number for this call (methodKey set). */
+  start: number;
   /** True once the frame carrying this call has actually been WRITTEN to a
    *  transport. False while it sits in an offline queue.
    *
@@ -123,7 +125,7 @@ export function createAckRegistry(
     }
     entry.timer = setTimeout(() => {
       pending.delete(cid);
-      if (entry.methodKey) bumpPending(entry.methodKey, -1);
+      if (entry.methodKey) finishPending(entry.methodKey, entry.start);
       const what = entry.methodKey ? `'${entry.methodKey}'` : "the method";
       entry.reject(
         new Error(
@@ -158,6 +160,7 @@ export function createAckRegistry(
         ceilingMs: typeof ceiling === "number" ? ceiling : ceiling.warnAfterMs,
         mode: typeof ceiling === "number" ? "reject" : "warn",
         methodKey: opts?.methodKey,
+        start: 0,
         // A caller that does NOT defer is telling us it has no queue to track
         // — the frame is gone as far as it knows, so the call counts as
         // in-flight and a disconnect settles it (the historic behaviour).
@@ -167,7 +170,7 @@ export function createAckRegistry(
       // `cell.$pending("m")` — a CLIENT's own outstanding calls. The server
       // counts its executor's; this counts the ones this browser is waiting
       // on, which is what a spinner in that browser is actually about.
-      if (entry.methodKey) bumpPending(entry.methodKey, 1);
+      if (entry.methodKey) entry.start = startPending(entry.methodKey);
       if (!opts?.deferTimer) arm(cid, entry);
       return promise;
     },
@@ -193,7 +196,7 @@ export function createAckRegistry(
       const entry = pending.get(cid);
       if (!entry) return false;
       pending.delete(cid);
-      if (entry.methodKey) bumpPending(entry.methodKey, -1);
+      if (entry.methodKey) finishPending(entry.methodKey, entry.start);
       if (entry.timer) clearTimeout(entry.timer);
       entry.resolve(value);
       return true;
@@ -202,7 +205,7 @@ export function createAckRegistry(
       const entry = pending.get(cid);
       if (!entry) return false;
       pending.delete(cid);
-      if (entry.methodKey) bumpPending(entry.methodKey, -1);
+      if (entry.methodKey) finishPending(entry.methodKey, entry.start);
       if (entry.timer) clearTimeout(entry.timer);
       entry.reject(err);
       return true;
@@ -213,7 +216,7 @@ export function createAckRegistry(
         if (entry.timer) clearTimeout(entry.timer);
         entry.reject(err);
         pending.delete(cid);
-        if (entry.methodKey) bumpPending(entry.methodKey, -1);
+        if (entry.methodKey) finishPending(entry.methodKey, entry.start);
       }
       return count;
     },
@@ -224,7 +227,7 @@ export function createAckRegistry(
         if (entry.timer) clearTimeout(entry.timer);
         entry.reject(err);
         pending.delete(cid);
-        if (entry.methodKey) bumpPending(entry.methodKey, -1);
+        if (entry.methodKey) finishPending(entry.methodKey, entry.start);
         count++;
       }
       return count;

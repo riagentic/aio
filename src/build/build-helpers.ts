@@ -242,17 +242,28 @@ export function gradlewPath(
   return join(androidDir, os === "windows" ? "gradlew.bat" : "gradlew");
 }
 
-/** Find gradle binary — checks PATH then common install locations */
-export function findGradle(): string | null {
-  const home = userHome() ?? "/tmp";
-  const candidates = [
+/** Where `findGradle` looks, in order. On Windows Gradle's launcher is
+ *  `gradle.bat`, and a bare `gradle` is spawned as `gradle.exe` only — so a
+ *  Gradle unzipped onto PATH (its `bin/` holds no .exe) was "not found".
+ *  Pure. @internal */
+export function gradleCandidates(
+  os: typeof Deno.build.os,
+  home: string,
+): string[] {
+  return [
     "gradle",
+    ...(os === "windows" ? ["gradle.bat"] : []),
     "/usr/bin/gradle",
     "/usr/local/bin/gradle",
     "/snap/bin/gradle",
     "/opt/gradle/bin/gradle",
     `${home}/.sdkman/candidates/gradle/current/bin/gradle`,
   ];
+}
+
+/** Find gradle binary — checks PATH then common install locations */
+export function findGradle(): string | null {
+  const candidates = gradleCandidates(Deno.build.os, userHome() ?? "/tmp");
   for (const cmd of candidates) {
     try {
       const r = new Deno.Command(cmd, {
@@ -271,13 +282,16 @@ export function findGradle(): string | null {
  *  own daemon JVM must be ≤ this — a newer JDK (e.g. 25) crashes Gradle at
  *  startup with a bare version string. (Bump alongside the wrapper version.) */
 export const GRADLE_MAX_JDK = 23;
+/** Lowest Java major the pinned Android Gradle Plugin (8.7) RUNS on — an
+ *  older JDK fails the build with "Android Gradle plugin requires Java 17". */
+export const GRADLE_MIN_JDK = 17;
 /** Preferred ceiling — AGP 8.7's blessed LTS range (17/21). Pick the newest JDK
  *  at or below this before falling back to any other Gradle-runnable JDK. */
 const PREFERRED_MAX_JDK = 21;
 
 export interface JdkResult {
   /** Primary JDK to hand Gradle (JAVA_HOME) — a canonical, compile-verified
-   *  path with major ≤ GRADLE_MAX_JDK. null when none is usable. */
+   *  path with GRADLE_MIN_JDK ≤ major ≤ GRADLE_MAX_JDK. null when none is usable. */
   home: string | null;
   /** Major version of `home` (0 when home is null). */
   major: number;
@@ -288,6 +302,54 @@ export interface JdkResult {
    *  `org.gradle.java.installations.paths` so its toolchain resolver can only
    *  choose a real, compiler-capable JDK (never a JRE it mis-detected). */
   all: string[];
+}
+
+/** Where JDKs live on `os`: `roots` hold one JDK per subdirectory, `homes`
+ *  are JDK homes themselves. Windows has its own: Android Studio there sets no
+ *  JAVA_HOME and puts no javac on PATH, so its bundled `jbr` — the JDK most
+ *  Windows Android developers have — was never found, and the build said "a
+ *  JRE is not enough". Pure. */
+export function jdkPlaces(
+  os: typeof Deno.build.os,
+  home: string,
+  env: (name: string) => string | undefined,
+): { roots: string[]; homes: string[] } {
+  if (os === "windows") {
+    const pf = [...new Set([env("ProgramFiles"), env("ProgramW6432")])]
+      .filter((d): d is string => !!d);
+    const local = env("LOCALAPPDATA");
+    const vendors = [
+      "Java",
+      "Eclipse Adoptium",
+      "Microsoft",
+      "Zulu",
+      "Amazon Corretto",
+      "BellSoft",
+    ];
+    return {
+      roots: pf.flatMap((p) => vendors.map((v) => join(p, v))),
+      homes: [
+        ...pf.map((p) => join(p, "Android", "Android Studio", "jbr")),
+        ...(local ? [join(local, "Programs", "Android Studio", "jbr")] : []),
+      ],
+    };
+  }
+  return {
+    roots: [
+      "/usr/lib/jvm",
+      "/usr/java",
+      "/Library/Java/JavaVirtualMachines",
+      "/opt/homebrew/opt",
+      "/usr/local/opt",
+      `${home}/.sdkman/candidates/java`,
+    ],
+    homes: [
+      "/opt/android-studio/jbr",
+      `${home}/android-studio/jbr`,
+      "/Applications/Android Studio.app/Contents/jbr/Contents/Home",
+      `${home}/.local/share/JetBrains/Toolbox/apps/AndroidStudio/ch-0/jbr`,
+    ],
+  };
 }
 
 /** Find a JDK to build Android with — robust to machine/packaging quirks:
@@ -309,16 +371,8 @@ export function findJdk(): JdkResult {
     if (dir) javacPaths.add(join(dir, "bin", exe));
   };
   addHome(Deno.env.get("JAVA_HOME"));
-  for (
-    const root of [
-      "/usr/lib/jvm",
-      "/usr/java",
-      "/Library/Java/JavaVirtualMachines",
-      "/opt/homebrew/opt",
-      "/usr/local/opt",
-      `${home}/.sdkman/candidates/java`,
-    ]
-  ) {
+  const places = jdkPlaces(Deno.build.os, home, (k) => Deno.env.get(k));
+  for (const root of places.roots) {
     try {
       for (const entry of Deno.readDirSync(root)) {
         if (!entry.isDirectory && !entry.isSymlink) continue;
@@ -330,14 +384,7 @@ export function findJdk(): JdkResult {
       }
     } catch { /* root absent — skip */ }
   }
-  for (
-    const dir of [
-      "/opt/android-studio/jbr",
-      `${home}/android-studio/jbr`,
-      "/Applications/Android Studio.app/Contents/jbr/Contents/Home",
-      `${home}/.local/share/JetBrains/Toolbox/apps/AndroidStudio/ch-0/jbr`,
-    ]
-  ) addHome(dir);
+  for (const dir of places.homes) addHome(dir);
   const onPath = whichJavac();
   if (onPath) javacPaths.add(onPath);
 
@@ -358,7 +405,9 @@ export function findJdk(): JdkResult {
 
   const compiling = [...byHome].map(([h, major]) => ({ home: h, major }));
   const newestFound = compiling.reduce((m, j) => Math.max(m, j.major), 0);
-  const usable = compiling.filter((j) => j.major <= GRADLE_MAX_JDK);
+  const usable = compiling.filter((j) =>
+    j.major >= GRADLE_MIN_JDK && j.major <= GRADLE_MAX_JDK
+  );
   const all = usable.map((j) => j.home).sort();
   if (usable.length === 0) return { home: null, major: 0, newestFound, all };
 

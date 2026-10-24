@@ -45,7 +45,9 @@ import {
 } from "../vitals/render-meter.ts";
 import { createTransportProbeClient } from "../vitals/transport-probe.ts";
 import { resolveSyncCells } from "./sync-cells.ts";
+import { orphanSyncQueues, syncStoragePrefix } from "../sync/storage-prefix.ts";
 import { _cfgSink } from "./browser-shared.ts";
+import * as browserSync from "./browser-sync.ts";
 import {
   DEFAULT_HEARTBEAT_INTERVAL,
   DEFAULT_THRESHOLDS,
@@ -338,6 +340,7 @@ import {
   bindAllCellsReactive,
   getRegisteredCells,
 } from "../state/cell-reactive.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 let _ensured = false;
 export function ensureConnected(): void {
@@ -361,7 +364,7 @@ export function ensureConnected(): void {
     // page entirely. Nothing uninstalls it, so there was nothing to re-arm.
     // Sync cells route method calls through the CRDT engine (HLC op + offline
     // queue) instead of the plain action path; everything else is unchanged.
-    // The engine boots lazily (dynamic import) below. A sync-cell method called
+    // The engine boots asynchronously below. A sync-cell method called
     // in that boot window is BUFFERED — never leaked to a plain send, which would
     // skip HLC stamping + the offline queue and silently diverge the op-log.
     const plainSend = _clientSend ?? undefined;
@@ -378,7 +381,7 @@ export function ensureConnected(): void {
       type: "client-setup-failed",
       severity: "error",
       source: "browser-protocol",
-      message: `client setup threw: ${e}`,
+      message: `client setup threw: ${thrownText(e)}`,
       hint: "a cell binding threw while connecting; the socket is opened " +
         "anyway — fix the cell, then reload",
     });
@@ -432,6 +435,8 @@ let _syncRoute: ((a: { type: string; payload?: unknown }) => boolean) | null =
  *  the engine's async import resolves) so the send wrapper can buffer their
  *  actions during the boot window instead of racing the import. */
 let _syncCellIds: Set<string> | null = null;
+/** The loaded engine module, once booted — for cells adopted later. */
+let _syncMod: typeof browserSync | null = null;
 /** Sync-cell actions dispatched before the engine finished booting; replayed
  *  through the engine once ready (or as plain sends if boot fails). */
 const _syncPending: Array<{ type: string; payload?: unknown }> = [];
@@ -480,15 +485,24 @@ function _flushSyncPending(
   }
 }
 
-/** The engine loader — the real dynamic import, injectable so a test can hold
- *  the boot open and prove the buffer window deterministically. */
-let _syncLoader: () => Promise<typeof import("./browser-sync.ts")> = () =>
-  import("./browser-sync.ts");
+/** The engine loader — injectable so a test can hold the boot open and prove
+ *  the buffer window deterministically.
+ *
+ *  A STATIC import behind an async hop, not `import()`. The browser bundle is
+ *  one file (no code splitting), so a dynamic import never kept the engine
+ *  off a page — esbuild inlined it — and it made esbuild wrap every module
+ *  the engine reaches in a lazy-init closure: measured 1,119 B gzipped on
+ *  every page, for nothing. The engine's modules evaluate nothing but
+ *  constants, so loading them up front changes no behaviour; the boot still
+ *  runs only for an app with a sync cell, one microtask later, as before. */
+const _realSyncLoader = (): Promise<typeof browserSync> =>
+  Promise.resolve(browserSync);
+let _syncLoader: () => Promise<typeof browserSync> = _realSyncLoader;
 /** Test seam: override (or reset with null) the sync-engine loader. */
 export function _setSyncLoaderForTest(
-  fn: (() => Promise<typeof import("./browser-sync.ts")>) | null,
+  fn: (() => Promise<typeof browserSync>) | null,
 ): void {
-  _syncLoader = fn ?? (() => import("./browser-sync.ts"));
+  _syncLoader = fn ?? _realSyncLoader;
 }
 
 /** Apply a server-sent "cfg" frame (runtime config handshake). Shell-injected
@@ -504,7 +518,39 @@ export function _applyServerConfig(cfg: Record<string, unknown>): void {
   };
   g.__aioConfig = { ...cfg, ...(g.__aioConfig ?? {}) };
   _warnCellSetDrift(cfg.bootedCells);
-  if (_ensured) _initSyncIfNeeded();
+  if (_ensured) {
+    _initSyncIfNeeded();
+    _warnOrphanQueues();
+  }
+}
+
+let _orphansChecked = false;
+/** A cell that stopped syncing leaves its offline queue in localStorage, and
+ *  its unsent ops were never reported — no engine loads for it again. Checked
+ *  once per page, at the first `cfg` frame (the app id and the server's
+ *  adopted cells are known by then), from the eager bundle: an app with NO
+ *  sync cell left never loads the engine at all. */
+function _warnOrphanQueues(): void {
+  if (_orphansChecked) return;
+  _orphansChecked = true;
+  const appId = (globalThis as unknown as { __aioConfig?: { appId?: unknown } })
+    .__aioConfig?.appId;
+  const prefix = syncStoragePrefix(typeof appId === "string" ? appId : null);
+  const orphans = orphanSyncQueues(prefix, _syncCellIds ?? new Set());
+  if (!orphans.length) return;
+  const message = `[aio:sync] unsent offline changes of cells that do not ` +
+    `sync in this build, never to be sent: ${
+      orphans.map((o) => `"${o.cell}" (${o.unsent}, key ${prefix}:${o.cell})`)
+        .join(", ")
+    }. Turn its sync back on to deliver them, or remove the key to discard.`;
+  console.warn(message);
+  _diagEmit({
+    type: "sync-orphan-queue",
+    severity: "warning",
+    source: "sync",
+    message,
+    detail: orphans,
+  });
 }
 
 /** The cells the bundle registers that the server did NOT boot — the pure
@@ -561,8 +607,21 @@ _cfgSink.apply = _applyServerConfig;
 
 function _initSyncIfNeeded(): void {
   // Re-entrant by design: called at ensureConnected AND when a "cfg" frame
-  // lands. Once ids are known (or the engine is up) there is nothing to redo.
-  if (_syncCellIds || _syncRoute) return;
+  // lands. The frame can name cells the server ADOPTED (localFirst) after the
+  // engine was started for the cells that sync on their own: they join it
+  // (buffered meanwhile, like every sync call in the boot window).
+  if (_syncRoute) {
+    for (const id of _syncMod?.adoptBrowserSyncCells() ?? []) {
+      _syncCellIds?.add(id);
+    }
+    return;
+  }
+  if (_syncCellIds) {
+    for (const id of resolveSyncCells(getRegisteredCells().values()).keys()) {
+      _syncCellIds.add(id);
+    }
+    return;
+  }
   // Same resolver the engine uses — see sync-cells.ts for why this is not two
   // independent walks over the registry.
   const ids = new Set(
@@ -576,7 +635,7 @@ function _initSyncIfNeeded(): void {
   // Known synchronously so the send wrapper buffers from the FIRST dispatch —
   // this is what closes the boot-window race.
   _syncCellIds = ids;
-  // Dynamic import keeps the engine out of apps that don't use sync.
+  // Only an app with a sync cell boots the engine.
   _syncLoader().then((mod) => {
     const engine = mod.initBrowserSync((raw) => _sendRawViaTransport(raw));
     if (!engine) {
@@ -585,6 +644,7 @@ function _initSyncIfNeeded(): void {
       _flushSyncPending(null);
       return;
     }
+    _syncMod = mod;
     _syncRoute = mod.handleSyncLocalAction;
     _setSyncWiring(mod.handleSyncMessage, mod.setSyncOnline);
     _flushSyncPending(_syncRoute);
@@ -616,8 +676,10 @@ export function _registerSyncTransport(
 export function _resetEnsured(): void {
   _ensured = false;
   _syncRoute = null;
+  _syncMod = null;
   _syncCellIds = null;
   _syncPending.length = 0;
+  _orphansChecked = false;
 }
 
 // ── Visibility guard ────────────────────────────────────────────────

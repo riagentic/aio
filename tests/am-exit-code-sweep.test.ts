@@ -93,10 +93,13 @@ interface Scenario {
   prepare?: (w: World) => Promise<Prep>;
 }
 
-/** "amsweepghost … not running", in either order and any of am's phrasings. */
+/** "amsweepghost … not running", in either order and any of am's phrasings —
+ *  with another app running, am says `no app named "amsweepghost" is
+ *  running` (seen on a Windows VM where a parallel test's app was up). */
 const ghostDown = new RegExp(
   `${GHOST}[\\s\\S]*(?:not running|nothing is running)|` +
-    `(?:not running|no running app)[\\s\\S]*${GHOST}`,
+    `(?:not running|no running app)[\\s\\S]*${GHOST}|` +
+    `no app named "${GHOST}" is running`,
   "i",
 );
 

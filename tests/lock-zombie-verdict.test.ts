@@ -503,6 +503,10 @@ if (Deno.env.get("SETTLED")) {
   _zombieDeps.recordAge = () => 3_600_000;
   _zombieDeps.delay = (ms) => new Promise((r) => setTimeout(r, ms / 10));
 }
+// "fresh": the holder's record was written a moment ago, however long this
+// launch took to boot (over the 10 s grace on a loaded Windows VM, which made
+// the "fresh record" case judge a record that had aged).
+if (Deno.env.get("FRESH")) _zombieDeps.recordAge = () => 0;
 if (Deno.env.get("REFILE")) LOCK_REFILE_MS.value = Number(Deno.env.get("REFILE"));
 if (Deno.env.get("END") === "cannot") {
   _zombieDeps.end = () => Promise.resolve(false);
@@ -779,7 +783,7 @@ Deno.test({
   async fn() {
     await withRunningApp("A", {}, async (a) => {
       // The probes are planted, and would count as they are made.
-      const b = await a.launchB({ SEAM: "once" });
+      const b = await a.launchB({ SEAM: "once", FRESH: "1" });
       assertEquals(b.code, 1, b.out);
       assertStringIncludes(b.out, "Already running");
       assert(!b.out.includes("PROBE"), b.out);

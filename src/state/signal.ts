@@ -1,5 +1,5 @@
 import { log } from "../diagnostics/logger-api.ts";
-import { count } from "../diagnostics/fmt.ts";
+import { count, thrownText } from "../diagnostics/fmt.ts";
 import { isDevMode } from "./dev-flag.ts";
 import { outsideServerOrigin } from "./call-origin.ts";
 
@@ -479,7 +479,7 @@ function _flushSubscribers(): void {
             sub.prepare();
           } catch (e) {
             log.error("signal", "effect cleanup error:", {
-              detail: String(e),
+              detail: thrownText(e),
             });
           }
         }
@@ -494,7 +494,7 @@ function _flushSubscribers(): void {
             "signal",
             "an effect threw while re-running:",
             {
-              detail: String(e),
+              detail: thrownText(e),
             },
           );
         }
@@ -681,6 +681,7 @@ class SignalImpl<T> implements Omit<Signal<T>, never> {
     }
     this._value = resolved;
     this._version++;
+    _selfWrites?.add(this as SignalImpl<unknown>);
     _propagate(this._subscribers);
     if (_batchDepth === 0) _flush();
   }
@@ -1049,7 +1050,7 @@ export function _computedDisposeAll(list: Disposable[]): void {
         c.dispose();
       } catch (e) {
         log.error("signal", "computed dispose error:", {
-          detail: String(e),
+          detail: thrownText(e),
         });
       }
     }
@@ -1082,7 +1083,9 @@ export function _effectDisposeAll(list: (() => void)[]): void {
       try {
         dispose();
       } catch (e) {
-        log.error("signal", "effect dispose error:", { detail: String(e) });
+        log.error("signal", "effect dispose error:", {
+          detail: thrownText(e),
+        });
       }
     }
   } finally {
@@ -1092,8 +1095,30 @@ export function _effectDisposeAll(list: (() => void)[]): void {
 
 // ── Effect ──────────────────────────────────────────────────────────
 
+/** The signals the running `rerunOnSelfWrite` effect body changed. */
+let _selfWrites: Set<SignalImpl<unknown>> | null = null;
+
+/** Options for `effect(fn, opts)`. */
+export interface EffectOptions {
+  /** Re-run when the body itself changes a signal it read (Preact/Solid).
+   *  Default false: such a write is not heard, so `log.set([...log(), x()])`
+   *  cannot loop. A body that never settles hits the flush guard (warned). */
+  rerunOnSelfWrite?: boolean;
+}
+
 /** Run a side-effect that re-executes when its tracked signals change; returns a dispose function. */
-export function effect(fn: () => void | CleanupFn): CleanupFn {
+export function effect(fn: () => void | CleanupFn): CleanupFn;
+/** `effect(fn)` with options — `{ rerunOnSelfWrite: true }` re-runs it when
+ *  its own body changes a signal it read. */
+export function effect(
+  fn: () => void | CleanupFn,
+  opts: EffectOptions,
+): CleanupFn;
+export function effect(
+  fn: () => void | CleanupFn,
+  opts?: EffectOptions,
+): CleanupFn {
+  const selfWrites = opts?.rerunOnSelfWrite === true;
   let cleanup: CleanupFn | void;
   let unsubs: CleanupFn[] = [];
   let disposed = false;
@@ -1132,6 +1157,9 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
       // exactly when a re-run's writes are seen.
       batch(() => {
         const deps = _trackStart();
+        const outerWrites = _selfWrites;
+        const wrote = selfWrites ? new Set<SignalImpl<unknown>>() : null;
+        _selfWrites = wrote;
         try {
           cleanup = fn();
           // AIO-188: fn() may have called dispose() on itself — and then
@@ -1146,6 +1174,7 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
             c();
           }
         } finally {
+          _selfWrites = outerWrites;
           _trackEnd(deps);
           if (firstDeps === null) firstDeps = deps;
           // Re-subscribe on EVERY exit path, including the throw. This used
@@ -1162,6 +1191,8 @@ export function effect(fn: () => void | CleanupFn): CleanupFn {
             for (const dep of deps) {
               dep._subscribers.add(sub);
               unsubs.push(() => dep._subscribers.delete(sub));
+              // Heard after the subscription: this batch's flush re-runs it.
+              if (wrote?.has(dep)) _pendingSubscribers.add(sub);
             }
           }
         }

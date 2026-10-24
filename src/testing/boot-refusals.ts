@@ -44,6 +44,7 @@ import {
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { _openScopeDepth } from "../state/signal.ts";
 import { peerReadInWorkerMessage } from "../server/cell-worker-host.ts";
+import { PERMANENT_REFUSAL } from "../state/schedule.ts";
 
 /** Run EVERY boot refusal `aio.run()` runs, against the cells a harness is
  *  about to boot in-process — a credential exposed to the UI, a filtered sync
@@ -222,6 +223,26 @@ export function crashWorker(
   if (!respawn) sim.dead = err.message;
   for (const reject of sim.inflight) reject(err);
   sim.inflight.clear();
+}
+
+/** Throw what production's closed worker answers (`closedWorkerCall`) when
+ *  `action` is one of crashed cell `id`'s methods. Lifecycle (`__init`,
+ *  `__destroy`) maintains the main isolate's copy and passes, as it does
+ *  there (cell-worker-pool.ts `route`). Permanent, so a schedule polling the
+ *  cell stops with one error. */
+function refuseIfCrashed(id: string, action: unknown): void {
+  const crash = crashSims.get(id)?.dead;
+  const type = (action as { type?: unknown } | null)?.type;
+  if (crash == null || typeof type !== "string") return;
+  if (type.slice(type.indexOf(":") + 1).startsWith("__")) return;
+  throw Object.assign(
+    new Error(
+      `${crash} — action "${type}" was not applied, and this cell is ` +
+        `unreachable for the life of the process. Restart the app, or keep ` +
+        `the work that can throw out of the worker isolate.`,
+    ),
+    { [PERMANENT_REFUSAL]: true },
+  );
 }
 
 // ── Worker isolation, in process ──────────────────────────────────────────
@@ -463,8 +484,15 @@ export function _isolateWorkerCellsInProcess(
     for (const slot of ["reduce", "execute"] as const) {
       const prev = a[slot];
       if (typeof prev !== "function") continue;
-      const scoped = (...args: unknown[]) =>
-        enter(() => (prev as (...x: unknown[]) => unknown)(...args));
+      const scoped = (...args: unknown[]) => {
+        // A crashed cell's method never runs again — however it was reached.
+        // The bound method refuses in `_callAcrossWorkerBoundary`; a raw
+        // dispatch (a schedule tick, `send`, an effect's follow-up) reaches
+        // only this reduce, and ran the "dead" cell's method in process on
+        // every tick where production's closed worker refuses each one.
+        if (slot === "reduce") refuseIfCrashed(id, args[1]);
+        return enter(() => (prev as (...x: unknown[]) => unknown)(...args));
+      };
       a[slot] = scoped;
       undo.push(() => {
         if (a[slot] === scoped) a[slot] = prev;

@@ -12,6 +12,7 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   createServerSyncHandler,
+  notDraining,
   SYNC_SOCKET_HIGH_WATER,
 } from "../src/sync/server-handler.ts";
 import { createTestDb } from "./sync/_test-db.ts";
@@ -120,4 +121,37 @@ Deno.test("sync sendTo: a peer whose backlog stops falling is closed after the s
     Date.now = realNow;
     r.close();
   }
+});
+
+// `sendTo` and `broadcastRaw` write to the same sockets and used to keep ONE
+// low-backlog memo EACH: a rarely-sending writer judged the peer by a low it
+// saw a minute ago and closed (1013) a peer that had drained in between —
+// seen only by the other writer. One shared memo now.
+Deno.test("sync sendTo: a drain seen by the other writer (broadcastRaw) is not a stall", async () => {
+  const r = rig();
+  const realNow = Date.now;
+  try {
+    const p = await answered(r);
+    const t = realNow();
+    await r.handler.handleOp(op(), { id: "c1" }, p.ws); // low = 6 MB at t
+    // broadcastRaw's own check, the moment it saw the peer back under the mark
+    assertEquals(notDraining(p.ws, 0, t + 1_000), false);
+    Date.now = () => t + 60_000; // over the mark again, a minute later
+    await r.handler.handleOp(op(), { id: "c1" }, p.ws);
+    assertEquals(p.closes, [], "closed on a low the other writer saw drain");
+  } finally {
+    Date.now = realNow;
+    r.close();
+  }
+});
+
+Deno.test("broadcastRaw keeps no drain memo of its own", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../src/server/server-broadcast.ts", import.meta.url),
+  );
+  assertEquals(
+    /WeakMap<object, \{ bytes: number; at: number \}>/.test(src),
+    false,
+  );
+  assert(src.includes("notDraining(ws, ws.bufferedAmount, now)"));
 });

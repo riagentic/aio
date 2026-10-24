@@ -67,8 +67,11 @@ async function runSh(
     env?: Record<string, string>;
     /** A copy of the user's own at `~/Applications/Demo App.app`. */
     ownCopy?: boolean;
-    /** What the app's log holds, written where an app run here keeps it. */
+    /** What the app's log holds, written where an app run here keeps it —
+     *  by the app, during the open (as a real one does). */
     log?: string;
+    /** The log was written BEFORE this open: an earlier run's. */
+    staleLog?: boolean;
   } = {},
 ) {
   const tmp = await tempDir("run-sh-macos-");
@@ -87,8 +90,6 @@ async function runSh(
     `[ "$1" = "-s" ] && { echo ${os}; exit 0; }\nexec /usr/bin/uname "$@"`,
   );
   await sh("am", "exit 0");
-  // One argument per line, so a path with a space stays one argument.
-  await sh("open", `for a in "$@"; do printf '%s\\n' "$a"; done > "${opened}"`);
   await sh("install.sh", "exit 0");
   const asked = join(tmp, "pgrep-asked");
   await sh(
@@ -125,16 +126,30 @@ async function runSh(
     await Deno.mkdir(copy, { recursive: true });
     await Deno.writeTextFile(join(copy, "mine"), "");
   }
+  const logs = join(
+    opts.env?.AIO_APPS_DIR
+      ? join(opts.env.AIO_APPS_DIR, "demo")
+      : join(home.HOME!, ".demo"),
+    "logs",
+  );
   if (opts.log !== undefined) {
-    const logs = join(
-      opts.env?.AIO_APPS_DIR
-        ? join(opts.env.AIO_APPS_DIR, "demo")
-        : join(home.HOME!, ".demo"),
-      "logs",
-    );
     await Deno.mkdir(logs, { recursive: true });
-    await Deno.writeTextFile(join(logs, "app.log"), opts.log);
+    await Deno.writeTextFile(join(tmp, "log-src"), opts.log);
+    if (opts.staleLog) {
+      await Deno.copyFile(join(tmp, "log-src"), join(logs, "app.log"));
+      // Older than any marker the run makes, at any mtime resolution.
+      await Deno.utime(join(logs, "app.log"), 1_700_000_000, 1_700_000_000);
+    }
   }
+  // One argument per line, so a path with a space stays one argument. The
+  // app writes its log while it runs, i.e. during the open.
+  await sh(
+    "open",
+    `for a in "$@"; do printf '%s\\n' "$a"; done > "${opened}"` +
+      (opts.log !== undefined && !opts.staleLog
+        ? `\ncp "${join(tmp, "log-src")}" "${join(logs, "app.log")}"`
+        : ""),
+  );
   for (const [i, v] of (opts.older ?? []).entries()) {
     const dir = join(home.AIO_INSTALL_ROOT!, "demo", "versions", v);
     await Deno.mkdir(dir, { recursive: true });
@@ -369,6 +384,38 @@ Deno.test(
   },
 );
 
+// An app gone before it wrote a line (a bad argument): what it said went to
+// the stderr `open` does not keep, and the log there is an EARLIER run's.
+// Measured on macOS 14 (`--port=notaport`): run.sh printed that old log's tail
+// as if it were this start's reason. Now it says the log is old and names the
+// bundle's executable to run in a terminal, where the reason is printed.
+Deno.test(
+  "run.sh on macOS: an app gone before it logged is not explained by an earlier run's log — it names the executable to run instead",
+  NEEDS_SH,
+  async () => {
+    const r = await runSh("Darwin", "macBundle", [], {
+      env: { AIO_OPEN_EARLY_EXIT_S: "3" },
+      log: "an earlier run: all fine\n",
+      staleLog: true,
+    });
+    try {
+      assertEquals(r.code, 1, r.out);
+      assertEquals(r.out.includes("an earlier run: all fine"), false, r.out);
+      assertStringIncludes(r.out, "before it wrote to its log");
+      // The bundle's executable, not its title.
+      assertStringIncludes(r.out, `Demo App.app/Contents/MacOS/demo"`);
+      assertStringIncludes(
+        r.out,
+        `(its log, ${
+          join(r.home, ".demo", "logs", "app.log")
+        }, is from an earlier run)`,
+      );
+    } finally {
+      await r.done();
+    }
+  },
+);
+
 // The log is where the app keeps it — `$AIO_APPS_DIR/<id>` when that is set —
 // and a guessed path that holds no log is no pointer: an app with a data dir of
 // its own (`aio.run({ appDir })`, a profile) or in library mode logs elsewhere,
@@ -509,6 +556,28 @@ Deno.test(
       } finally {
         await r.done();
       }
+    }
+  },
+);
+
+// One unpack dir per app: the menu entry's Exec named its own
+// (`$XDG_CACHE_HOME/<name>`) while a terminal run used the framework's
+// `~/.<appId>/app` — a double-click and a terminal run unpacked one app into
+// two places. Both now take the build's `--print-app-tmpdir` answer.
+Deno.test(
+  "run.sh on Linux: the menu entry unpacks where a terminal run does",
+  NEEDS_SH,
+  async () => {
+    const gui = await runSh("Linux", "appImage", ["--no-run"]);
+    try {
+      assertEquals(gui.code, 0, gui.out);
+      const entry = Deno.readTextFileSync(
+        join(gui.home, ".local", "share", "applications", "demo.desktop"),
+      );
+      assertStringIncludes(entry, `D="${join(gui.home, ".demo", "app")}"`);
+      assert(!entry.includes(".cache"), entry);
+    } finally {
+      await gui.done();
     }
   },
 );

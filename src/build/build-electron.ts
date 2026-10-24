@@ -23,6 +23,7 @@ import { checkedGuestPreloads, stageGuestPreloads } from "./guest-preloads.ts";
 import { readDenoJson } from "../server/deno-json.ts";
 import { isHostPlatform } from "./platforms.ts";
 import { appIconLabel } from "./app-icon.ts";
+import { windowClassName } from "../electron/electron-shared.ts";
 import {
   assembleMacApp,
   icnsFromName,
@@ -488,6 +489,26 @@ async function packageFor(
   }
 }
 
+/** The AppImage's `.desktop`. `StartupWMClass` is the class the window will
+ *  have — {@linkcode windowClassName} of the id the binary RUNS as (deno.json
+ *  `appId`, else its name) — so a panel matches the window to this entry, and
+ *  to the menu entry run.sh copies it into, even when that id is not the
+ *  file's name. Pure. */
+export function linuxDesktopEntry(
+  displayName: string,
+  binaryName: string,
+  appId: string | undefined,
+): string {
+  return `[Desktop Entry]
+Type=Application
+Name=${desktopString(displayName)}
+Exec=${binaryName}
+Icon=${binaryName}
+StartupWMClass=${windowClassName({ appId: appId ?? binaryName })}
+Categories=Utility;
+`;
+}
+
 async function _packageLinux(
   cfg: BuildConfig,
   appDir: string,
@@ -500,13 +521,7 @@ async function _packageLinux(
   await Deno.writeTextFile(join(appDir, "AppRun"), appRun);
   await chmodIfSupported(join(appDir, "AppRun"), 0o755);
 
-  const desktop = `[Desktop Entry]
-Type=Application
-Name=${desktopString(displayName)}
-Exec=${binaryName}
-Icon=${binaryName}
-Categories=Utility;
-`;
+  const desktop = linuxDesktopEntry(displayName, binaryName, cfg.appId);
   await Deno.writeTextFile(join(appDir, `${binaryName}.desktop`), desktop);
 
   const toolPath = await ensureAppimagetool(arch, toolCacheDir());
@@ -570,6 +585,20 @@ ${
 `;
 }
 
+/** The AppRun line for an AppImage started in extract-and-run mode
+ *  (the runtime's extract-and-run variable or `--appimage-extract-and-run`, the way it
+ *  runs with no FUSE): the AppImage runtime extracts to
+ *  `$TMPDIR/appimage_extracted_<hash>`, runs AppRun as its CHILD and forwards
+ *  no signal — measured with appimagetool 1.9.1's runtime: a SIGTERM to the
+ *  AppImage's pid ended the runtime and left the app and its window running,
+ *  reparented. (Mounted over FUSE, AppRun IS that pid and gets the signal.)
+ *  So the app watches the runtime: `AIO_PARENT_PID`, unless a launcher set
+ *  its own — the app then stops, every phase, within ~2 s of the runtime
+ *  going. The runtime's extracted copy stays behind in `$TMPDIR` (its own
+ *  cleanup never runs once it is killed). @internal */
+export const APPIMAGE_EXTRACTED_PARENT =
+  `case "$HERE" in */appimage_extracted_*) export AIO_PARENT_PID="\${AIO_PARENT_PID:-$PPID}" ;; esac\n`;
+
 /** The AppImage's `AppRun`. A shared-runtime package carries no `electron/`,
  *  so it exports no `ELECTRON_PATH` at one — and clears one it inherited (an
  *  update from a bundled build, a start from a bundled app's process: another
@@ -579,7 +608,7 @@ ${
 export function _appRun(binaryName: string, shared = false): string {
   return `#!/bin/bash -p
 HERE="$(dirname "$(readlink -f "$0")")"
-${
+${APPIMAGE_EXTRACTED_PARENT}${
     shared
       ? `unset ELECTRON_PATH\nexport ${SHARED_RUNTIME_ENV}="shared:$HERE"\n`
       : `unset ${SHARED_RUNTIME_ENV}\nexport ELECTRON_PATH="$HERE/electron/electron"\n`

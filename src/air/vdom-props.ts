@@ -50,7 +50,7 @@ import {
  *  {@link applyChildDependentProps} once its children are in place, so the rule
  *  "when does this prop get written" has ONE decider. */
 function _isChildDependent(el: HTMLElement, k: string): boolean {
-  return k === "value" && el.tagName === "SELECT";
+  return (k === "value" || k === "defaultValue") && el.tagName === "SELECT";
 }
 
 /** Apply the props {@link _isChildDependent} deferred — call AFTER children are
@@ -64,6 +64,18 @@ export function applyChildDependentProps(
   prev: Record<string, unknown>,
 ): void {
   if (el.tagName !== "SELECT") return;
+  // `<select defaultValue="b">` — the starting choice, written once, when the
+  // element is first built. `HTMLSelectElement` has no `defaultValue`
+  // property, so the generic write put a dead `defaultvalue="b"` ATTRIBUTE on
+  // the select and the first option stayed chosen, while both SSR writers mark
+  // `<option selected>` for it (the shape the dev typed-kept hint recommends).
+  // A mounted page and a server-rendered one showed different choices.
+  if ("defaultValue" in next && !("defaultValue" in prev)) {
+    _defaultSelect(
+      el as HTMLSelectElement,
+      resolveSignalProp(next.defaultValue),
+    );
+  }
   if (!("value" in next)) {
     if ("value" in prev) _resetSelect(el as HTMLSelectElement);
     return;
@@ -84,6 +96,23 @@ export function applyChildDependentProps(
   }
   // deno-lint-ignore no-explicit-any
   (el as any).value = rv ?? "";
+}
+
+/** Mark the options a select's `defaultValue` names as DEFAULT-selected —
+ *  exactly the `selected` attribute SSR writes (`ssrOptionProps`): matched as
+ *  strings against each option's value (its text when it has none), an array
+ *  for a `multiple` select. A form reset returns to it, as it does in markup. */
+function _defaultSelect(el: HTMLSelectElement, v: unknown): void {
+  if (v == null) return;
+  const want = new Set((Array.isArray(v) ? v : [v]).map(String));
+  for (let i = 0; i < el.options.length; i++) {
+    const o = el.options[i]!;
+    // The attribute, which `defaultSelected` reflects (happy-dom implements
+    // only the attribute).
+    if (want.has(o.value) && !o.hasAttribute("selected")) {
+      o.setAttribute("selected", "");
+    }
+  }
 }
 
 /** A `<select>` whose `value` prop LEFT goes back to what a fresh mount of the

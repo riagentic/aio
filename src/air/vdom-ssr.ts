@@ -854,7 +854,10 @@ function _rts(
     return _escapeHtml(_sigText((vnode._sig as Signal<unknown>).peek()));
   }
 
-  // Portal — skip in SSR (no target DOM available)
+  // Portal — skip in SSR (no target DOM available). Its content is not
+  // rendered either: content that reads `document`/`window` at render is
+  // legitimate in a portal, and a throw there is the CLIENT's to place (its
+  // boundary falls back on its own region; see renderer-hydrate.ts).
   if (vnode.tag === Portal) return "";
 
   // Suspense — try to render children, show fallback if lazy throws

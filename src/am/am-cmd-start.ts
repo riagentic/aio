@@ -36,6 +36,7 @@ import {
   appsDirEnv,
   foreignAppHomeError,
   homeOwnerError,
+  instanceOfAppsDir,
   profileOfHome,
   registerAppDirs,
   registeredProfile,
@@ -71,8 +72,10 @@ import {
   sharedLockStartRefusal,
 } from "./am-utils.ts";
 import {
+  componentAppId,
   componentLaunchArgs,
   componentPort,
+  entryDeclarations,
   processPlan,
   projectComponents,
 } from "./am-components.ts";
@@ -83,6 +86,7 @@ import {
   detachedSpawnSpec,
   entryTaskWords,
   HEALTH_TIMEOUT_MS,
+  isDenoRuntimeFlag,
   launchDetached,
   POLL_INTERVAL_MS,
   prepareStdoutLog,
@@ -91,6 +95,8 @@ import {
   SPAWN_LIVENESS_GRACE_MS,
   stdoutLogPath,
 } from "./am-launch.ts";
+import { GLOBAL_FLAGS } from "./am-flags.ts";
+import { AIO_RUNTIME_FLAGS } from "../diagnostics/runtime-flags.ts";
 import {
   alreadyRunningFix,
   alreadyRunningLine,
@@ -357,17 +363,43 @@ export function entryRefusal(flagEntry?: string): string | null {
  *  nope` ran the project's app under a second lock named `nope`, and with
  *  `--fresh` named the throwaway home after `nope`, so stop never dropped it.
  *  Null wherever am cannot know the id the entry runs as — an explicit
- *  `--entry` (a component's, or the user's choice), a project of components,
- *  a computed `appId`, no entry. */
+ *  `--entry` (a component's, or the user's choice), a computed `appId`, no
+ *  entry — or when `--app` names one of the project's components. */
 export function appFlagRefusal(
   flags: Pick<GlobalFlags, "app" | "entry">,
   root = projectRoot(),
 ): string | null {
   if (flags.app === undefined || flags.entry !== undefined) return null;
   // A project of components: `processPlan` already matched `--app` against
-  // them, and what its default entry runs as is the runtime's own rule.
-  if (projectComponents(root).length > 0) return null;
+  // them. One it did NOT match falls through to the project's default entry
+  // — judged by the same rule as a single-entry project below (it used to run
+  // the default entry under the unknown id: a second lock, a `--fresh` home
+  // named after the typo).
+  const components = projectComponents(root);
+  if (
+    components.some((c) => c.label === flags.app || c.appId === flags.app)
+  ) return null;
   const entry = resolveEntry();
+  if (components.length > 0) {
+    if (!entry) return null;
+    const declared = entryDeclarations(entry).appId;
+    let src = "";
+    try {
+      src = Deno.readTextFileSync(entry);
+    } catch {
+      return null; // aio-ok: unreadable — entryRefusal / the child say so
+    }
+    if (!declared && /\bappId\b/.test(src)) return null; // computed: unknowable
+    // The id the runtime gives the default entry — the components' decider.
+    const id = componentAppId(root, entry, declared);
+    if (id === flags.app || id === resolveAppId(flags.app)) return null;
+    return `--app=${printable(flags.app)} names no app of this project ` +
+      `(${root}) — its components: ${
+        components.map((c) => `${c.label} (${c.appId})`).join(", ")
+      }; its default entry runs as ${id}: am start --app=${
+        components[0]!.label
+      }, or no --app`;
+  }
   if (!entry) return null;
   let src: string;
   try {
@@ -614,7 +646,18 @@ export async function cmdStart(
   // The child is handed this secret (`HANDOFF_ENV`) and takes the lock over
   // with it — the only proof it is the child this lock was filed for.
   const handoff = crypto.randomUUID();
-  const result = await lock.acquire(port, false, { handoff });
+  let result = await lock.acquire(port, false, { handoff });
+  // Another start filed its placeholder between ensureSingleton's look and
+  // this acquire (two `am start`s at once): a BOOTING launch, which this was
+  // refusing as "already running … port 0". Attach to it as ensureSingleton
+  // would have; if it has gone by then, take the slot after all.
+  if (
+    !result.ok && result.held === undefined &&
+    result.existing.status === "starting"
+  ) {
+    await ensureSingleton(appId, mode, flags);
+    result = await lock.acquire(port, false, { handoff });
+  }
   if (!result.ok) {
     lock.release();
     if (result.held !== undefined) {
@@ -702,9 +745,16 @@ export async function cmdStart(
   // own flags — an app that does not know `--display` would refuse to boot.
   // A build word that picks a client (`--headless`) is translated to its
   // runtime spelling — the app itself refuses the build word.
-  const passthrough = args.filter((a) =>
+  // A bare `--` ends am's options: what follows is the APP's, verbatim — a
+  // positional after it (`am start -- seed.json`) used to be dropped here.
+  // Kept apart so the flags am adds below (--port, --transport…) land BEFORE
+  // the `--` — after it they were the app's arguments, silently ignored.
+  const end = args.indexOf("--");
+  const appTail = end === -1 ? [] : args.slice(end);
+  const passthrough = (end === -1 ? args : args.slice(0, end)).filter((a) =>
     a.startsWith("--") && !a.startsWith("--display=")
   ).map((a) => runtimeSpelling(a) ?? a);
+  for (const line of amFlagTypoNotes(passthrough)) sayErr(line);
   // A GUI client on a headless box hangs forever (electron never returns) —
   // fail FAST with the fix instead (a field report). The
   // effective client is the --client override, else the app's declared target.
@@ -756,7 +806,7 @@ export async function cmdStart(
   // and (its data-location part) what `am restart` replays.
   const childEnv = withEnv(Deno.env.toObject(), opts?.env);
   const launchInfo: LaunchInfo = {
-    flags: [...passthrough],
+    flags: [...passthrough, ...appTail],
     entry,
     cwd,
     env: captureLaunchEnv(childEnv),
@@ -778,7 +828,7 @@ export async function cmdStart(
   // declared heap ceiling rides along: only the launch can apply it.
   const denoArgs = buildDenoArgs(
     entry,
-    [...words, ...passthrough],
+    [...words, ...passthrough, ...appTail],
     declaredMaxHeapOf(appCfg),
   );
 
@@ -877,7 +927,24 @@ export async function cmdStart(
   // itself. The grace exists to notice a failed exec; it never needed the
   // lock. `release()` only removes a lock that is still ours, so a child that
   // has already written its own is untouched.
-  lock.release();
+  //
+  // …and never with the slot EMPTY in between: released before the child's
+  // placeholder below (after the grace), a second `am start` acquired the
+  // vacant slot, and this child was refused by ITS am's lock — "did not
+  // start … exited immediately" for an app the other start then ran. The
+  // record goes to the child in place (CAS over am's own), then released.
+  const handed = handLockToChild(appId, {
+    appId,
+    pid,
+    port,
+    startedAt: Date.now(),
+    status: "starting",
+    cwd,
+    home,
+    ...ownerIdentity(pid),
+    handoff,
+    ...(registeredProfile(appId) ? { profile: registeredProfile(appId) } : {}),
+  }, () => lock.release());
 
   // A pid is not a running app. `sh` forks BEFORE it execs, so a pid comes
   // back even when the exec fails — and `am start` reported success, exited 0
@@ -890,6 +957,7 @@ export async function cmdStart(
   // started, and calling that "starting" is the lie.
   await new Promise((r) => setTimeout(r, SPAWN_LIVENESS_GRACE_MS));
   if (!isProcessAlive(pid)) {
+    removeLockIfOwner(amLockKey(appId), { pid }); // the slot handed to it
     const { text: tail, files } = childSaid(logFile);
     // A fresh clone's failure is ALWAYS this one, and Deno states it as a bare
     // `Module not found "file:///…/dep/aio/mod.ts"`. The link is gitignored on
@@ -945,11 +1013,17 @@ export async function cmdStart(
     // in between.
     ...ownerIdentity(pid),
   };
-  writeStartPlaceholder(childLock, {
-    ...lockData,
-    // Every lock am writes carries the profile, so its key is the child's.
-    ...(registeredProfile(appId) ? { profile: registeredProfile(appId) } : {}),
-  });
+  // Handed over in place above: the slot is the child's already, and a
+  // second filing here would re-file it after the child itself gave it up.
+  if (!handed) {
+    writeStartPlaceholder(childLock, {
+      ...lockData,
+      // Every lock am writes carries the profile, so its key is the child's.
+      ...(registeredProfile(appId)
+        ? { profile: registeredProfile(appId) }
+        : {}),
+    });
+  }
 
   await awaitStarted({
     appId,
@@ -1084,6 +1158,8 @@ async function awaitStarted(o: {
   const startedAt = Date.now();
   let deadline = startedAt + timeout;
   let slowStart: string | null = null;
+  let [logSize, grewAt, stallSaid] = [-1, Date.now(), false];
+  let lastStall: string | null = null;
   // The port to probe is whatever the CHILD bound, which it records in its own
   // lock — the only honest source when nothing was declared. Re-read on EVERY
   // tick, never latched: a socket-only app takes its lock with the TCP port it
@@ -1128,6 +1204,17 @@ async function awaitStarted(o: {
         );
       }
       slowStart = why;
+      // The last line alone cannot tell "Deno still fetching" from "fetched,
+      // the app silent before its first line" — growth can narrow it.
+      const size = fileSize(logPath()) + fileSize(`${logPath()}.err`);
+      if (size !== logSize) [logSize, grewAt] = [size, Date.now()];
+      const stall = fetchStallNote(why, Date.now() - grewAt);
+      if (stall && !stallSaid) {
+        sayErr(`am: note: ${stall}`);
+        stallSaid = true;
+      }
+      if (!stall) stallSaid = false;
+      lastStall = stall;
     }
     {
       // Our own child's lock — and only if it IS our child's (same pid):
@@ -1214,15 +1301,19 @@ async function awaitStarted(o: {
     // `am status` showed the app up under a new pid. The app IS up, under the
     // identity the restart asked for: that is the verdict, said with the pid
     // actually serving, and a note for the child that stood down.
-    const peer = o.peerOf
-      ? await racingPeer(appId, pid, o.peerOf.stopped, deadline)
-      : null;
+    // A plain START races too: two `am start`s at once, and the second
+    // attaches to the first's placeholder — owned by the first AM's pid until
+    // its child takes the lock over. That am exits once the app is up, and
+    // this said "did not start", exit 1, quoting the healthy app's own boot
+    // log. Same verdict: the app that serves.
+    const peer = await racingPeer(appId, pid, o.peerOf?.stopped, deadline);
     if (peer) {
       sayErr(
-        `am: note: another launch of ${appId} (pid ${peer.pid} — e.g. its ` +
-          `dev watcher reloading a saved file) took the lock first; this ` +
-          `restart's child (pid ${pid}) stood down, and that instance is the ` +
-          `app now`,
+        `am: note: another launch of ${appId} (pid ${peer.pid}${
+          o.peerOf ? " — e.g. its dev watcher reloading a saved file" : ""
+        }) took the lock first; ${
+          o.peerOf ? "this restart's child" : "the launch this start waited on"
+        } (pid ${pid}) stood down, and that instance is the app now`,
       );
       const done = startedReport(
         appId,
@@ -1285,7 +1376,7 @@ async function awaitStarted(o: {
           secs,
           pid,
           socketOnly ? "socket" : doorPort ? doorPort : null,
-        ),
+        ) + (lastStall ? `\n  ${lastStall}` : ""),
       mode,
     );
     Deno.exit(1);
@@ -1608,6 +1699,37 @@ export function slowStartReason(log: string, err = ""): string | null {
     "once per machine)";
 }
 
+/** How long the log may stand still on Deno's fetch line before `am start`
+ *  says that the fetch may be over. */
+export const FETCH_STALL_MS = 30_000;
+
+/** The note for a start whose log has ended on Deno's `Download`/`Initialize`
+ *  line and not grown for `idleMs` — or null. Deno prints a line BEFORE each
+ *  fetch and nothing after the last, so a still last line is either one big
+ *  package on a slow line or a finished fetch and an app that has not logged
+ *  yet; the note says both rather than guessing. Pure. @internal */
+export function fetchStallNote(
+  why: string | null,
+  idleMs: number,
+): string | null {
+  if (!why?.includes("Deno is downloading") || idleMs < FETCH_STALL_MS) {
+    return null;
+  }
+  return `the log has not grown for ${Math.round(idleMs / 1000)}s and still ` +
+    `ends on Deno's fetch line: either one large package is still coming, ` +
+    `or the fetch is done and the app is running without having logged ` +
+    `yet (a slow top-level await, a long import) — \`am logs -f\` shows ` +
+    `which once it writes`;
+}
+
+function fileSize(path: string): number {
+  try {
+    return Deno.statSync(path).size;
+  } catch {
+    return 0; // aio-ok: not written yet — no growth to see
+  }
+}
+
 /** The last 64 KB of a log, or "" when it cannot be read — a probe, not a
  *  requirement: no log means no reason to wait longer. */
 /** What a child that died left in its log: the text (ANSI stripped) and the
@@ -1722,15 +1844,91 @@ export function noLockMessage(appId: string): string {
   }
   return `app not running: no lock file for "${appId}"\n` +
     `  searched: ${lockDir()}\n` +
-    `  AIO_APPS_DIR=${apps ?? "unset"} (it scopes the lock dir — am and the ` +
-    `app must share the same value)${live}\n` +
+    // `--instance=x` sets AIO_APPS_DIR internally — naming the variable told
+    // the reader about a setting they never made.
+    (instanceOfAppsDir(apps) !== undefined
+      ? `  --instance=${instanceOfAppsDir(apps)} (its own lock dir — the app ` +
+        `must have been started with the same --instance)${live}\n`
+      : `  AIO_APPS_DIR=${apps ?? "unset"} (it scopes the lock dir — am and ` +
+        `the app must share the same value)${live}\n`) +
     `  see what IS running: am instances — or target the app by id ` +
     `(--app=<id>) or by port (--port=N, am reads the id from that port)`;
+}
+
+/** The am flags `am start` itself reads — the only ones a forwarded typo is
+ *  worth naming as (a wider pool turned app flags into "did you mean am's
+ *  --home?" for `--name`). */
+const START_OWN_FLAGS = [
+  "--wait",
+  "--no-wait",
+  "--port",
+  "--app",
+  "--entry",
+  "--json",
+  "--quiet",
+  "--profile",
+  "--home",
+  "--timeout",
+  "--transport",
+  "--client",
+  "--fresh",
+  "--instance",
+  "--display",
+];
+
+/** One edit apart: a substitution, insertion, deletion, or swap of two
+ *  neighbours (`--wiat`). Pure. */
+function oneEditApart(a: string, b: string): boolean {
+  if (a === b || Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  const swap = a[i] === b[i + 1] && a[i + 1] === b[i] &&
+    a.slice(i + 2) === b.slice(i + 2);
+  return swap || a.slice(i + 1) === b.slice(i + 1) ||
+    a.slice(i + 1) === b.slice(i) || a.slice(i) === b.slice(i + 1);
+}
+
+/** A typo of AM's own flag (`--wiat=5`) is forwarded like any app flag, and
+ *  the app refuses it suggesting one of ITS flags ("did you mean --width?").
+ *  Said first, as am's — a note, never a refusal: the app may declare it.
+ *  Pure. @internal exported for its test */
+export function amFlagTypoNotes(passthrough: readonly string[]): string[] {
+  return passthrough.flatMap((a) => {
+    const name = a.split("=", 1)[0]!;
+    if (
+      GLOBAL_FLAGS.includes(name) || AIO_RUNTIME_FLAGS.has(name) ||
+      isDenoRuntimeFlag(a)
+    ) return [];
+    const near = START_OWN_FLAGS.find((f) => oneEditApart(name, f));
+    return near
+      ? [
+        `am: note: ${name} is not an am or aio runtime flag — passed to the ` +
+        `app as-is (did you mean am's ${near}?)`,
+      ]
+      : [];
+  });
 }
 
 /** One app's restart: stop it, taking the durability verdict the way `am
  *  stop` does, wait for the port, start it again. Returns the verdict; it
  *  never exits on it (see {@linkcode restartAll}). */
+/** @internal Hand am's placeholder lock to the child it spawned IN PLACE
+ *  (CAS over am's own record), then `release` am's hold — so the slot is
+ *  never vacant between the two, where a second `am start` took it and this
+ *  child was refused. True when the record was handed. Exported for the test
+ *  that pins the invariant deterministically (tests/am-start-lock-handover
+ *  .test.ts); the end-to-end race test catches it only 1 run in 3. */
+export function handLockToChild(
+  appId: string,
+  child: LockData & { handoff: string },
+  release: () => void,
+): boolean {
+  const own = readPid(appId);
+  const handed = !!own && isOwnLock(own) && replaceLockIf(own, child);
+  release();
+  return handed;
+}
+
 /** `am start`'s placeholder lock for the child it just spawned (`data.pid`),
  *  written compare-and-swap: create it only while no lock is there, or
  *  replace a DEAD owner's — never a LIVE instance's (the child is refused by

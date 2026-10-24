@@ -20,7 +20,7 @@
     "aio/air": "../src/air.ts",
     "aio/server": "../src/server-entry.ts",
     "aio/jsx-runtime": "../src/jsx-runtime.ts",
-    "electron": "npm:electron",
+    "electron": "npm:electron@44.9.3",
     "esbuild": "npm:esbuild@0.25.12",
     "immer": "npm:immer@10.2.0",
     "@std/path": "jsr:@std/path@1.1.3",

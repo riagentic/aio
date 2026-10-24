@@ -33,12 +33,22 @@ Deno.test({
     );
     const conn = await connectRW(sock);
     try {
-      // Read greeting lines until tt-state arrives (proto, state, tt-state…).
+      // tt-state is sent at the peer's FIRST frame, not at accept: an identity
+      // hello decides whether this peer may read the history (L15). A window
+      // always speaks first; so does this test.
+      await conn.write(new TextEncoder().encode(enc("ping", 1) + "\n"));
+      // Read greeting lines until tt-state arrives (proto, state, tt-state…),
+      // each read bounded: a missing frame is a red test, never a hung suite.
       const buf = new Uint8Array(65536);
       let acc = "";
       const tt: { v: { entries: { id: number }[] } | null } = { v: null };
       for (let i = 0; i < 20 && !tt.v; i++) {
-        const n = await conn.read(buf);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const n = await Promise.race([
+          conn.read(buf),
+          new Promise<"late">((r) => timer = setTimeout(() => r("late"), 5000)),
+        ]).finally(() => clearTimeout(timer));
+        if (n === "late") break;
         if (n === null) break;
         acc += new TextDecoder().decode(buf.subarray(0, n));
         for (const line of acc.split("\n")) {

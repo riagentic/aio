@@ -325,6 +325,47 @@ export function pinnedBackNote(from: string | null, to: string): string | null {
     `\`am pin ${from}\`.`;
 }
 
+/** The `build.*` keys a checkout's own lint knows — read from ITS source
+ *  (`src/server/config.ts` `VALID_BUILD_KEYS`), never from this am's: the
+ *  point is what an OLDER version says. Null when the source does not have
+ *  that shape (a layout this reader predates) — then nothing is claimed.
+ *  Pure. */
+export function buildKeysOf(configSource: string): Set<string> | null {
+  const m = /VALID_BUILD_KEYS = new Set<string>\(\[([\s\S]*?)\]\)/.exec(
+    configSource,
+  );
+  if (!m) return null;
+  const body = m[1]!.replace(/\/\/[^\n]*/g, "");
+  return new Set([...body.matchAll(/"([^"]+)"/g)].map((x) => x[1]!));
+}
+
+/** The note for `build.*` keys in the app's deno.json that the pinned
+ *  version does not know — its `aiol` reports each as an unknown key, an
+ *  ERROR, so `deno task lint` fails (a newer `am create` writes
+ *  `build.electronRuntime`), and its build ignores them. Said, never
+ *  removed: the key is the user's, and it is right again after a pin
+ *  forward. Pure. */
+export function unknownBuildKeysNote(
+  ref: string,
+  build: unknown,
+  known: Set<string> | null,
+): string | null {
+  if (!known || !build || typeof build !== "object" || Array.isArray(build)) {
+    return null;
+  }
+  const stray = Object.keys(build).filter((k) => !known.has(k));
+  if (stray.length === 0) return null;
+  return `${ref} does not know ${
+    stray.map((k) => `build.${k}`).join(", ")
+  } in deno.json — its \`aiol\` reports ${
+    stray.length === 1 ? "it" : "them"
+  } as unknown (\`deno task lint\` fails) and its build ignores ${
+    stray.length === 1 ? "it" : "them"
+  }. Remove ${
+    stray.length === 1 ? "it" : "them"
+  } while pinned to ${ref}, or move forward again.`;
+}
+
 /** Does `ref` still accept an API whose last supporting release was `lastGood`?
  *  A ref we cannot order (`main`, `main-<sha>`, a path pin) is the tip by
  *  definition — treat it as newer, never as "probably fine". */
@@ -646,6 +687,21 @@ export async function cmdPin(
   // is where this shows.
   const back = pinnedBackNote(pinned, res.ref);
   if (back) sayErr(`⚠ ${back}`);
+  {
+    let known: Set<string> | null = null;
+    try {
+      known = buildKeysOf(
+        await Deno.readTextFile(join(res.path, "src", "server", "config.ts")),
+      );
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
+    const build = ((await readDenoJson(appDir))?.config as
+      | { build?: unknown }
+      | undefined)?.build;
+    const stray = unknownBuildKeysNote(res.ref, build, known);
+    if (stray) sayErr(`⚠ ${stray}`);
+  }
   const minDeno = await pinnedMinDeno(res.path);
   const electron = await alignElectronRuntime(
     appDir,

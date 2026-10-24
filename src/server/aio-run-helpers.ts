@@ -50,6 +50,9 @@ import { getLogger, log } from "../diagnostics/logger-api.ts";
 import { snapshotCellsError, snapshotShapeError } from "./server-static.ts";
 import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
 import { deepFreeze } from "../state/immutable.ts";
+import { writeTablesIn } from "../db/sql-shape.ts";
+import type { DB, Tx } from "../db/types.ts";
+import { isPlainObject, setOwn } from "../state/deep-merge.ts";
 import { detectShapeDrift } from "../state/cell-migrate.ts";
 
 // Moved to auth-context.ts, where the caller identity lives; re-exported for
@@ -211,6 +214,22 @@ export type InternalApp<S, A> =
   & Omit<AioApp<S, A>, "loadSnapshot">
   & { loadSnapshot?: (json: string, opts?: { force?: boolean }) => void };
 
+/** `v` with every key of the declared plain object `decl` it lacks put in at
+ *  its declared value, recursively through objects both sides hold. Arrays,
+ *  open records (`{}`) and type mismatches are left as `v` has them. Pure. */
+function fillDeclared(decl: unknown, v: unknown): unknown {
+  if (!isPlainObject(decl) || !isPlainObject(v)) return v;
+  let out: Record<string, unknown> | undefined;
+  for (const k of Object.keys(decl)) {
+    const has = Object.hasOwn(v, k);
+    const next = has ? fillDeclared(decl[k], v[k]) : decl[k];
+    if (has && next === v[k]) continue;
+    out ??= { ...v };
+    setOwn(out, k, next);
+  }
+  return out ?? v;
+}
+
 /** Build the AioApp object — dispatch, getState, snapshot/loadSnapshot, close */
 export function buildAppObject<S, A>(refs: {
   dispatch: (action: A) => Promise<unknown>;
@@ -306,6 +325,18 @@ export function buildAppObject<S, A>(refs: {
               `${dropped.join(", ")} — this app does not declare them, so ` +
               `there is nothing to load them into`,
           );
+        }
+      }
+      // A declared FIELD the snapshot lacks (it was saved before the field
+      // existed) gets its declared default — what the restart's deep merge
+      // gives it. Loaded as parsed, the cell ran without it until a restart,
+      // and the first method touching it threw. Only ADDS: nothing stored is
+      // dropped or retyped here (that is the shape-drift path's call).
+      {
+        const init = refs.initialState as Record<string, unknown>;
+        const p = parsed as Record<string, unknown>;
+        for (const k of Object.keys(init)) {
+          if (Object.hasOwn(p, k)) p[k] = fillDeclared(init[k], p[k]);
         }
       }
       // FROZEN, like every other state the app holds. It went in as the raw
@@ -1251,4 +1282,83 @@ export function resolveTitle(
   if (uiTitle) return Promise.resolve(uiTitle);
   const t = appDenoJson()?.title;
   return Promise.resolve(typeof t === "string" && t ? t : "AIO App");
+}
+
+/** A table aio mirrors from state — what {@link guardMirroredWrites} names. */
+export type MirroredTable = {
+  table: string;
+  path: readonly string[];
+  pk: string | null;
+};
+
+/** The `app.db` an app is handed: the same handle, saying so — once per
+ *  table, loudly — when the app's own SQL writes a table aio MIRRORS from
+ *  state. That write was silent and lost: state is the source of truth for a
+ *  bound table, so a table with no pk is rewritten wholesale from state by the
+ *  next save (the row is gone), and with a pk the row stays in SQLite but
+ *  never reaches state until a restart loads it — and the next state change to
+ *  that row overwrites it. Warned, not refused: apps that do it today keep
+ *  running. The framework's own persistence writes through the raw handle,
+ *  never this one. */
+export function guardMirroredWrites<D extends object | null>(
+  db: D,
+  mirrored: readonly MirroredTable[],
+  warn: (m: string) => void,
+): D {
+  if (!db || mirrored.length === 0) return db;
+  const byName = new Map(mirrored.map((m) => [m.table.toLowerCase(), m]));
+  const said = new Set<string>();
+  const check = (sql: unknown) => {
+    if (typeof sql !== "string") return;
+    for (const t of writeTablesIn(sql)) {
+      const m = byName.get(t);
+      if (!m || said.has(t)) continue;
+      said.add(t);
+      warn(
+        `[db] app.db wrote to "${m.table}", a table aio mirrors from state ` +
+          `(${m.path.join(".")}) — the write is not in state, and ` +
+          (m.pk
+            ? `state never sees it until a restart loads it; the next state ` +
+              `change to that row overwrites it.`
+            : `with no pk the next save rewrites the table from state, so ` +
+              `the write is lost.`) +
+          ` Change the rows through a cell method instead (state persists ` +
+          `itself), or keep the table out of state (a SQL-only db: table).`,
+      );
+    }
+  };
+  const tx = (t: Tx): Tx => ({
+    query: (sql, params) => (check(sql), t.query(sql, params)),
+    execute: (sql, params) => (check(sql), t.execute(sql, params)),
+  });
+  const raw = db as unknown as DB;
+  return new Proxy(db, {
+    get(target, key) {
+      if (key === "execute") {
+        return (
+          sql: string,
+          params?: unknown[],
+        ) => (check(sql), raw.execute(sql, params));
+      }
+      if (key === "query") {
+        return (
+          sql: string,
+          params?: unknown[],
+        ) => (check(sql), raw.query(sql, params));
+      }
+      if (key === "transaction") {
+        return (arg: unknown) => {
+          if (typeof arg === "function") {
+            return raw.transaction((t) =>
+              (arg as (t: Tx) => Promise<unknown>)(tx(t))
+            );
+          }
+          if (Array.isArray(arg)) { for (const s of arg) check(s?.sql); }
+          return raw.transaction(arg as { sql: string }[]);
+        };
+      }
+      const v = Reflect.get(target, key, target);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
 }

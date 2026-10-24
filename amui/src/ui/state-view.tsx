@@ -25,9 +25,13 @@ function Badge(
     title: string;
   },
 ) {
+  // On/off must not be colour alone: an off badge reads "no disk" to a screen
+  // reader and to `am surface`, and is struck through for the eye.
   return (
     <span
       title={title}
+      role="img"
+      aria-label={on ? label : `no ${label}`}
       style={{
         fontFamily: mono,
         fontSize: "9px",
@@ -38,6 +42,7 @@ function Badge(
         color: on ? color : C.dim,
         background: on ? `${color}1e` : "transparent",
         opacity: on ? 1 : 0.45,
+        textDecoration: on ? "none" : "line-through",
         userSelect: "none",
       }}
     >

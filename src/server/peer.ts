@@ -9,10 +9,18 @@
 //   await p.describe();                       // what I may call
 //   const id = await p.call("ledger", "credit", 42);
 import { _connectCli, _connectCliUDS, type CliLink } from "./cli-client.ts";
-import { AppLock, instances } from "./single-instance-lock.ts";
+import { resolve } from "@std/path";
+import {
+  AppLock,
+  type InstanceInfo,
+  instances,
+  liveInstancesUnder,
+} from "./single-instance-lock.ts";
+import { appsDirEnv, instanceAppsDir, instanceNameError } from "./app-dirs.ts";
 import { PEER_HEADER, signPeer } from "./peer-proof.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { endpointOf, servesTls } from "./lock-owner.ts";
+import { isPipePath } from "./local-listen.ts";
 import { errorCode } from "../protocol/envelope.ts";
 import { DESCRIBE_TYPE, type PeerDescription } from "./peer-describe.ts";
 
@@ -34,13 +42,22 @@ export type PeerOptions = {
   /** How long the first connection may take, ms (default 5000). A wrong
    *  token or address throws instead of hanging. */
   readyTimeoutMs?: number;
-  /** Ceiling for one call, ms (0 = wait for ever; default `connectCli`'s). */
+  /** Ceiling for one call, ms (0 = wait for ever; default `connectCli`'s).
+   *  A `stream()` restarts it at every chunk: it bounds the silence. */
   ackTimeoutMs?: number;
   /** Which local aio app this caller speaks FOR — its identity is proven to
    *  the other app (which admits it with `resolvePeer`). Default: the one app
    *  running in this process; none (a plain script) → no identity. Only for
    *  an appId target: a URL names no app to prove it to. */
   as?: string;
+  /** Which `--instance` scope to find an appId in: a name (as `am start
+   *  --instance=<name>` uses), or `null` for the default scope (no
+   *  `--instance`). Absent: this process's own scope. An app started with
+   *  `--instance=agent1` reaches a service running as the default instance
+   *  with `{ instance: null }`. An identity (`as`) is proven within one scope
+   *  only — a call into another scope carries none (asking for one throws).
+   *  Only for an appId target. */
+  instance?: string | null;
 };
 
 /** Keys the runtime reads on any object — never sent as a call. */
@@ -121,7 +138,8 @@ export type Peer<S = Record<string, unknown>> = {
    *  matches the running app and this caller's rights. */
   describe(): Promise<PeerDescription>;
   /** Fires with `connected` each time it changes — false when the other app
-   *  goes away, true when it is back (re-register, re-acquire). Returns
+   *  goes away, true when it is back (re-register, re-acquire) — on a new
+   *  port too, for an appId target (followed by its lock). Returns
    *  unsubscribe. */
   onStatus(fn: (connected: boolean) => void): () => void;
   /** Fires on every state change of the other app; returns unsubscribe. */
@@ -158,10 +176,45 @@ export async function peer<S = Record<string, unknown>>(
   if (opts.as !== undefined && opts.token !== undefined) {
     noIdentity("pass a token OR an identity — with a token, the token decides");
   }
+  // Which scope's locks name the target: this process's own, or another
+  // `--instance` (opts.instance), read without moving into it.
+  let list = (id: string) => instances(id);
+  let foreign = false;
+  if (opts.instance !== undefined) {
+    const said = `peer("${target}", { instance: ${
+      JSON.stringify(opts.instance)
+    } })`;
+    if (target.includes("://")) {
+      throw new Error(`${said}: a URL names no instance — pass the appId`);
+    }
+    const bad = opts.instance === null
+      ? null
+      : instanceNameError(opts.instance);
+    if (bad) throw new Error(`${said}: ${bad}`);
+    const root = opts.instance === null
+      ? ""
+      : resolve(instanceAppsDir(opts.instance));
+    if (root !== (appsDirEnv() ?? "")) {
+      foreign = true;
+      noIdentity(
+        "an identity is proven within one --instance scope, and that one is " +
+          "not this process's — drop `as`, or give the service a token",
+      );
+      list = (id) => liveInstancesUnder(root).filter((i) => i.appId === id);
+    }
+  }
   let link: CliLink<S>;
-  /** The HTTP side of the same door (blobs) — absent over a local socket. */
+  /** The HTTP side of the same door (blobs) — absent for an app whose only
+   *  door is its NDJSON socket. */
   let http:
-    | { base: string; headers: () => Promise<Record<string, string>> }
+    | {
+      base: () => string;
+      headers: () => Promise<Record<string, string>>;
+      /** Set when the HTTP door is a unix socket: every request goes there. */
+      client?: Deno.HttpClient;
+      /** How a failure names the door. */
+      where: () => string;
+    }
     | undefined;
   const tokenHeader = async (): Promise<Record<string, string>> => {
     const t = typeof opts.token === "function"
@@ -174,12 +227,10 @@ export async function peer<S = Record<string, unknown>>(
     link = _connectCli<S>(target, { ...o, token: opts.token });
     const u = new URL(target);
     const secure = u.protocol === "https:" || u.protocol === "wss:";
-    http = {
-      base: `${secure ? "https" : "http"}://${u.host}`,
-      headers: tokenHeader,
-    };
+    const base = `${secure ? "https" : "http"}://${u.host}`;
+    http = { base: () => base, headers: tokenHeader, where: () => base };
   } else {
-    const live = pickInstance(target);
+    const live = pickInstance(target, list);
     if (!live) return null;
     // The port when there is one (it carries a token; the socket does not),
     // the socket only for a socket-only app. A lock written before `host` was
@@ -194,76 +245,176 @@ export async function peer<S = Record<string, unknown>>(
           `neither a port nor a socket — it cannot be called`,
       );
     }
+    const hs = live.httpSocketPath;
     if ("socket" in at) {
       if (opts.token !== undefined) {
         throw new Error(
-          `peer("${target}"): it listens on a local socket only, which ` +
-            `carries no token — a token cannot be sent. Start it with a port, ` +
+          `peer("${target}"): it listens on local sockets only, whose calls ` +
+            `carry no token — a token cannot be sent. Start it with a port, ` +
             `or drop the token (the socket admits only this OS user).`,
         );
       }
-      noIdentity(
-        "it listens on a local socket only, which carries no identity",
+      // Calls go over the NDJSON socket (a named pipe on Windows), proven by
+      // an identity hello — the same proof as a TCP handshake, keyed to the
+      // boot holding THAT socket. A socket-only app (the Electron default)
+      // also serves its HTTP handler on a unix socket beside it: the blob
+      // store's door, with the same proof.
+      const self = foreign ? undefined : selfFor(target, opts.as);
+      const sock = at.socket;
+      const proofAt = (holds: (i: InstanceInfo) => boolean, door: string) =>
+        self ? () => proofFor(self, target, holds, door, opts.as) : undefined;
+      const callProof = proofAt(
+        (i) => i.socketPath === sock,
+        `socket ${sock}`,
       );
-      link = _connectCliUDS<S>(at.socket, o);
+      if (hs && !isPipePath(hs)) {
+        const proof = proofAt((i) => i.httpSocketPath === hs, `socket ${hs}`);
+        http = {
+          base: () => "http://localhost",
+          headers: async () => proof ? await proof() : {},
+          client: Deno.createHttpClient({
+            proxy: { transport: "unix", path: hs },
+          }),
+          where: () => `the socket ${hs}`,
+        };
+      }
+      link = _connectCliUDS<S>(sock, {
+        ...o,
+        ...(callProof
+          ? { proof: async () => (await callProof())[PEER_HEADER] }
+          : {}),
+      });
     } else {
       const h = at.hostnames.includes("127.0.0.1")
         ? "127.0.0.1"
         : at.hostnames[0]!;
       const host = h.includes(":") ? `[${h}]` : h;
-      const scheme = servesTls(live) ? "https" : "http";
+      let scheme = servesTls(live) ? "https" : "http";
+      let port = at.port;
+      const base = () => `${scheme}://${host}:${port}`;
       // Proven on loopback only — the callee refuses a proof from any other
       // address, and a working anonymous call must not turn into a 401.
       const loop = h === "127.0.0.1" || h === "::1";
       if (!loop) {
         noIdentity(`it listens on ${h}; identity is proven on loopback only`);
       }
-      const self = loop && opts.token === undefined
+      const self = loop && opts.token === undefined && !foreign
         ? selfFor(target, opts.as)
         : undefined;
       const proof = self
-        ? () => proofFor(self, target, at.port, opts.as)
+        ? () =>
+          proofFor(
+            self,
+            target,
+            (i) => i.port === port,
+            `port ${port}`,
+            opts.as,
+          )
         : undefined;
       http = {
-        base: `${scheme}://${host}:${at.port}`,
+        base,
         headers: async () => ({
           ...await tokenHeader(),
           ...(proof ? await proof() : {}),
         }),
+        where: base,
       };
-      link = _connectCli<S>(`${scheme}://${host}:${at.port}`, {
+      link = _connectCli<S>(base(), {
         ...o,
         token: opts.token,
         ...(proof ? { headers: proof } : {}),
+        // A restarted app binds a FREE port, so its next boot is almost never
+        // on the old one: re-read the lock files before every reconnect and
+        // follow it — same bind address, a new port. Two instances, none, or
+        // one on another address: stay put (the old port may come back).
+        retarget: () => {
+          let now;
+          try {
+            now = pickInstance(target, list);
+          } catch {
+            return undefined; // two instances: never guess between them
+          }
+          if (!now || now.port <= 0 || now.port === port) return undefined;
+          const e = endpointOf({ port: now.port, host: now.host });
+          if (e && "hostnames" in e && !e.hostnames.includes(h)) {
+            return undefined;
+          }
+          port = now.port;
+          scheme = servesTls(now) ? "https" : "http";
+          return base();
+        },
       });
     }
   }
+  let shut = false;
+  const close = () => {
+    shut = true;
+    link.close();
+    try {
+      http?.client?.close();
+    } catch { /* aio-ok: closed already — close() is idempotent */ }
+  };
   try {
     await link.ready;
   } catch (e) {
-    link.close();
-    throw new Error(`peer("${target}"): ${(e as Error).message}`);
+    close();
+    // peer() gives up here, so the client's "reconnection continues" is not
+    // true of it.
+    throw new Error(
+      `peer("${target}"): ${
+        (e as Error).message.replace(/ Reconnection continues.*$/s, "")
+      }`,
+      { cause: e },
+    );
   }
 
   const call = <R>(cell: string, method: string, ...args: unknown[]) =>
     link.call(cell, method, ...args) as Promise<R>;
-  const close = () => link.close();
   /** One HTTP exchange with the other app's blob door, failing loud. */
   const fetchDoor = async (path: string, init: RequestInit = {}) => {
-    if (!http) {
+    // As call() after close(): refused, not quietly served by a door this
+    // handle no longer holds.
+    if (shut) {
       throw new Error(
-        `peer("${target}"): it listens on a local socket only — blob bytes ` +
-          `travel over HTTP; start it with a port`,
+        `peer("${target}"): closed — ${init.method ?? "GET"} ${path} was ` +
+          `not sent (open a new peer())`,
       );
     }
-    const res = await fetch(`${http.base}${path}`, {
-      ...init,
-      headers: { ...await http.headers(), ...(init.headers ?? {}) },
-    });
+    if (!http) {
+      throw new Error(
+        `peer("${target}"): it has no HTTP door this caller can reach — ` +
+          `blob bytes travel over HTTP, and it serves none on a port or a ` +
+          `unix socket (a production app with no routes serves no HTTP at ` +
+          `all; on Windows its HTTP door is a named pipe). Start it with a ` +
+          `port (--port=N)`,
+      );
+    }
+    const method = init.method ?? "GET";
+    let res: Response;
+    try {
+      res = await fetch(`${http.base()}${path}`, {
+        ...init,
+        headers: { ...await http.headers(), ...(init.headers ?? {}) },
+        ...(http.client ? { client: http.client } : {}),
+      });
+    } catch (e) {
+      // A bare "fetch failed" named neither the app nor the door.
+      const why = (e as Error).cause ?? e;
+      throw new Error(
+        `peer("${target}") ${method} ${path} failed — ${
+          (why as Error)?.message ?? why
+        }${
+          link.connected
+            ? ""
+            : ` (not connected to it now: ${http.where()} is down or moved)`
+        }`,
+        { cause: e },
+      );
+    }
     if (!res.ok && res.status !== 206) {
       const why = await res.text().catch(() => "");
       throw new Error(
-        `peer("${target}") ${init.method ?? "GET"} ${path}: ${res.status} ${
+        `peer("${target}") ${method} ${path}: ${res.status} ${
           why.slice(0, 200)
         }`,
       );
@@ -362,8 +513,11 @@ export async function peer<S = Record<string, unknown>>(
 
 /** The ONE started instance of `appId`. Several (two data homes) → throw,
  *  naming them: guessing would call the wrong app's data. */
-function pickInstance(appId: string) {
-  const up = instances(appId).filter((i) =>
+function pickInstance(
+  appId: string,
+  list: (id: string) => InstanceInfo[] = instances,
+) {
+  const up = list(appId).filter((i) =>
     i.alive && i.status === "started" && !i.maintenance
   );
   if (up.length <= 1) return up[0];
@@ -404,22 +558,24 @@ function selfFor(target: string, as: string | undefined): AppLock | undefined {
 }
 
 /** The proof header for THIS (re)connect: signed for the boot of `target`
- *  that holds `port` now. None when that boot is gone — a listener squatting
- *  the port while the callee is down is never handed a proof. */
+ *  that holds the door (`holds`: its port, or its HTTP socket) now. None when
+ *  that boot is gone — a listener squatting the door while the callee is down
+ *  is never handed a proof. */
 async function proofFor(
   self: AppLock,
   target: string,
-  port: number,
+  holds: (i: InstanceInfo) => boolean,
+  door: string,
   as: string | undefined,
 ): Promise<Record<string, string>> {
   const live = instances(target).filter((i) =>
-    i.alive && i.status === "started" && !i.maintenance && i.port === port
+    i.alive && i.status === "started" && !i.maintenance && holds(i)
   );
   if (live.length !== 1) {
     const say = `peer("${target}"): no identity sent — ${
       live.length === 0
-        ? `no started instance holds port ${port} now`
-        : `${live.length} instances hold port ${port}`
+        ? `no started instance holds ${door} now`
+        : `${live.length} instances hold ${door}`
     }`;
     if (as !== undefined) log.warn("peer", say);
     else log.debug("peer", say);
@@ -439,12 +595,19 @@ function chunked<C, R>(
   start: (onChunk: (value: unknown) => void) => Promise<R>,
 ): PeerStream<C, R> {
   const queue: C[] = [];
-  let wake: (() => void) | null = null;
+  /** Every iterator waiting — one slot let a second iterator's wait replace
+   *  the first's, which then never woke. */
+  let waiting: (() => void)[] = [];
+  const wakeAll = () => {
+    const w = waiting;
+    waiting = [];
+    for (const r of w) r();
+  };
   let done = false;
   let failed: { error: unknown } | null = null;
   const result = start((value) => {
     queue.push(value as C);
-    wake?.();
+    wakeAll();
   });
   result.then(
     () => done = true,
@@ -452,7 +615,7 @@ function chunked<C, R>(
       done = true;
       failed = { error };
     },
-  ).finally(() => wake?.());
+  ).finally(wakeAll);
   // Iterating is how most callers read it; a failure then surfaces there, so
   // `result` alone must not also crash the process as unhandled.
   result.catch(() => {
@@ -461,6 +624,8 @@ function chunked<C, R>(
   });
   return {
     result,
+    // A reader that breaks out leaves the rest queued: a later `for await`
+    // over the same stream picks up where it stopped (as in 1.0.24).
     async *[Symbol.asyncIterator]() {
       while (true) {
         if (queue.length > 0) {
@@ -471,8 +636,7 @@ function chunked<C, R>(
           if (failed) throw (failed as { error: unknown }).error;
           return;
         }
-        await new Promise<void>((r) => wake = r);
-        wake = null;
+        await new Promise<void>((r) => waiting.push(r));
       }
     },
   };

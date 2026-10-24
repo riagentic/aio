@@ -33,8 +33,8 @@ const _childCovDir = childCoverageDir();
 
 Deno.test("--port: only a decimal port, never a Number() coercion", () => {
   assertEquals(parseCli(["--port=3000"]).port, 3000);
-  // 0 stays the universal "pick one for me" — and leaves the port unset.
-  assertEquals(parseCli(["--port=0"]).port, undefined);
+  // 0 stays the universal "pick one for me" — kept as the flag's answer.
+  assertEquals(parseCli(["--port=0"]).port, 0);
   for (
     const bad of [
       "0x1F90",

@@ -105,15 +105,31 @@ export function compiled(path: string, root: string): void {
  *  readers to serve it. Same rule `compiled()` already follows for the binary:
  *  under the fleet these lines say what they are; standalone (no fleet moving
  *  anything) `✓` is the truth and stays. */
-export function staged(what: string, detail?: string): void {
+export function staged(
+  what: string,
+  detail?: string,
+  /** What the file goes into — {@link stagedInto}. A web build has no binary. */
+  into = "the binary",
+): void {
   if (Deno.env.get(BUILD_VERSION_ENV) === undefined) {
     ok(what, detail);
     return;
   }
   step(
     `built ${what}`,
-    `${
-      detail ? detail + " — " : ""
-    }goes into the binary; not in the final dist/`,
+    `${detail ? detail + " — " : ""}goes into ${into}; not in the final dist/`,
   );
+}
+
+/** What a target's staged files go into, for {@link staged}. */
+export function stagedInto(
+  cfg: { doWeb?: boolean; doAndroid?: boolean; doIos?: boolean },
+): string {
+  return cfg.doWeb
+    ? "the web app"
+    : cfg.doAndroid
+    ? "the APK"
+    : cfg.doIos
+    ? "the Xcode project"
+    : "the binary";
 }

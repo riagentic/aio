@@ -20,11 +20,15 @@
 //    title. The iOS side's `plistText` had always stripped them.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
+  _applicationIdRefusal,
+  _appNameFor,
   _appNameKotlin,
   _appNameXml,
   _fillTemplate,
   _leftoverTokens,
+  androidApplicationId,
 } from "../src/build/build-android.ts";
+import { ANDROID_TEMPLATE } from "../src/build/android-template.ts";
 
 const MANIFEST = `<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -133,4 +137,42 @@ Deno.test("android: a token no substitution knows is named, once — it would re
     })),
     [],
   );
+});
+
+// Gradle 8.14 refuses a project name with any of `/ \ : < > " ? * |` —
+// measured: a title `Café $& "Ünï" ☕ \ App` failed `assembleDebug` at
+// settings.gradle.kts line 1 ("The project name ... must not contain").
+// settings.gradle.kts takes the binary name; the label keeps the title.
+Deno.test("android: settings.gradle.kts project name is Gradle-legal for any title", () => {
+  for (
+    const title of ["Notes: Work", 'A/B "test"?', "C:\\x <y> *|", "Café ☕"]
+  ) {
+    const settings = _fillTemplate(ANDROID_TEMPLATE["settings.gradle.kts"]!, {
+      "{{APP_NAME}}": _appNameFor("settings.gradle.kts", title, "notes-work"),
+    });
+    const name = settings.match(/rootProject\.name = "(.*)"/)![1]!;
+    assertEquals(name, "notes-work", title);
+    assert(!/[\/\\:<>"?*|]/.test(name), name);
+  }
+  assertEquals(
+    _appNameFor("app/src/main/AndroidManifest.xml", 'A "b"', "a-b"),
+    "A &quot;b&quot;",
+  );
+  assertEquals(
+    _appNameFor("app/src/main/java/aio/app/MainActivity.kt", 'A "b"', "a-b"),
+    'A \\"b\\"',
+  );
+});
+
+// An app named "3D Viewer" (slug `3d-viewer`) derives `app.aio.3dviewer`,
+// which Android refuses — and the refusal named no way out.
+Deno.test("android: a derived applicationId that cannot be names the key that fixes it", () => {
+  assertEquals(androidApplicationId("3d-viewer"), null);
+  const why = _applicationIdRefusal("3d-viewer");
+  assertStringIncludes(why, "app.aio.3dviewer");
+  assertStringIncludes(
+    why,
+    '"android": { "applicationId": "com.example.app" }',
+  );
+  assertStringIncludes(_applicationIdRefusal("x", "nodots"), '"nodots"');
 });

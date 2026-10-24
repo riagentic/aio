@@ -2,6 +2,7 @@ import {
   AIO_RUNTIME_FLAG_SPECS,
   AIO_RUNTIME_FLAGS,
   CLAIMABLE_RUNTIME_FLAGS,
+  noteAioRuntime,
   runtimeFlagClaimed,
 } from "../diagnostics/runtime-flags.ts";
 // CLI parsing — pure functions, no aio.ts internal dependencies
@@ -13,6 +14,9 @@ import { findFreePort } from "./paths.ts";
 import { profileOf } from "./config-sources.ts";
 import { instanceAppsDir, instanceNameError } from "./app-dirs.ts";
 import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
+
+// `aio/cli` `args()` leaves `--version` to aio only when aio is here to answer.
+noteAioRuntime();
 
 /** Framework version — printed by --version, checked in tests.
  *
@@ -28,7 +32,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.24-beta";
+export const VERSION: string = "1.0.25-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -302,6 +306,7 @@ export function instanceRequest(
 }
 
 /** Test seam: forget the memoized default parse. @internal */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetParsedCli(): void {
   _parsedDefault = null;
   _appFlags = [];
@@ -583,15 +588,13 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     }
     if (arg.startsWith("--port=")) {
       const n = intArg(arg.slice(7));
-      // `--port=0` is the universal spelling for "let the OS pick one", and it
-      // is what aio does by default — so it is ACCEPTED and leaves `port`
-      // unset, not refused. Scripts and tests pass it deliberately; refusing it
-      // would make strictness a regression rather than a fix. Anything that is
-      // neither a usable port nor 0 is a value the operator meant and cannot
-      // have.
-      if (n === 0) {
-        /* pick a free port — already the default */
-      } else if (Number.isInteger(n) && n > 0 && n < 65536) r.port = n;
+      // `--port=0` is the universal spelling for "let the OS pick one" — an
+      // ANSWER, kept as `port: 0`, so it outranks `AIO_PORT` and
+      // `aio.run({ port })` like any other `--port`. It used to be dropped,
+      // and an app declaring `port: 8123` booted on 8123 under `--port=0`
+      // without a word. Not "naming a port" (`portWasRequested`). Anything
+      // that is neither a usable port nor 0 is refused.
+      if (Number.isInteger(n) && n >= 0 && n < 65536) r.port = n;
       else {
         throw badValue(
           "--port",
@@ -888,7 +891,8 @@ Usage: ${usage}
 
 Flags:
   --port=N         Server port (default: $AIO_PORT, then aio.run({ port }),
-                   then $AIO_DEFAULT_PORT, then a free one). Naming a
+                   then $AIO_DEFAULT_PORT, then a free one; --port=0 picks
+                   a free one over all of those). Naming a
                    port is ALSO the opt-out from zero TCP ports: a local
                    electron app binds no port unless one is named here
                    (or via $AIO_PORT / aio.run({ port }))

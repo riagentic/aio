@@ -1,21 +1,24 @@
 // reactive.ts — reactive SQL views. Wrap a DB so a `select(sql)` is
-// a LIVE query: it re-runs and notifies whenever a write through this wrapper
-// touches one of the tables it reads. Big data-heavy apps (10k-account wallets)
+// a LIVE query: it re-runs and notifies whenever a write through the same
+// handle touches one of the tables it reads. Big data-heavy apps (10k-account wallets)
 // keep derived views in SQL instead of paying full-array-in-RAM + manual
 // recompute — the NFT-cache Worker dance becomes a one-liner.
 //
 // Change detection is by TABLE (parsed from the SQL): a write to a table
-// invalidates every live query that reads it. Writes must go through this
-// wrapper's execute/transaction for the feed to see them (direct writes to the
-// underlying DB are invisible — that's the seam).
+// invalidates every live query that reads it. A `createDB` handle announces
+// every write it commits (`WRITE_FEED`), so writes beside the wrapper are seen
+// too; another process or another handle on the file is the seam. A `DB`
+// without the feed is seen through this wrapper only.
 import type { DB, QueryResult, Tx } from "./types.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { WRITE_FEED, type WriteListener } from "./async-db.ts";
 import {
   readTablesIn,
   statementVerb,
   writesRows,
   writeTablesIn,
 } from "./sql-shape.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 // Which tables a statement reads and writes — and whether it writes at all —
 // is answered by `sql-shape.ts`, the same lexer `db.query()`'s writer-lock gate
@@ -228,15 +231,13 @@ export function reactiveDB(db: DB): ReactiveDB {
     }
     return out;
   };
-  /** A schema change: the graph is stale. A DROP or ALTER can also change
-   *  what a live query returns (a dropped or renamed table), so those refresh
-   *  every live query; a CREATE adds a table, trigger or view no live query
-   *  has read yet, and changes no rows. `sql` absent: unknown, so refresh. */
-  async function schemaChanged(sql?: string): Promise<void> {
+  /** A schema change that can change rows: the graph is stale, and a DROP or
+   *  ALTER can change what a live query returns (a dropped or renamed table),
+   *  so every live query refreshes. (A CREATE only drops the graph — see
+   *  `onWrites` — since it adds what no live query has read yet.) */
+  async function schemaChanged(): Promise<void> {
     graph = null;
-    if (sql === undefined || statementVerb(sql) !== "CREATE") {
-      await invalidateAll();
-    }
+    await invalidateAll();
   }
   const isDDL = (sql: string) =>
     /^(CREATE|DROP|ALTER)$/.test(statementVerb(sql));
@@ -266,6 +267,54 @@ export function reactiveDB(db: DB): ReactiveDB {
     for (const e of entries) await refreshAfterWrite(e);
   }
 
+  /** ONE answer to "these statements committed — what is stale now?".
+   *  `null`: the statements are unknown (a callback transaction on a `DB`
+   *  without a write feed), so everything is. */
+  async function onWrites(sqls: readonly string[] | null): Promise<void> {
+    if (sqls === null) return schemaChanged();
+    const ddl = sqls.filter(isDDL);
+    if (ddl.some((s) => statementVerb(s) !== "CREATE")) return schemaChanged();
+    if (ddl.length) graph = null;
+    const written = new Set<string>();
+    for (const s of sqls) {
+      if (!isDDL(s)) { for (const t of _written(s)) written.add(t); }
+    }
+    await invalidate(written);
+  }
+
+  /** The handle's own write feed, when it has one (`createDB` does). Then
+   *  EVERY write through that handle refreshes the live queries — the
+   *  framework's bound-table persistence and a plain `app.db.execute()`
+   *  included, which this wrapper never sees — and the wrapper's methods are
+   *  pass-throughs, so nothing is refreshed twice. Subscribed only while a
+   *  live query exists: a wrapper made per request must not leave a listener
+   *  on the handle forever. */
+  const feed = (db as {
+    [WRITE_FEED]?: (fn: WriteListener) => () => void;
+  })[WRITE_FEED]?.bind(db);
+  let unfeed: (() => void) | null = null;
+  const track = (e: Entry) => {
+    entries.add(e);
+    if (feed && !unfeed) unfeed = feed((sqls) => onWrites(sqls));
+  };
+  const untrack = (e: Entry) => {
+    entries.delete(e);
+    if (unfeed && entries.size === 0) {
+      unfeed();
+      unfeed = null;
+    }
+  };
+  /** Without a feed, the wrapper announces what passed through it. With one,
+   *  the feed does — but an unattributable write through the wrapper is
+   *  still said, live query or not. */
+  const own = (sqls: readonly string[] | null): Promise<void> => {
+    if (!feed) return onWrites(sqls);
+    if (entries.size === 0) {
+      for (const s of sqls ?? []) if (!isDDL(s)) _written(s);
+    }
+    return Promise.resolve();
+  };
+
   return {
     // A write can arrive through `query()` too — `INSERT … RETURNING` is
     // only readable that way — and it changes rows exactly like `execute()`.
@@ -274,8 +323,7 @@ export function reactiveDB(db: DB): ReactiveDB {
       params?: unknown[],
     ): Promise<QueryResult<T>> {
       const r = await db.query<T>(sql, params);
-      if (isDDL(sql)) await schemaChanged(sql);
-      else if (writesRows(sql)) await invalidate(_written(sql));
+      if (isDDL(sql) || writesRows(sql)) await own([sql]);
       return r;
     },
     lastWriterError: db.lastWriterError?.bind(db),
@@ -286,8 +334,7 @@ export function reactiveDB(db: DB): ReactiveDB {
 
     async execute(sql: string, params?: unknown[]): Promise<QueryResult> {
       const r = await db.execute(sql, params);
-      if (isDDL(sql)) await schemaChanged(sql);
-      else await invalidate(_written(sql));
+      await own([sql]);
       return r;
     },
 
@@ -301,7 +348,7 @@ export function reactiveDB(db: DB): ReactiveDB {
         ) => Promise<unknown>)(arg)
           .then(async (r) => {
             // …and its SQL may have changed the schema, too.
-            await schemaChanged();
+            await own(null);
             return r;
           });
       }
@@ -310,17 +357,7 @@ export function reactiveDB(db: DB): ReactiveDB {
         stmts,
       )
         .then(async (r) => {
-          const ddl = stmts.filter((s) => isDDL(s.sql));
-          if (ddl.some((s) => statementVerb(s.sql) !== "CREATE")) {
-            await schemaChanged();
-            return r;
-          }
-          if (ddl.length) graph = null;
-          const written = new Set<string>();
-          for (const s of stmts) {
-            for (const t of _written(s.sql)) written.add(t);
-          }
-          await invalidate(written);
+          await own(stmts.map((s) => s.sql));
           return r;
         });
     },
@@ -364,7 +401,7 @@ export function reactiveDB(db: DB): ReactiveDB {
             log.error(
               "db",
               `a live-query subscriber threw — the write is COMMITTED ` +
-                `and the other subscribers still ran: ${e}`,
+                `and the other subscribers still ran: ${thrownText(e)}`,
             );
           }
         }
@@ -375,11 +412,11 @@ export function reactiveDB(db: DB): ReactiveDB {
       // already passed and the query kept the pre-write rows until some
       // unrelated write. The tickets drop the older result either way.
       const entry: Entry = { tables, rerun };
-      entries.add(entry);
+      track(entry);
       try {
         await rerun(); // initial fill (no subscribers yet → no spurious notify)
       } catch (e) {
-        entries.delete(entry);
+        untrack(entry);
         throw e;
       }
       return {
@@ -393,7 +430,7 @@ export function reactiveDB(db: DB): ReactiveDB {
         },
         refresh: rerun,
         dispose() {
-          entries.delete(entry);
+          untrack(entry);
           subs.clear();
         },
       };

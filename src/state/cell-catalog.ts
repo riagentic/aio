@@ -2,7 +2,6 @@
 
 import { withRefusalCode } from "./method-rejection.ts";
 import type { CellDef, Creators, Msg } from "./cell-types.ts";
-import { checkReservedKeys } from "./cell-types.ts";
 import { randomUuid } from "../rand.ts";
 import { dispatchTracked } from "./cell-impl.ts";
 import { settlesCalls } from "../protocol/ack-registry.ts";
@@ -172,31 +171,6 @@ export function buildCatalog(
   }
 
   return { catalog, typeToKey };
-}
-
-/** Flatten action creators + string constants from catalog directly onto a cell def object.
- *  Explicit action creators are PURE FACTORIES — they stay callable before
- *  bindCell so config-time patterns (schedules arrays, tests, composition)
- *  can build actions. Only methods/generators get the pre-run loud guard
- *  (AIO-2.3) — those imply dispatch. Throws if any key collides with a
- *  reserved property or a selector. */
-export function flattenOnto(
-  target: Record<string, unknown>,
-  catalog: Record<string, unknown>,
-  selectorKeys: Set<string>,
-  cellName: string,
-): void {
-  // Validate all keys — checkReservedKeys throws with clear explanation
-  checkReservedKeys(cellName, Object.keys(catalog), "action");
-  for (const [key, value] of Object.entries(catalog)) {
-    if (selectorKeys.has(key)) {
-      throw new Error(
-        `[${cellName}] action '${key}' collides with selector of same name. Rename one (e.g. action '${key}Action').`,
-      );
-    }
-    // Pure factory passthrough — bindCell later wraps with dispatch.
-    target[key] = value;
-  }
 }
 
 /** The dispatch each def is bound to NOW — whose binding it is. A def is

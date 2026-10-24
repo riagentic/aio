@@ -81,6 +81,20 @@ export function runtimeFlagClaimed(name: string): boolean {
   return _claimed.has(name);
 }
 
+let _runtimeLoaded = false;
+
+/** Called once by `aio-cli.ts` at module load: an aio runtime (which answers
+ *  `--version` itself) is in this process. @internal */
+export function noteAioRuntime(): void {
+  _runtimeLoaded = true;
+}
+
+/** Whether an aio runtime is loaded in this process — `args()` passes
+ *  `--version` through to it only then. @internal */
+export function aioRuntimeLoaded(): boolean {
+  return _runtimeLoaded;
+}
+
 /** The same list in `aio-cli.ts`'s own spelling (value flags carry `=`). */
 export const AIO_RUNTIME_FLAG_SPECS: readonly string[] = [
   "--no-data-migrate",

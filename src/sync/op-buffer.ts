@@ -65,6 +65,7 @@ export interface OpBufferStorage {
 /**
  * In-memory storage for testing and non-persistent use cases
  */
+// aio-ok(dead-wiring): the in-memory OpBufferStorage tests drive the engine with
 export function createMemoryStorage(): OpBufferStorage {
   const ops = new Map<string, SyncOp[]>();
   const metas = new Map<

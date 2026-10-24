@@ -24,6 +24,14 @@
 // action flag that rides the drain window is server-constructed only and is
 // stripped from every network entry point (server-ws.ts sanitizeClientAction).
 //
+// v3 is ADDITIVE after 1.0.24-beta, no bump: a new server→client kind, "icon"
+// (`appIcon()` — the app's run-time window/tray icon and tooltip). Only an
+// app that calls appIcon() ever sends one. A v3 peer built before it (a tab
+// left open across an upgrade, an older CLI client) does not know the kind:
+// `dec()` returns null and it logs "undecodable frame — dropped" once per icon
+// frame and carries on — harmless, and a reload of the tab ends it. A NEW
+// server→client kind that an old peer must not drop would need a bump.
+//
 // Browser-safe: pure constants + a pure function, zero imports.
 
 /** Highest wire-protocol version this build speaks. */
@@ -92,6 +100,11 @@ export type ProtoHello = {
    *  1 MB default an app may have lowered. Advisory like `rate`: the server
    *  enforces its own limit whatever a client does. Additive within v3. */
   maxMessageBytes?: number;
+  /** The SERVER's per-connection inbound BYTE budget, bytes/sec
+   *  (`wsLimits.bytesPerSec`) — so a client paces large frames by size as it
+   *  paces all of them by count (`rate`). Additive within v3: a peer that
+   *  does not send it is paced by count only, as before. */
+  bytesPerSec?: number;
   /** Does the SERVER send a `cfg` frame on this connection? `true`: one
    *  follows the connect burst; `false`: none will. A client that encodes
    *  calls by what `cfg` says (`wire.omitTrailingUndefined`, the CLI client)
@@ -177,6 +190,11 @@ export function parseProtoHello(input: unknown): ProtoHello | null {
           p.maxMessageBytes <= 1_000_000_000
         ? Math.floor(p.maxMessageBytes)
         : undefined;
+      const bytesPerSec = typeof p.bytesPerSec === "number" &&
+          Number.isFinite(p.bytesPerSec) && p.bytesPerSec >= 1024 &&
+          p.bytesPerSec <= 1_000_000_000_000
+        ? Math.floor(p.bytesPerSec)
+        : undefined;
       return {
         v: p.v,
         min: p.min,
@@ -184,6 +202,7 @@ export function parseProtoHello(input: unknown): ProtoHello | null {
         ...(app ? { app } : {}),
         ...(rate ? { rate } : {}),
         ...(maxMessageBytes ? { maxMessageBytes } : {}),
+        ...(bytesPerSec ? { bytesPerSec } : {}),
         ...(typeof p.cfg === "boolean" ? { cfg: p.cfg } : {}),
         // Bounded like `ver`: untrusted peer input, compared, logged.
         ...(typeof p.appId === "string" && p.appId.length <= 256

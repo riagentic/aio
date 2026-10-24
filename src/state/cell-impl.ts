@@ -14,9 +14,14 @@ import { removalMessage, removalOf } from "./removals-core.ts";
 import type { ScheduleEffect } from "./schedule.ts";
 import type { OwnEffect } from "./own.ts";
 import type { NotifyEffect } from "./notify.ts";
+import type { AppIconEffect } from "./app-icon.ts";
 import { _diagScopeNow, diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { markInflight } from "./dispatch.ts";
+import {
+  _dispatchWriteSet,
+  _trackUnflushed,
+  markInflight,
+} from "./dispatch.ts";
 import { armLong } from "./timer-ceiling.ts";
 
 // Internal method types — `any` at spread args/return is unavoidable when
@@ -48,8 +53,8 @@ export type CellEffect =
 export type MethodDraftServed = {
   /** Run effect(s) — the effect channel. See {@linkcode MethodDraftMeta.$do}. */
   readonly $do: (
-    effect: ScheduleEffect | OwnEffect | NotifyEffect,
-    ...more: (ScheduleEffect | OwnEffect | NotifyEffect)[]
+    effect: ScheduleEffect | OwnEffect | NotifyEffect | AppIconEffect,
+    ...more: (ScheduleEffect | OwnEffect | NotifyEffect | AppIconEffect)[]
   ) => void;
 };
 
@@ -214,8 +219,8 @@ export type MethodDraftMeta<S = Record<string, unknown>> = {
    *  alpha76 (src/state/removals.ts) — it resolved the caller with
    *  `undefined`, so the two meanings could never share one channel. */
   readonly $do: (
-    effect: ScheduleEffect | OwnEffect | NotifyEffect,
-    ...more: (ScheduleEffect | OwnEffect | NotifyEffect)[]
+    effect: ScheduleEffect | OwnEffect | NotifyEffect | AppIconEffect,
+    ...more: (ScheduleEffect | OwnEffect | NotifyEffect | AppIconEffect)[]
   ) => void;
 };
 /** Cell method — sync or async */
@@ -1833,8 +1838,9 @@ function applyMutationsPass(
 // invocation's pending (unflushed) mutations overlaid — `s.x = 5; use(s.x)`
 // behaves exactly like sync code. The overlay replays the pending batch
 // through applyMutations itself, so what you read is byte-for-byte what will
-// commit. Other cells / concurrent invocations stay invisible until they
-// actually commit (their batches are their own).
+// commit. Another invocation's pending batch is flushed before this one
+// reads, and before any action is enqueued (dispatch.ts
+// `flushUnflushedWrites`), so the microtask only coalesces — never reorders.
 //
 // This is intentional: all mutations stay observable (dispatched as actions)
 // and partial-state visibility during async gaps is prevented.
@@ -1844,6 +1850,16 @@ type BatchState = {
   scheduled: boolean;
   method: string;
 };
+
+/** Who the running server-side execution acts for — installed by the server
+ *  (`_ambientUser` in auth-context.ts). Absent (the browser bundle, a bare
+ *  runtime): no author is ever stamped. */
+let _writeAuthor: (() => unknown) | null = null;
+
+/** Install the write-author reader — see `createBatcher`. @internal */
+export function _installWriteAuthor(fn: (() => unknown) | null): void {
+  _writeAuthor = fn;
+}
 
 /** Create a microtask batcher that groups async method mutations into single dispatched actions. */
 export function createBatcher(
@@ -1860,6 +1876,16 @@ export function createBatcher(
 ) {
   const batch: BatchState = { mutations: [], scheduled: false, method: "" };
   const deferred = opts.deferred === true;
+  // The CALL's author, read once here — the batcher is made inside the call's
+  // own scope — and stamped on every write-set it commits (`_user`), so an
+  // async method's writes reach `beforeReduce`/`onAction`/the journal as the
+  // user who made them, as a sync method's writes always have. They arrived
+  // as `user: undefined`, so the per-user guard `docs/auth/auth.md` gives
+  // (`type.startsWith("admin:") && user?.role !== "admin"`) dropped every
+  // async write an ADMIN made while the call was acked ok. Never read at
+  // flush time: another call's read flushes this batch from ITS scope
+  // (`flushUnflushedWrites`), which would name the wrong user.
+  const author = _writeAuthor?.();
   // Every dispatched write-set, and the first refusal among them. A write the
   // store rejects (most often `s.x = {...s.x}` — a proxy-derived value assigned
   // back into state) makes `app.dispatch` reject; without this the rejection was
@@ -1873,9 +1899,11 @@ export function createBatcher(
   // broadcast, `ok: true`, not a line in any log. Immer revokes a sync
   // method's draft at the same moment; the async view refused nothing.
   let closed = false;
-  // Whether any write-set was dispatched — what a rejection report needs to
-  // say truthfully whether the method changed state before it threw.
-  let dispatched = false;
+  // Whether any write-set LANDED (or may still land) — what a rejection report
+  // needs to say truthfully whether the method changed state before it threw.
+  // A write-set the store refused (a `validate` failure) changed nothing.
+  let landed = false;
+  let unsettled = 0;
 
   function add(method: string, mutation: Mutation): void {
     if (closed) {
@@ -1897,11 +1925,15 @@ export function createBatcher(
     batch.method = method;
     if (!deferred && !batch.scheduled) {
       batch.scheduled = true;
+      _trackUnflushed(flush, true);
       queueMicrotask(flush);
     }
   }
 
-  function flush(): void {
+  /** `onLand`: told when a write-set queued behind a running drain commits
+   *  (a transaction's `$commit` re-bases on exactly that state). */
+  function flush(onLand?: () => void): void {
+    _trackUnflushed(flush, false);
     if (batch.mutations.length === 0) {
       batch.scheduled = false;
       return;
@@ -1911,33 +1943,52 @@ export function createBatcher(
     batch.mutations = [];
     batch.scheduled = false;
     batch.method = "";
-    dispatched = true;
     // The live view must tell its OWN commit from a foreign one — see
     // `StaleLedger.seen`. Before: absorb what others committed since.
     api.flushHook?.(false);
-    const r = dispatch(markInflight({
-      // Sourced, because a write-set IS an effect result: it is the only way an
-      // async method publishes anything. Flagged in-flight, because shutdown's
-      // drain admits exactly this — a running method finishing its work — and
-      // refuses a scheduled tick or a late client action (dispatch.ts
-      // INFLIGHT).
-      _source: "Effect",
-      type: `${prefix}:${setKey(method)}`,
-      payload: { mutations, _origin: method },
-    }) as Msg);
-    // After: what the store holds now is this call's own write.
-    api.flushHook?.(true);
+    let landedHere = false;
+    const r = _dispatchWriteSet(() =>
+      dispatch(markInflight({
+        // Sourced, because a write-set IS an effect result: it is the only way an
+        // async method publishes anything. Flagged in-flight, because shutdown's
+        // drain admits exactly this — a running method finishing its work — and
+        // refuses a scheduled tick or a late client action (dispatch.ts
+        // INFLIGHT).
+        _source: "Effect",
+        type: `${prefix}:${setKey(method)}`,
+        payload: { mutations, _origin: method },
+        ...(author !== undefined ? { _user: author } : {}),
+      }) as Msg), () => {
+      onLand?.();
+      // After: what the store holds now is this call's own write — told at
+      // the moment it LANDS. Queued behind a running drain (every first
+      // frame), the state had not moved yet when `dispatch` returned, so the
+      // view re-baselined to "unknown" and absorbed the foreign commits
+      // reduced after ours unjudged: a held row proxy then wrote into the
+      // row that slid into its slot, where it used to throw `stale reference`.
+      landedHere = true;
+      api.flushHook?.(true, true);
+    });
+    // Not landed yet (queued) or never (refused at a door): unknown —
+    // re-baseline until the landing above says what is ours.
+    if (!landedHere) api.flushHook?.(true);
     if (r && typeof (r as Promise<unknown>).then === "function") {
+      unsettled++;
       inflight.push(
-        (r as Promise<unknown>).catch((e) => {
+        (r as Promise<unknown>).then(() => {
+          unsettled--;
+          landed = true;
+        }, (e) => {
+          unsettled--;
           if (firstError === null) firstError = e;
         }),
       );
-    }
+    } else landed = true;
   }
 
   /** Drop the buffered write-set without dispatching (transaction abort). */
   function discard(): void {
+    _trackUnflushed(flush, false);
     batch.mutations = [];
     batch.scheduled = false;
     batch.method = "";
@@ -1947,17 +1998,20 @@ export function createBatcher(
     add,
     /** Set by the call's live proxy: told just before (`false`) and just
      *  after (`true`) each write-set is dispatched — see `StaleLedger.seen`. */
-    flushHook: undefined as ((after: boolean) => void) | undefined,
+    flushHook: undefined as
+      | ((after: boolean, landed?: boolean) => void)
+      | undefined,
     /** The owning call has settled: every later write is refused by name. */
     close: () => {
       closed = true;
     },
     /** Whether `close()` has run — the owning call has settled. */
     closed: (): boolean => closed,
-    /** Whether this call's writes reach the store: a write-set already
-     *  dispatched, or one still buffered (a non-deferred batch flushes on its
-     *  microtask whatever the method did next). */
-    wrote: (): boolean => dispatched || batch.mutations.length > 0,
+    /** Whether this call's writes reach the store: a write-set that landed
+     *  or is still in flight, or one still buffered (a non-deferred batch
+     *  flushes on its microtask whatever the method did next). A refused
+     *  write-set does not count. */
+    wrote: (): boolean => landed || unsettled > 0 || batch.mutations.length > 0,
     /** Unflushed mutations of the current batch — the live proxy overlays
      *  these on reads (read-your-writes). */
     pending: () => batch.mutations,
@@ -2250,6 +2304,20 @@ function movedUnder(
   return null;
 }
 
+/** A path key as the app author writes it — `s.items[0].name`, never
+ *  `s.items.0.name`: the message's suggested fix is pasted as code. */
+function jsPath(pathKey: string): string {
+  if (pathKey === "") return "s";
+  return "s" +
+    pathKey.split(PATH_SEP).map((k) =>
+      /^\d+$/.test(k)
+        ? `[${k}]`
+        : /^[A-Za-z_$][\w$]*$/.test(k)
+        ? "." + k
+        : `[${JSON.stringify(k)}]`
+    ).join("");
+}
+
 /** Throw the named stale-capture error (get/set/has/keys on a reference that
  *  predates this method's overwrite of its container). */
 function throwStaleCapture(
@@ -2259,13 +2327,13 @@ function throwStaleCapture(
   overwrittenKey: string,
   moved?: string,
 ): never {
-  const ref = "s." + pathKey.split(PATH_SEP).join(".");
-  const ow = "s." + overwrittenKey.split(PATH_SEP).join(".");
+  const ref = jsPath(pathKey);
+  const ow = jsPath(overwrittenKey);
   if (moved !== undefined) {
     throw new Error(
       `[${cellName}:${methodName}] stale reference: this value was captured from ${ref} before another action ` +
         `re-addressed the rows of ${
-          moved === "" ? "s" : "s." + moved.split(PATH_SEP).join(".")
+          jsPath(moved)
         } while this method awaited (it moved, removed or inserted rows). In an async method \`s\` is a live view, ` +
         `so the old reference would silently address a DIFFERENT row now. Re-find the row after the await ` +
         `(s.items.find((r) => r.id === id)) instead of holding it across one.`,
@@ -2611,12 +2679,16 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     batcher.flushHook === undefined
   ) {
     _stale.seen = getState();
-    batcher.flushHook = (after) => {
+    batcher.flushHook = (after, landed) => {
       if (!after) return syncForeign();
       const now = getState();
-      // Unchanged = the write-set did not commit synchronously (queued behind
-      // a running drain) or was a no-op: unknown, so re-baseline, never judge.
-      _stale.seen = now === _stale.seen ? NOT_SEEN : now;
+      // Landed: what the store holds now is exactly the state after our
+      // write-set — moved by it, or as it was (refused, or a no-op), which
+      // keeps the baseline `syncForeign` just set, so a foreign commit after
+      // it is still judged. Not landed (queued behind a running drain, or
+      // refused at a door): unchanged is unknown — re-baseline, never judge,
+      // until the landing says what is ours.
+      _stale.seen = landed || now !== _stale.seen ? now : NOT_SEEN;
     };
   }
   const noteRead = _watch ? (k: string) => _watch.reads.add(k) : undefined;
@@ -3446,15 +3518,6 @@ export function withDraftDo<S extends object>(
  *  which is what the async live proxy's own fallback says (`_commit ?? (() =>
  *  {})`) for a non-transactional method. */
 function _noCommit(): void {}
-
-/** The draft behind a `withDraftDo` wrapper, or the value itself. @internal */
-export function unwrapDraftDo(v: unknown): unknown {
-  if (v !== null && typeof v === "object") {
-    const t = (v as Record<symbol, unknown>)[DRAFT_DO_TARGET];
-    if (t !== undefined) return t;
-  }
-  return v;
-}
 
 // ── Method classification ──────────────────────────────────────────
 

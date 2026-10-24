@@ -116,14 +116,21 @@ Deno.test("retained bytes: members of varied size stay inside the stated [len×l
 
 Deno.test("retained bytes: a 200k-row array costs far less than serializing it", () => {
   const v = rows(200_000, (i) => `row ${i}`);
-  const time = (f: () => unknown) => {
-    for (let i = 0; i < 3; i++) f();
+  // The FASTEST of interleaved runs, each side: a scheduler that takes the
+  // core away (a loaded suite — red once on Windows under 4-shard load, green
+  // alone) lengthens some runs of either side, never the fastest of both.
+  // Averages of back-to-back runs charged a whole stall to one side.
+  const once = (f: () => unknown) => {
     const t0 = performance.now();
-    for (let i = 0; i < 5; i++) f();
-    return (performance.now() - t0) / 5;
+    f();
+    return performance.now() - t0;
   };
-  const est = time(() => approxRetainedBytes(v));
-  const ser = time(() => JSON.stringify(v));
+  let est = Infinity, ser = Infinity;
+  for (let i = 0; i < 9; i++) {
+    const e = once(() => approxRetainedBytes(v));
+    const s = once(() => JSON.stringify(v));
+    if (i >= 2) [est, ser] = [Math.min(est, e), Math.min(ser, s)];
+  }
   assert(
     est * 20 < ser,
     `estimate ${est.toFixed(2)} ms vs JSON.stringify ${ser.toFixed(2)} ms — ` +

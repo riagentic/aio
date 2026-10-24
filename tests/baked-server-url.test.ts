@@ -377,3 +377,17 @@ Deno.test("client connect page: build.strictPin refuses a keyed non-loopback htt
     await dropTempDir(dir);
   }
 });
+
+// The page's <title> got the manifest's RESOURCE spelling (`_appNameXml`): a
+// title with a backslash or a leading `?`/`@` showed a stray `\` in the tab.
+Deno.test("client connect page: the title is the app's title, HTML-escaped once — no resource escapes", async () => {
+  const dir = await tempDir("aio-connect-");
+  try {
+    await _writeConnectPage(dir, '?Notes\\Work <A&B> "x"\x07');
+    const html = await Deno.readTextFile(join(dir, "index.html"));
+    const title = html.match(/<title>([^<]*)<\/title>/)?.[1];
+    assertEquals(title, "?Notes\\Work &lt;A&amp;B&gt; &quot;x&quot;");
+  } finally {
+    await dropTempDir(dir);
+  }
+});

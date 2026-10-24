@@ -127,6 +127,21 @@ const draft = useLocal(form.email);
 />;
 ```
 
+A method that **refuses** a pick (writes nothing) leaves `Checkbox`, `Switch`
+and `Input` showing what the user picked: nothing the component reads changed,
+so it does not re-render. `Select`, `RadioGroup` and raw inputs snap back on the
+next render. Any re-render puts a kit control back where state says it is, so
+record each refusal in a field the component reads, one that changes every time
+(a counter). Writing the old value again is not enough: an unchanged value is no
+change, and neither is the same message twice.
+
+```ts
+setNotify(s, on: boolean) {
+  if (!s.verified) { s.refusals++; return; } // the component shows a hint when refusals > 0
+  s.notify = on;
+},
+```
+
 ### Field — label + control + error
 
 Wraps any control with a label, optional hint, and error message:
@@ -309,6 +324,30 @@ there's no raw-HTML/XSS passthrough; link and image URLs are scheme-checked
 
 For full CommonMark (tables, footnotes, syntax highlighting), mount a library as
 a [React island](react-islands.md) — this covers the 90% content apps re-roll.
+
+### ZoomPan — a zoomable, pannable viewport
+
+For a diagram, a map, a big image: the wheel zooms at the cursor (the page does
+not scroll), a drag pans, and ＋ / － / fit buttons zoom about the centre or
+show the content whole. A click that ends a drag does not reach the content, so
+a clickable node is not "clicked" by panning past it. Size the viewport with
+`style`/`class`; it clips what is outside.
+
+```tsx
+import { ZoomPan, type ZoomView } from "aio/ui";
+
+let camera: ZoomView = { x: 0, y: 0, scale: 1 };
+
+<ZoomPan style={{ height: "60vh" }} onView={(v) => (camera = v)}>
+  <svg width="1200" height="800">{/* nodes, edges */}</svg>
+</ZoomPan>;
+```
+
+Props: `minScale`/`maxScale` (default 0.1 / 10), `initial` (`{ x, y, scale }`),
+`onView` (every new view), `controls` (default `true`). The camera math is pure
+and exported — `zoomAt(view, factor, px, py, min?, max?)` and
+`fitView(content, viewport, pad?, min?, max?)` — so it is testable without a
+DOM.
 
 ## Controls
 

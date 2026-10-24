@@ -1150,7 +1150,7 @@ Deno.test("updates e2e: a .app whose code signature does not verify is refused a
 });
 
 Deno.test(
-  "updates e2e: a translocated .app refuses before downloading, naming /Applications",
+  "updates e2e: a translocated .app refuses before it is offered, naming /Applications",
   {
     // A macOS bundle: its executable (Contents/MacOS/Counter) has no extension,
     // which Windows cannot run — and no Windows release is a .app.
@@ -1165,11 +1165,16 @@ Deno.test(
         { ok: true },
         join("AppTranslocation", "X", "d", "Counter.app"),
       );
-      assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+      // Said by the CHECK — before the offer is shown, not by the button.
+      const checked = await rt.check({ dismissed: null });
+      assertEquals(checked.kind, "error");
+      const said = checked.kind === "error" ? checked.error : "";
+      assertStringIncludes(said, "2.0.0 is available");
+      assertStringIncludes(said, "App Translocation");
+      assertStringIncludes(said, "Move Counter.app to /Applications");
       let failed = "";
       await rt.apply().catch((e) => (failed = String(e)));
-      assertStringIncludes(failed, "App Translocation");
-      assertStringIncludes(failed, "Move Counter.app to /Applications");
+      assertStringIncludes(failed, "no verified update is staged");
       assertEquals([swaps.length, sealed.length], [0, 0]);
       assertEquals(
         await Deno.stat(`${app}.zip-2.0.0`).catch(() => null),

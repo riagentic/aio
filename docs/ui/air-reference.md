@@ -232,7 +232,9 @@ function Clicks() {
 ```
 
 Handlers passed to `onWindowEvent`, `onGlobalKey`, `useInterval` and `useRaf`
-are re-read at event time, so the tuple value is current there.
+are re-read at event time, so the tuple value is current there. `aiol` warns on
+a tuple value read inside an `onMount`, `addEventListener`, `setTimeout` or
+`setInterval` callback.
 
 ## Routing
 

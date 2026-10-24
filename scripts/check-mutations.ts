@@ -304,8 +304,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a release check stopped by a red fast gate names none of the heavy gates that did not run, so its report reads as if they did not exist",
     file: "scripts/release-check.ts",
-    find: "  return [...HEAVY.map(([name]) => name), LAB];",
-    replace: "  return [LAB];",
+    find: "  return [...HEAVY.map(([name]) => name), LAB, GPU_LAB];",
+    replace: "  return [LAB, GPU_LAB];",
     test: "tests/release-check-skip-visible.test.ts",
     filter:
       "release check: a heavy tier that did not run names every gate in it",
@@ -1096,7 +1096,7 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "the method's own write-set commit is judged as a foreign commit, refusing a row fetched after its own overwrite",
     file: "src/state/cell-impl.ts",
-    find: "      _stale.seen = now === _stale.seen ? NOT_SEEN : now;",
+    find: "      _stale.seen = landed || now !== _stale.seen ? now : NOT_SEEN;",
     replace: "      void now;",
     test: "tests/proxy-foreign-move.test.ts",
     filter:
@@ -1125,7 +1125,7 @@ export const LEDGER: readonly Mutation[] = [
       "op ids are a bare counter again so a peer can pre-empt this client's next id and the server dedup swallows its acked write",
     file: "src/sync/sync-engine.ts",
     // aio-ok: the literal SOURCE line this mutation patches in and out
-    find: '}.${randomUuid().replaceAll("-", "").slice(0, 12)}`;',
+    find: '}.${\n      randomUuid().replaceAll("-", "").slice(0, 12)\n    }`;',
     replace: "}`;",
     test: "tests/sync/op-id-unguessable.test.ts",
     filter:
@@ -3388,13 +3388,13 @@ export const LEDGER: readonly Mutation[] = [
   },
   {
     what:
-      "a translocated (read-only) .app downloads the whole release and then fails the swap, instead of telling the user to move it to /Applications",
+      "a translocated (read-only) .app is OFFERED a release it cannot install, instead of the check telling the user to move it to /Applications",
     file: "src/server/updates-runtime.ts",
-    find: "    if (stuck) throw new Error(stuck);",
-    replace: "    void stuck;",
+    find: "    if (isMacApp) return macAppUpdateBlocker(current);",
+    replace: "    if (isMacApp) return null;",
     test: "tests/updates-e2e.test.ts",
     filter:
-      "updates e2e: a translocated .app refuses before downloading, naming /Applications",
+      "updates e2e: a translocated .app refuses before it is offered, naming /Applications",
     os: ["darwin", "linux"],
   },
   {
@@ -4809,11 +4809,10 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "updates: an oversize download named only rounded sizes (148.7 MB vs 148.7 MB)",
     file: "src/server/updates-check.ts",
-    find:
-      // aio-ok: mutation source text — the `${…}` is code to find, not a message
-      "              } (${opts.expectSize} bytes) the manifest promised (${seen} ` +",
-    // aio-ok: mutation source text — the `${…}` is code to find, not a message
-    replace: "              } the manifest promised (${seen} ` +",
+    // The oversize message names the promised size through exactly(): the
+    // mutation is the rounded size alone.
+    find: "                exactly(opts.expectSize)",
+    replace: "                MB(opts.expectSize)",
     test: "tests/updates-size-mismatch-bytes.test.ts",
     filter: "updates: an oversize download names the exact promised byte count",
   },
@@ -5166,8 +5165,9 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "the staged tree is unpacked with no record that it is the updater's — a failed swap's 400 MB tree stays for good",
     file: "src/server/updates-runtime.ts",
-    find: "      made(deps.dataDir, staged);\n      const unpacked = isMacApp",
-    replace: "      const unpacked = isMacApp",
+    find:
+      "        made(deps.dataDir, staged);\n      }\n      const unpacked = treeMade",
+    replace: "      }\n      const unpacked = treeMade",
     test: "tests/updates-e2e.test.ts",
     filter:
       "updates e2e: a .zip update's staged tree is on record as the very folder it unpacked into, and its own leftover is replaced",
@@ -6336,8 +6336,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "assets declared in deno.json only: the server does not read them — 404 in dev and with --prod for a mount the build embeds and packages",
     file: "src/server/server.ts",
-    find: "  const _served = _servedAssets(config.assets, absBaseDir);",
-    replace: "  const _served = config.assets;",
+    find: "  const _served = _servedAssets(runAssets, absBaseDir);",
+    replace: "  const _served = runAssets;",
     test: "tests/browser-worker-mount-chromium.test.ts",
     filter:
       "browser Worker (chromium): a worker named by URL literal runs in dev and in a build — module, classic, nested, shared, with a bare import — and so does one in a deno.json assets mount",
@@ -6675,11 +6675,33 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a window saved on a monitor that is gone opens off every screen — and the splash, the download window and the question with it",
     file: "src/electron/splash-place.ts",
-    find: "    x: Math.max(s.x, Math.min(x, s.x + Math.max(0, s.width - w))),",
-    replace: "    x,",
+    find: "      ? Math.max(lx, Math.min(Math.round(b.x!), lx + iw - w))",
+    replace: "      ? b.x!",
     test: "tests/window-place.test.ts",
     filter:
       "window place: the owner's layout — saved window on DP-2 opens there; no state, the primary's centre",
+  },
+  {
+    what:
+      "a window aio places sits AT the screen edge — its window-manager frame lands at x = -10 and an NVIDIA X driver takes the whole desktop down (feedback/critical.md)",
+    file: "src/electron/splash-place.ts",
+    find: "  const lx = s.x + mx, ly = s.y + my;",
+    replace: "  const lx = s.x, ly = s.y;",
+    test: "tests/window-place.test.ts",
+    filter:
+      "window place: the field states that took the desktop down open inside the margin, maximized",
+  },
+  {
+    what:
+      "an 8000×8000 icon under the byte cap goes to X as a 256 MB _NET_WM_ICON property, re-sent every animation frame",
+    file: "src/electron/electron-shared.ts",
+    find:
+      // aio-ok: mutation source text — the `${…}` is code to find, not a message
+      "    if (s.width <= ${ICON_EDGE} && s.height <= ${ICON_EDGE}) return img;",
+    replace: "    return img;",
+    test: "tests/app-icon-runtime.test.ts",
+    filter:
+      "main: an icon larger than ICON_EDGE reaches the window and the tray scaled down to it",
   },
   {
     what:

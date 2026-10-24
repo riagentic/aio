@@ -171,3 +171,63 @@ Deno.test("send pacer: take() returns what is waiting, in order, and disarms", (
   assertEquals(p.take().map((e) => e.frame), ["f1", "f2", "f3", "f4"]);
   assertEquals(clock.pending(), 0);
 });
+
+// The byte budget (`ProtoHello.bytesPerSec`). Measured before: forty 900 KB
+// calls against the default 5 MB/s left at the frame pace, crossed the byte
+// budget at once and lived on the server's retry hints — ~270 ERROR lines
+// and refusal diags on the server for a burst that then landed fine.
+Deno.test("send pacer (bytesRate): no 1 s interval carries more than the byte budget; a frame bigger than the bucket still goes", () => {
+  const clock = fakeClock();
+  const BUDGET = 5_000_000;
+  const sent: { at: number; bytes: number; seq: number }[] = [];
+  const p = createSendPacer<PacedFrame>({
+    write: (e) =>
+      void sent.push({ at: clock.now(), bytes: e.frame.length, seq: e.seq }),
+    onRefused: () => {
+      throw new Error("nothing is refused here");
+    },
+    rate: () => 100,
+    bytesRate: () => BUDGET,
+    now: clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  // 40 frames of 900 KB (under the 1 MB bucket: 20% of 5 MB) and two of
+  // 1.5 MB, which are over it and must not starve.
+  const sizes = [
+    ...Array.from({ length: 40 }, () => 900_000),
+    1_500_000,
+    1_500_000,
+  ];
+  sizes.forEach((n, seq) => p.push({ frame: "x".repeat(n), seq }));
+  clock.advance(60_000);
+  assertEquals(sent.length, sizes.length, "every frame left");
+  assertEquals(sent.map((s) => s.seq), sizes.map((_, i) => i), "in order");
+  for (const s of sent) {
+    const inWindow = sent.filter((o) => o.at >= s.at && o.at < s.at + 1000)
+      .reduce((a, o) => a + o.bytes, 0);
+    assert(
+      inWindow <= BUDGET,
+      `${inWindow} bytes in the second after ${s.at} — over ${BUDGET}`,
+    );
+  }
+  assertEquals(clock.pending(), 0, "idle again: no timer left armed");
+});
+
+Deno.test("send pacer: no bytesRate (an older server) paces by count only, as before", () => {
+  const clock = fakeClock();
+  let n = 0;
+  const p = createSendPacer<PacedFrame>({
+    write: () => void n++,
+    onRefused: () => {},
+    rate: () => 100,
+    bytesRate: () => undefined,
+    now: clock.now,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  for (let seq = 0; seq < 20; seq++) {
+    p.push({ frame: "x".repeat(900_000), seq });
+  }
+  assertEquals(n, 20, "the whole count burst left at once");
+});

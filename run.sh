@@ -363,6 +363,15 @@ ok "built $artifact"
 # case, and it can only run if the assignment survives.
 INSTALL_ROOT=$(deno run -A "$builder" --print-install-root 2>/dev/null || true)
 [ -n "$INSTALL_ROOT" ] || INSTALL_ROOT="${AIO_INSTALL_ROOT:-$HOME/app}"
+# The private unpack dir (`~/.<appId>/app`) — asked ONCE, from the same
+# builder, and used by every launch path below: the menu entry, the terminal
+# run and the macOS log lookup. The menu entry used to name its own
+# (`$XDG_CACHE_HOME/<name>`), so a double-click and a terminal run unpacked one
+# app into two places. The installed aio answers for a pin that predates the
+# flag; `|| true` for the same `set -e` reason as above.
+app_tmpdir=$(deno run -A "$builder" --print-app-tmpdir 2>/dev/null || true)
+[ -n "$app_tmpdir" ] \
+  || app_tmpdir=$(deno run -A "$AIO_HOME/src/build.ts" --print-app-tmpdir 2>/dev/null || true)
 app_name=$(basename "$artifact")
 # The bundle is named for the app, not for the archive it travels in.
 if [ -n "$mac_app" ]; then app_name="${app_name%.app.tar.gz}"; fi
@@ -558,6 +567,7 @@ else
     # dangling link and a menu entry with no icon, which is how this looked the
     # first time. Follow it, extract the target, keep its real extension.
     icon=""
+    wmclass=""
     if [ "$app_ext" = ".AppImage" ]; then
       _prev_pwd=$PWD
       if cd "$target_dir" 2>/dev/null; then
@@ -571,6 +581,11 @@ else
           case "$_ext" in png|svg|xpm) : ;; *) _ext=png ;; esac
           cp -f "$_src" "$app_base.$_ext" 2>/dev/null && icon="$target_dir/$app_base.$_ext"
         fi
+        # The window's class, as the build wrote it into the AppImage's own
+        # entry (StartupWMClass — windowClassName), so the panel matches the
+        # window to this menu entry. Absent (an older build): none is written.
+        "$installed" --appimage-extract '*.desktop' >/dev/null 2>&1 || :
+        wmclass=$(sed -n 's/^StartupWMClass=//p' squashfs-root/*.desktop 2>/dev/null | head -n 1)
         rm -rf squashfs-root
         cd "$_prev_pwd" || :
       fi
@@ -586,11 +601,20 @@ else
       # first. A field report got the warning aio prints about this and could
       # not act on it: the advice reaches whoever LAUNCHES the artifact, and a
       # double-click has no launcher to put it in — except this one.
+      # The dir is the framework's answer ($app_tmpdir, the one the terminal
+      # run uses); only when no builder could answer does the entry fall back
+      # to a private dir of its own rather than to /tmp.
+      if [ -n "$app_tmpdir" ]; then
+        _unpack="$app_tmpdir"
+      else
+        _unpack='${XDG_CACHE_HOME:-$HOME/.cache}/'"$app_base"
+      fi
       {
         printf '[Desktop Entry]\nType=Application\nName=%s\n' "$app_base"
-        printf 'Exec=sh -c '\''D="${XDG_CACHE_HOME:-$HOME/.cache}/%s"; mkdir -p "$D"; chmod 700 "$D" 2>/dev/null; TMPDIR="$D" exec "%s" "$@"'\'' _ %%U\n' \
-          "$app_base" "$installed"
+        printf 'Exec=sh -c '\''D="%s"; mkdir -p "$D"; chmod 700 "$D" 2>/dev/null; TMPDIR="$D" exec "%s" "$@"'\'' _ %%U\n' \
+          "$_unpack" "$installed"
         [ -f "$icon" ] && printf 'Icon=%s\n' "$icon"
+        [ -n "$wmclass" ] && printf 'StartupWMClass=%s\n' "$wmclass"
         printf 'Categories=Utility;\nTerminal=false\n'
       } > "$desktop_dir/$app_base.desktop" 2>/dev/null \
         && ok "menu entry $desktop_dir/$app_base.desktop"
@@ -638,21 +662,39 @@ if [ -n "$mac_app" ]; then
   # -W: wait for the app, as the other OSes do (they exec it). `open` answers
   # 0 for any app it could launch, whatever the app did next — so one that is
   # gone at once is said, with its log, instead of a silent exit 0.
+  # The marker dates this open: a log no newer than it is an EARLIER run's.
+  _mark=$(mktemp 2>/dev/null || :)
   _t0=$(date +%s)
-  open -W "$installed" "$@" || fail "open could not start $installed"
+  _rc=0
+  open -W "$installed" "$@" || _rc=$?
   _ran=$(( $(date +%s) - _t0 ))
-  if [ "$_ran" -lt "${AIO_OPEN_EARLY_EXIT_S:-3}" ]; then
-    _name=$(basename "$installed" .app)
-    _home=$(deno run -A "$AIO_HOME/src/build.ts" --print-app-tmpdir 2>/dev/null || true)
-    # Where an app with no data dir of its own logs. One with its own
-    # (`aio.run({ appDir })`, a profile) or in library mode logs elsewhere, and
-    # nothing outside the app can ask it — so only a log that IS there is named.
-    _log=""
-    if [ -n "$_home" ] && [ -f "${_home%/app}/logs/app.log" ]; then
-      _log="${_home%/app}/logs/app.log"
-      tail -n 20 "$_log" >&2
+  _fresh=""
+  _name=$(basename "$installed" .app)
+  _home=$app_tmpdir
+  # Where an app with no data dir of its own logs. One with its own
+  # (`aio.run({ appDir })`, a profile) or in library mode logs elsewhere, and
+  # nothing outside the app can ask it — so only a log that IS there is named.
+  _log=""
+  if [ -n "$_home" ] && [ -f "${_home%/app}/logs/app.log" ]; then
+    _log="${_home%/app}/logs/app.log"
+    if [ -z "$_mark" ] || [ -n "$(find "$_log" -newer "$_mark" 2>/dev/null)" ]; then
+      _fresh=1
     fi
-    fail "$_name exited ${_ran}s after it was opened — if you did not quit it, it stopped at start.${_log:+ Its log: $_log}"
+  fi
+  [ -n "$_mark" ] && rm -f "$_mark"
+  [ "$_rc" = 0 ] || fail "open could not start $installed"
+  if [ "$_ran" -lt "${AIO_OPEN_EARLY_EXIT_S:-3}" ]; then
+    if [ -n "$_fresh" ]; then
+      tail -n 20 "$_log" >&2
+      fail "$_name exited ${_ran}s after it was opened — if you did not quit it, it stopped at start. Its log: $_log"
+    fi
+    # Gone before it wrote a line (a bad argument, a missing library): what it
+    # said went to the stderr `open` does not keep. The log there is an earlier
+    # run's (measured on macOS 14: its tail read as this start's reason).
+    # The bundle's one executable (CFBundleExecutable is not the title).
+    _exe="$installed/Contents/MacOS/$_name"
+    for _e in "$installed/Contents/MacOS/"*; do [ -f "$_e" ] && _exe=$_e && break; done
+    fail "$_name exited ${_ran}s after it was opened, before it wrote to its log — if you did not quit it, it stopped at start. To see why, run it in a terminal: \"$_exe\"${_log:+ (its log, $_log, is from an earlier run)}"
   fi
   exit 0
 fi
@@ -665,9 +707,9 @@ artifact="$installed"
 # (predictable, and 0755 = world-readable), a second user running the same file
 # collides with the first user's copy, and the runtime warns-but-continues into
 # whatever tree is already there. ~/.<appId>/app is private to its owner by
-# construction. The build tells us the path — deriving an app's identity here
-# would be a second copy of a rule the framework already owns.
-app_tmpdir=$(deno run -A "$AIO_HOME/src/build.ts" --print-app-tmpdir 2>/dev/null)
+# construction. The build tells us the path ($app_tmpdir, asked once above) —
+# deriving an app's identity here would be a second copy of a rule the
+# framework already owns.
 if [ -n "$app_tmpdir" ] && mkdir -p "$app_tmpdir" 2>/dev/null; then
   chmod 700 "$app_tmpdir" 2>/dev/null || :
   export TMPDIR="$app_tmpdir"

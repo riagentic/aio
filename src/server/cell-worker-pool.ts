@@ -21,7 +21,7 @@ import {
 } from "../state/method-cancel.ts";
 import { type CellWorker, createCellWorker } from "./cell-worker.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { bumpPending } from "../protocol/pending-calls.ts";
+import { finishPending, startPending } from "../protocol/pending-calls.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import type { RemoteLifecycle } from "../state/cell-compose-registry.ts";
 
@@ -463,19 +463,19 @@ export function createCellWorkerPool(opts: {
     run: (onAdopted: (rerun: boolean) => void) => Promise<unknown>,
   ): Promise<unknown> => {
     if (!asyncTypes.has(type)) return run(() => {});
-    bumpPending(type, 1);
+    let start = startPending(type);
     let released = false;
     const release = () => {
       if (released) return; // adopted AND settled — decrement once
       released = true;
-      bumpPending(type, -1);
+      finishPending(type, start);
     };
     // An adopter whose `"first"` run answered another caller runs after all.
     const onAdopted = (rerun: boolean) => {
       if (!rerun) return release();
       if (!released) return;
       released = false;
-      bumpPending(type, 1);
+      start = startPending(type);
     };
     const p = run(onAdopted);
     p.then(release, release);
@@ -537,7 +537,7 @@ export function createCellWorkerPool(opts: {
         const why = await _verdictOf(calls, mine);
         if (why !== undefined) _noteUnsaved(action as object, undefined, why);
       };
-      return counted(
+      const routed = counted(
         action.type,
         (onAdopted) => {
           let call: Promise<unknown>;
@@ -567,6 +567,16 @@ export function createCellWorkerPool(opts: {
           );
         },
       );
+      // The main door's own rule (dispatch.ts, B-4): a fire-and-forget call
+      // never surfaces as an unhandled rejection; an awaiter still gets it.
+      // Without it, `cell.syncMethod()` unawaited on a worker cell that threw
+      // — or was closed by shutdown mid-call — reached the crash handler as
+      // `unhandledrejection`, where the same call on an in-isolate cell is
+      // quiet (its rejection line is already logged).
+      routed.catch(() => {
+        // aio-ok: fire-and-forget guard — the awaiter still gets the rejection
+      });
+      return routed;
     },
     ready: async () => {
       await Promise.all([...byCell.values()].map((w) => w.ready()));

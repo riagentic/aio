@@ -434,8 +434,12 @@ something and re-read state), see
 - **"Electron … could not be fetched"** -- the machine cannot reach
   github.com/electron releases (or npm, in dev). Fix the network, point
   `$ELECTRON_PATH` at an Electron you have, or use `--client=browser`
-- **"Module not found: aio"** -- Run `am fix` (source mode: the `dep/aio`
-  symlink is gitignored), or check the import map
+- **`Module not found ".../dep/aio/mod.ts"`** (from `deno task dev`, or from
+  `deno task doctor` itself, which runs out of `dep/aio`) -- Run `am fix`
+  (source mode: the `dep/aio` symlink is gitignored, so a fresh clone has none),
+  or check the import map. That failed run also rewrote `deno.lock` (Deno prunes
+  what it could not resolve, and re-resolves it later at newer versions) — put
+  it back with `git checkout deno.lock`, or every build reads as `-dirty`
 - **State resets on restart** -- Persistence is ON by default; a reset means the
   state shape changed (old keys deep-merge with new defaults — see
   [cell versioning](../state/cells.md)) or `state.db` was deleted

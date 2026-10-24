@@ -12,18 +12,23 @@ import {
   takeStreamFlag,
 } from "./call-stream.ts";
 import { doorRetryAfterMs } from "./door-refusal.ts";
+import { guardHookResult } from "./aio-dispatch.ts";
+import { inServerOrigin } from "../state/call-origin.ts";
+import type { AioUser } from "./aio-types.ts";
 import { compactPatches } from "../state/patch-compact.ts";
 import { LARGE_STATE_DOC } from "../state/budgets.ts";
 import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { warnBigFullState } from "./server-broadcast.ts";
+import { encState, warnBigFullState } from "./server-broadcast.ts";
 import { decidePatchOrFull } from "./patch-or-full.ts";
 import { createLineReader } from "../protocol/line-reader.ts";
 import {
   udsWriteBacklog as _writeBacklog,
   WRITE_QUEUE_WARN,
+  WRITE_STALL_MS,
 } from "./write-backlog.ts";
 import { degraded } from "../diagnostics/degraded.ts";
+import type { PressureMonitorAPI } from "../vitals/pressure-monitor.ts";
 
 /** The state snapshot this transport could not serialize. Module scope, like
  *  `_writeBacklog` above: one tracker for the transport. Its WS twin is
@@ -94,6 +99,7 @@ import {
 import { serializeReturn } from "../protocol/return-value.ts";
 import { VERSION } from "./aio-cli.ts";
 import { parseTTCommand } from "../diagnostics/time-travel.ts";
+import { rawStateControlAllowed } from "./server-auth.ts";
 import {
   negotiateProtocol,
   parseProtoHello,
@@ -185,6 +191,17 @@ export type UDSClient = {
    *  router negotiated the hello and threw it away, so on the desktop path
    *  (where every client lives) nothing knew which build it was talking to. */
   peer?: { aio?: string; app?: string };
+  /** The PROVEN aio app on the other end (its identity hello), as the app's
+   *  `resolvePeer` names it — the user its calls, views and hooks run as,
+   *  exactly as over a TCP socket that carried the same proof. Undefined:
+   *  anonymous (this OS user's local caller). */
+  user?: AioUser;
+};
+
+/** The verdict on a connection's identity hello (`peerAuth`). */
+export type UDSPeerVerdict = { ok: true; user: AioUser | null } | {
+  ok: false;
+  why: string;
 };
 
 type PatchEntry = {
@@ -260,6 +277,16 @@ export type UDSHandle = {
 
 /** Build the gate a `peer.required` listener asks — exported so the app's
  *  OTHER local door (the HTTP socket, server.ts) is handed the same object. */
+/** Time travel (the history out, `tt-cmd` in) for this connection? The
+ *  trusted local window is anonymous and keeps it; a peer PROVEN as a user
+ *  (`peerAuth`) answers to the bar a WS socket answers to under per-user auth
+ *  (`rawStateControlAllowed`): the history is every user's actions, and a
+ *  command rewinds state for every client. */
+const _ttAllowed = (c: { user?: AioUser } | undefined): boolean =>
+  !c?.user || rawStateControlAllowed(c.user);
+
+const _TT_FRAME = '{"v":2,"t":"tt-state"';
+
 export function createAppPeerGate(): LocalPeerGate {
   // Fail at CONSTRUCTION when this process cannot read peer credentials (no
   // `--allow-ffi`): a gate that refuses everyone is a dead app, not a safe one.
@@ -277,9 +304,10 @@ export function createAppPeerGate(): LocalPeerGate {
 
 export function createUDSListener(
   socketPath: string,
-  getUIState: () => unknown,
+  getUIState: (user?: AioUser) => unknown,
   onAction: (
     action: { type: string; payload?: unknown },
+    user?: AioUser,
   ) => Promise<unknown> | void,
   debug: (msg: string) => void,
   clientCounter?: { value: number },
@@ -336,6 +364,30 @@ export function createUDSListener(
    *  than this socket (see `createAppPeerGate`); absent, the listener builds
    *  its own. */
   peer?: { required: boolean; gate?: LocalPeerGate },
+  /** The app's `onConnect` / `onDisconnect` — the SAME hooks the WS path
+   *  runs. Without them a presence app (`onConnect` → `presence.mark()`)
+   *  worked in a browser tab and saw nothing on the desktop, where every
+   *  window is on this socket. A peer counts once its first frame is not a
+   *  `type: control` hello: `am` asks one question and leaves, and is no
+   *  more a connection here than its HTTP request is on the WS path.
+   *  Passed only under `aio.run({ localConnectHooks: true })` — opt-in,
+   *  because through 1.0.24 they never ran here (aio-server.ts). */
+  hooks?: ConnHooks,
+  /** The vitals per-client bandwidth alarm — fed here, at `sendTo`, from
+   *  every state/patch frame, exactly as the WS broadcaster feeds it. It was
+   *  never wired on this transport, so a desktop window pulling MB/s of state
+   *  raised no PRESSURE line at all. */
+  pressure?: Pick<PressureMonitorAPI, "onBroadcast" | "onClientDisconnect">,
+  /** Judge a connection's identity hello — `{ t: "type", d: { kind: "peer",
+   *  proof, cid } }` as its FIRST frame, the peer-proof header `peer()` sends
+   *  over TCP. Verified once; the connection is then that user. Absent: a
+   *  hello is answered "proven, no identity" (anonymous), as a TCP door
+   *  without `resolvePeer` ignores the header. */
+  peerAuth?: (proof: string) => Promise<UDSPeerVerdict>,
+  /** The icon frames a window that connects now is sent after its state —
+   *  the WS path's `iconReplay`, so a desktop window opened after
+   *  `appIcon()` shows that icon too. */
+  iconReplay?: () => readonly string[],
 ): UDSHandle {
   const fullThreshold = typeof fullStateThreshold === "number" &&
       Number.isFinite(fullStateThreshold)
@@ -376,6 +428,10 @@ export function createUDSListener(
     string,
     { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }
   >();
+  /** Identity-hello refusal reasons already said at WARN — a caller that
+   *  keeps reconnecting with the same refused proof is one line, not one a
+   *  round. */
+  const refusalsSaid = new Set<string>();
 
   // The cell ids a subscription may name — resolved in ONE place so the
   // trusted window and the (state-less) foreign peer agree on what one is.
@@ -464,6 +520,9 @@ export function createUDSListener(
                 ? { appId: clientConfig.appId }
                 : {}),
               user: null,
+              // This server judges an identity hello (`peerAuth`) — a
+              // `peer()` caller that sent one waits for its verdict.
+              peerHello: true,
             }),
           );
           if (clientConfig && Object.keys(clientConfig).length > 0) {
@@ -476,16 +535,14 @@ export function createUDSListener(
           const initial = _fullJsonFor(client);
           if (initial !== undefined) {
             client.queuedJson = initial;
-            sendTo(conn, encRaw("state", initial), () => {
+            sendTo(conn, encState(initial, client.subscriptions), () => {
               client.lastFullJson = initial;
             });
           }
-          // Dev: hand the panel its history now — Ctrl+. binds on the first
-          // tt-state frame, so without this the shortcut is inert until the next
-          // recorded action's broadcast.
-          if (tt) sendTo(conn, enc("tt-state", tt.getBroadcast()));
+          for (const f of iconReplay?.() ?? []) sendTo(conn, f);
         }
 
+        const pressureId = clientMap.get(conn)?.id;
         _handleUDSConn(
           conn,
           connSet,
@@ -506,7 +563,12 @@ export function createUDSListener(
           // frame kind is dropped (see `_handleUDSConn`).
           trusted,
           firstBytes,
-        );
+          hooks,
+          peerAuth,
+          refusalsSaid,
+        ).finally(() => {
+          if (pressureId) pressure?.onClientDisconnect(pressureId);
+        });
       } catch (e) {
         // Never served and never read: whatever the gate had to say about
         // this peer is said now rather than lost.
@@ -527,6 +589,48 @@ export function createUDSListener(
   const _writeQueues = new WeakMap<LocalConn, Promise<void>>();
   /** Frames queued and not yet written, per connection — see `sendTo`. */
   const _writeDepth = new WeakMap<LocalConn, number>();
+  /** When a frame was last WRITTEN, per connection — progress, which is what
+   *  "stopped reading" is about. Depth alone is a burst detector: 200 calls
+   *  answered back-to-back queue 200 frames for a peer reading every one. */
+  const _lastWrite = new WeakMap<LocalConn, number>();
+  /** The armed stall check per over-threshold connection. */
+  const _stallTimers = new Map<LocalConn, ReturnType<typeof setTimeout>>();
+  /** Connections judged stalled — health recovers when NONE is, not when
+   *  whichever connection drained last happens to be a healthy one. */
+  const _stalled = new Set<LocalConn>();
+
+  /** Over `WRITE_QUEUE_WARN` and no write completed for `WRITE_STALL_MS`:
+   *  that is a peer that stopped reading. Re-armed while the backlog lasts. */
+  function _armStall(conn: LocalConn, ms = WRITE_STALL_MS): void {
+    const id = setTimeout(() => {
+      _stallTimers.delete(conn);
+      const depth = _writeDepth.get(conn) ?? 0;
+      if (!connSet.has(conn) || depth <= WRITE_QUEUE_WARN) return;
+      const idle = Date.now() - (_lastWrite.get(conn) ?? 0);
+      if (idle >= WRITE_STALL_MS) {
+        _stalled.add(conn);
+        _writeBacklog.fail(
+          new Error(
+            `a UDS client has ${depth} frames queued and none written for ` +
+              `${WRITE_STALL_MS}ms — it has stopped reading its socket. ` +
+              `Every queued frame is held in memory until it does.`,
+          ),
+        );
+        _armStall(conn);
+      } else {
+        _unstall(conn);
+        _armStall(conn, WRITE_STALL_MS - idle);
+      }
+    }, ms);
+    Deno.unrefTimer(id);
+    _stallTimers.set(conn, id);
+  }
+
+  function _unstall(conn: LocalConn): void {
+    clearTimeout(_stallTimers.get(conn));
+    _stallTimers.delete(conn);
+    if (_stalled.delete(conn) && _stalled.size === 0) _writeBacklog.ok();
+  }
 
   /** Queue `msg` for `conn`. `droppable` (a stream chunk): refused — false,
    *  nothing queued — once the peer is gone or has stopped draining; every
@@ -542,18 +646,26 @@ export function createUDSListener(
       (!connSet.has(conn) || (_writeDepth.get(conn) ?? 0) >= WRITE_QUEUE_WARN)
     ) return false;
     const encoded = new TextEncoder().encode(msg + "\n");
+    // The envelope's kind read EXACTLY — `{"v":2,"t":"<kind>",…}` — never
+    // by substring: a patch payload can contain the literal `"t":"state"`
+    // in its own data. Acks, diagnostics and tt frames are `other`, not
+    // full resends; counting a wall of 40-byte acks as "the whole state
+    // went out" is a plausible headline that is wrong. Same classifier as
+    // server-ws.ts, on purpose.
+    const envKind = costMeter || pressure
+      ? /^\{"v":\d+,"t":"([^"]+)"/.exec(msg)?.[1]
+      : undefined;
+    const clientId = clientMap.get(conn)?.id;
+    if (
+      pressure && clientId && (envKind === "patches" || envKind === "state")
+    ) {
+      pressure.onBroadcast(clientId, encoded.byteLength);
+    }
     if (costMeter) {
       try {
-        // The envelope's kind read EXACTLY — `{"v":2,"t":"<kind>",…}` — never
-        // by substring: a patch payload can contain the literal `"t":"state"`
-        // in its own data. Acks, diagnostics and tt frames are `other`, not
-        // full resends; counting a wall of 40-byte acks as "the whole state
-        // went out" is a plausible headline that is wrong. Same classifier as
-        // server-ws.ts, on purpose.
-        const envKind = /^\{"v":\d+,"t":"([^"]+)"/.exec(msg)?.[1];
         costMeter.recordSend(
           encoded.byteLength,
-          clientMap.get(conn)?.id ?? "uds",
+          clientId ?? "uds",
           envKind === "patches"
             ? "patch"
             : envKind === "state"
@@ -573,24 +685,19 @@ export function createUDSListener(
     // — one structured event at `/__aio/health`, and one on recovery.
     const depth = (_writeDepth.get(conn) ?? 0) + 1;
     _writeDepth.set(conn, depth);
-    if (depth > WRITE_QUEUE_WARN) {
-      _writeBacklog.fail(
-        new Error(
-          `a UDS client has ${depth} frames queued and is not draining them — ` +
-            `it has stopped reading its socket. Every queued frame is held in ` +
-            `memory until it does.`,
-        ),
-      );
-    }
+    if (depth === 1) _lastWrite.set(conn, Date.now()); // idle until now
+    if (depth > WRITE_QUEUE_WARN && !_stallTimers.has(conn)) _armStall(conn);
     const next = prev.then(async () => {
       const writer = conn.writable.getWriter();
       try {
         await writer.write(encoded);
+        _lastWrite.set(conn, Date.now());
         onSent?.();
       } finally {
         writer.releaseLock();
       }
     }).catch(() => {
+      _unstall(conn);
       _writeQueues.delete(conn);
       _writeDepth.delete(conn);
       connSet.delete(conn);
@@ -603,7 +710,7 @@ export function createUDSListener(
     }).finally(() => {
       const left = (_writeDepth.get(conn) ?? 1) - 1;
       _writeDepth.set(conn, left);
-      if (left === 0) _writeBacklog.ok();
+      if (left === 0) _unstall(conn);
     });
     _writeQueues.set(conn, next);
     return true;
@@ -633,7 +740,7 @@ export function createUDSListener(
    *  decides when that verdict is settled (once per round in the broadcast
    *  loop; immediately for a single-client door, see `_fullJsonFor`). */
   function _snapshot(
-    client: Pick<UDSClient, "subscriptions">,
+    client: Pick<UDSClient, "subscriptions" | "user">,
     verdict: SnapshotVerdict,
   ): string | undefined {
     verdict.attempted = true;
@@ -641,7 +748,7 @@ export function createUDSListener(
       // One filter, both transports (broadcast-utils.ts) — a hand-inlined
       // copy here is how the two drifted in the first place.
       const uiState: unknown = filterStateBySubs(
-        getUIState(),
+        getUIState(client.user),
         client.subscriptions,
       );
       const json = JSON.stringify(uiState);
@@ -693,7 +800,7 @@ export function createUDSListener(
   /** The single-client doors (accept, `subs`, `resync`): one snapshot IS the
    *  round, so its verdict is settled on the spot. */
   function _fullJsonFor(
-    client: Pick<UDSClient, "subscriptions">,
+    client: Pick<UDSClient, "subscriptions" | "user">,
   ): string | undefined {
     const verdict: SnapshotVerdict = {
       attempted: false,
@@ -713,7 +820,11 @@ export function createUDSListener(
     // `clientMap`, not `connSet`: the latter is the cleanup roster and a foreign
     // (non-window) peer must never be handed a broadcast it did not subscribe to.
     broadcast: (msg: string) => {
-      for (const conn of clientMap.keys()) sendTo(conn, msg);
+      const tt = msg.startsWith(_TT_FRAME);
+      for (const [conn, c] of clientMap) {
+        if (tt && !_ttAllowed(c)) continue;
+        sendTo(conn, msg);
+      }
     },
     broadcastState: (forceOrPatches?: boolean | PatchEntry[]) => {
       // Counted, not assumed — see the type. Every `sendTo` below bumps one.
@@ -809,7 +920,7 @@ export function createUDSListener(
                   const fj = fullJson;
                   full++;
                   client.queuedJson = fj;
-                  sendTo(conn, encRaw("state", fullJson), () => {
+                  sendTo(conn, encState(fullJson, client.subscriptions), () => {
                     client.lastFullJson = fj;
                     client.needsFull = false; // paid once it is written
                   });
@@ -862,7 +973,7 @@ export function createUDSListener(
           const j = json;
           full++;
           client.queuedJson = j;
-          sendTo(conn, encRaw("state", json), () => {
+          sendTo(conn, encState(json, client.subscriptions), () => {
             client.lastFullJson = j;
             client.needsFull = false; // the debt is paid once it is written
           });
@@ -924,7 +1035,7 @@ export function createUDSListener(
         }
         full++;
         client.queuedJson = json;
-        sendTo(conn, encRaw("state", json), () => {
+        sendTo(conn, encState(json, client.subscriptions), () => {
           client.lastFullJson = json;
           client.needsFull = false;
         });
@@ -971,6 +1082,7 @@ export function createUDSListener(
       }
       for (const entry of pendingState.values()) clearTimeout(entry.timer);
       pendingState.clear();
+      for (const conn of [..._stallTimers.keys()]) _unstall(conn);
       connSet.clear();
       clientMap.clear();
       if (!isPipePath(socketPath)) {
@@ -994,6 +1106,34 @@ export function udsFrameCeiling(maxFrameBytes?: number): number {
   return Math.max(10 * 1024 * 1024, maxFrameBytes ?? 0);
 }
 
+/** `onConnect` / `onDisconnect` as the UDS listener takes them. A local
+ *  peer has no user — the hooks get `undefined`, as an anonymous WS client's
+ *  do — unless it proved one (an identity hello): then that user. */
+export type ConnHooks = {
+  onConnect?: (user?: AioUser) => void;
+  onDisconnect?: (user?: AioUser) => void;
+};
+
+/** Run a connection hook — observe-only, exactly as `server-ws.ts` does: a
+ *  sync throw or a rejection is a WARN line and never ends the read loop, and
+ *  it runs as SERVER origin (the hook is the app's server code). */
+function _runConnHook(
+  name: "onConnect" | "onDisconnect",
+  hook: (user?: AioUser) => void,
+  user?: AioUser,
+): void {
+  const failed = (e: unknown) =>
+    log.warn(
+      "uds",
+      `hook ${name} failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  try {
+    guardHookResult(inServerOrigin(() => hook(user)), failed);
+  } catch (e) {
+    failed(e);
+  }
+}
+
 function _handleUDSConn(
   conn: LocalConn,
   connections: Set<LocalConn>,
@@ -1004,12 +1144,15 @@ function _handleUDSConn(
   >,
   onAction: (
     action: { type: string; payload?: unknown },
+    user?: AioUser,
   ) => Promise<unknown> | void,
   debug: (msg: string) => void,
   /** THE snapshot builder (see `_fullJsonFor`) — passed in, never re-derived
    *  here: this handler used to carry its own copy of the subscription filter,
    *  which is the same fact decided twice. */
-  fullJsonFor: (client: Pick<UDSClient, "subscriptions">) => string | undefined,
+  fullJsonFor: (
+    client: Pick<UDSClient, "subscriptions" | "user">,
+  ) => string | undefined,
   sendTo: (
     conn: LocalConn,
     msg: string,
@@ -1035,8 +1178,21 @@ function _handleUDSConn(
   /** Told once whether this peer ever sent anything: `true` at its first
    *  byte, `false` when it hung up having sent none (see the gate's `asked`). */
   firstBytes?: (sent: boolean) => void,
-): void {
+  hooks?: ConnHooks,
+  peerAuth?: (proof: string) => Promise<UDSPeerVerdict>,
+  refusalsSaid: Set<string> = new Set(),
+): Promise<void> {
   const decoder = new TextDecoder();
+  /** `onConnect` ran for this peer — so `onDisconnect` runs when it goes. */
+  let announced = false;
+  /** The peer's first frame has been looked at (see `hooks`). */
+  let judged = false;
+  /** Who this connection is — set once, by an identity hello that proved a
+   *  peer (`peerAuth`); undefined = anonymous. */
+  let user: AioUser | undefined;
+  /** Its identity hello was REFUSED: nothing after it runs — anonymously
+   *  least of all — and the connection closes once the refusal is written. */
+  let refusedWhy: string | undefined;
   const MAX_BUF = udsFrameCeiling(maxFrameBytes);
   // Linear in the bytes read, however a frame is chunked (line-reader.ts).
   const lineBuf = createLineReader();
@@ -1165,11 +1321,11 @@ function _handleUDSConn(
       return;
     }
     client.queuedJson = msg;
-    sendTo(conn, encRaw("state", msg), () => {
+    sendTo(conn, encState(msg, client.subscriptions), () => {
       client.lastFullJson = msg;
     });
   }
-  (async () => {
+  return (async () => {
     const reader = conn.readable.getReader();
     try {
       while (true) {
@@ -1235,6 +1391,99 @@ function _handleUDSConn(
             }
             continue;
           }
+          // Refused identity: the frames it sent behind its hello are not
+          // run — a call is TOLD (its caller fails now, never anonymous).
+          if (refusedWhy !== undefined) {
+            const cid = frame.t === "action"
+              ? (frame.d as { cid?: unknown } | undefined)?.cid
+              : undefined;
+            if (typeof cid === "string" && cid.length > 0) {
+              sendTo(
+                conn,
+                enc("ack", {
+                  cid,
+                  ok: false,
+                  error: `not run — this connection's identity was refused ` +
+                    `(${refusedWhy})`,
+                }),
+              );
+            }
+            continue;
+          }
+          const hello = frame.t === "type" &&
+              (frame.d as { kind?: unknown } | undefined)?.kind === "peer"
+            ? frame.d as { proof?: unknown; cid?: unknown }
+            : undefined;
+          if (hello) {
+            // The identity hello: the same proof, the same decider and the
+            // same `resolvePeer` as the TCP handshake — awaited HERE, so no
+            // frame behind it runs before the connection knows who it is.
+            const verdict: UDSPeerVerdict = judged
+              ? {
+                ok: false,
+                why: "an identity hello must be the connection's first frame",
+              }
+              : !trusted || !clientMap.has(conn)
+              ? {
+                ok: false,
+                why: "this app's socket admits only its own window " +
+                  "(production local-peer lockdown) — start it with a port",
+              }
+              : typeof hello.proof !== "string"
+              ? { ok: false, why: "malformed peer proof" }
+              : peerAuth
+              ? await peerAuth(hello.proof).catch((e: unknown) => ({
+                ok: false as const,
+                why: `resolvePeer threw: ${
+                  e instanceof Error ? e.message : String(e)
+                }`,
+              }))
+              : { ok: true, user: null };
+            const cid = typeof hello.cid === "string" ? hello.cid : undefined;
+            if (!verdict.ok) {
+              refusedWhy = verdict.why;
+              judged = true; // never a connection: no onConnect
+              const say = `peer connection refused — ${verdict.why}`;
+              if (refusalsSaid.has(verdict.why)) debug(`uds: ${say}`);
+              else {
+                refusalsSaid.add(verdict.why);
+                log.warn("uds", say);
+              }
+              sendTo(
+                conn,
+                enc("ack", { cid, ok: false, error: verdict.why }),
+              );
+              sendTo(conn, "", () => closeAfterDrain(conn));
+              continue;
+            }
+            user = verdict.user ?? undefined;
+            const c = clientMap.get(conn);
+            if (c) c.user = user;
+            sendTo(conn, enc("ack", { cid, ok: true }));
+            // Its view now: a proven peer sees what `visible` gives THAT
+            // user — the accept-time state was the anonymous one, which the
+            // client set aside while it waited for this verdict.
+            if (c) _sendFilteredState(conn, c, false);
+          }
+          if (!judged) {
+            judged = true;
+            const control = frame.t === "type" &&
+              (frame.d as { kind?: unknown } | undefined)?.kind === "control";
+            if (!control && clientMap.has(conn) && hooks?.onConnect) {
+              announced = true;
+              _runConnHook("onConnect", hooks.onConnect, user);
+            }
+            // Dev: hand the panel its history now — Ctrl+. binds on the first
+            // tt-state frame, so without this the shortcut is inert until the
+            // next recorded action's broadcast. At the FIRST frame, not at
+            // accept: an identity hello decides whether this peer may read it.
+            if (
+              tt && !control && clientMap.has(conn) &&
+              _ttAllowed(clientMap.get(conn))
+            ) {
+              sendTo(conn, enc("tt-state", tt.getBroadcast()));
+            }
+          }
           switch (frame.t) {
             case "ping":
               continue;
@@ -1263,6 +1512,15 @@ function _handleUDSConn(
               continue;
             }
             case "tt-cmd": {
+              if (tt && !_ttAllowed(clientMap.get(conn))) {
+                log.warn(
+                  "uds",
+                  `time-travel command denied for user=${user?.id} ` +
+                    `role=${user?.role} — it rewinds/freezes state for EVERY ` +
+                    `client and requires role "admin"`,
+                );
+                continue;
+              }
               if (tt && typeof frame.d === "string") {
                 const cmd = parseTTCommand(frame.d);
                 if (cmd) {
@@ -1407,7 +1665,7 @@ function _handleUDSConn(
               }
               syncHandler.handleOp(
                 op,
-                { id: client?.id ?? "uds" },
+                { id: client?.id ?? "uds", ...(user ? { user } : {}) },
                 _wireSink(conn),
               );
               continue;
@@ -1428,7 +1686,7 @@ function _handleUDSConn(
               }
               syncHandler.handleSync(
                 sync,
-                { id: client?.id ?? "uds" },
+                { id: client?.id ?? "uds", ...(user ? { user } : {}) },
                 _wireSink(conn),
               );
               continue;
@@ -1448,7 +1706,7 @@ function _handleUDSConn(
               // handler is a last-words logger, not a survival net — one bad
               // serverFn took the whole server down.
               _dialogCaller(() =>
-                invokeServerFn(ns, name, args, undefined, false, (hold) => {
+                invokeServerFn(ns, name, args, user, false, (hold) => {
                   try {
                     sendTo(conn, enc("sfnh", { cid, hold }));
                   } catch {
@@ -1636,7 +1894,7 @@ function _handleUDSConn(
               const streamed = takeStreamFlag(
                 action as Record<string, unknown>,
               );
-              const run = () => _dialogCaller(() => onAction(action));
+              const run = () => _dialogCaller(() => onAction(action, user));
               const result = streamed
                 ? runCallStreamed((value) => {
                   const frame = chunkFrame(
@@ -1740,6 +1998,9 @@ function _handleUDSConn(
         }
       }
     } catch { /* connection closed */ }
+    if (announced && hooks?.onDisconnect) {
+      _runConnHook("onDisconnect", hooks.onDisconnect, user);
+    }
     // The read ended. A peer that got here without a byte sent none (a
     // no-op when the first chunk already answered).
     firstBytes?.(false);

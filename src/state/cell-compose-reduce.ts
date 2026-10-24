@@ -22,7 +22,7 @@ import { resolveCall } from "./cell-impl.ts";
 import { cloneExecEffect, isExecEffect } from "./exec-effect.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import { createAioError } from "../diagnostics/error.ts";
-import { describeThrown } from "../diagnostics/fmt.ts";
+import { describeThrown, thrownText } from "../diagnostics/fmt.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import {
   type CellDef,
@@ -151,6 +151,10 @@ function _frozenMutationHint(e: unknown): string {
       `\`const y = JSON.parse(JSON.stringify(s.y))\`.`
     : "";
 }
+
+/** Bare-typed actions (no `cell:` prefix) that no cell and no listener took —
+ *  read by the dispatcher (aio-dispatch.ts) for its dev hint. @internal */
+export const _bareUnobserved: WeakSet<object> = new WeakSet();
 
 // Defined in the diagnostics leaf so the logger can name it without loading
 // the state engine (aio/log stays a leaf).
@@ -431,7 +435,9 @@ export function reduceCell(
             } catch (e) {
               log.error(
                 "cell",
-                `${cellName} transition fn for '${lookupKey}' threw: ${e} — staying in '${currentStatus}'`,
+                `${cellName} transition fn for '${lookupKey}' threw: ${
+                  thrownText(e)
+                } — staying in '${currentStatus}'`,
               );
             }
           } else {
@@ -962,6 +968,12 @@ export function buildRootReducer(
           // it, `await ghost.bump()` resolved successfully forever.
           recordRejection(action, { cell: prefix, reason: msg });
         }
+      } else if (ci <= 0 && !t.startsWith("__")) {
+        // No `cell:` prefix ("inc", ""): no cell owns it and no listener
+        // takes it. NOT a refusal — an `onAction`/plugin hook may be what it
+        // is for (docs/basics/plugins.md) — so the dispatcher, which knows
+        // the hooks, decides whether to say so (`_bareUnobserved`).
+        _bareUnobserved.add(action);
       }
     }
     // A refused SYNC OP has no reactions. Its owner's refusal (validate,

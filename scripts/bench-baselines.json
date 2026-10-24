@@ -24,7 +24,10 @@
     "op-door-full": 17.8,
     "row-toggle-10k": 1.33,
     "update-patch-64m": 145,
-    "update-patch-64m-rss": 160
+    "update-patch-64m-rss": 160,
+    "encode-hit-256k": 0.18,
+    "encode-admit-64k": 0.16,
+    "dispatch-mixed-queue": 0.29
   },
   "measured-2026-07-31": {
     "proxy-array-10k": 30.2
@@ -69,5 +72,11 @@
     "note": "NEW metrics, core 22 of the shared box: a zstd update patch applied to a 64 MiB installed file (updates-patch.ts — read the file, decode against it; the whole-release download it replaces is 64 MiB of network). update-patch-64m p10 over four runs: 64.4 66.0 78.9 95.4 ms; floor 145 = 2x the median run. update-patch-64m-rss is the growth of a fresh process around one apply: 131.4 MiB in every run, which is the one buffer of install + release (128 MiB) — it does not vary, so its floor is NOT 2x: 160 is below what one more copy of either file would cost (195). On two real `deno compile` binaries a commit apart (104.6 MB each, patch 10.7 KB by `zstd -19 --patch-from`): 0.5 s to apply; making the patch took the zstd tool 27 s and 482 MB.",
     "update-patch-64m": 72,
     "update-patch-64m-rss": 131.4
+  },
+  "measured-2026-10-24": {
+    "note": "NEW metrics, five runs each (p10 per run), shared 32-core box at load 8-10. encode-hit-256k: 0.087 0.090 0.089 0.087 0.084 — a miss (the memo broken, every request re-gzipped) measures 2.45 ms on the same text, ~28x; floor 0.18 = 2x the median run. encode-admit-64k: 0.079 0.081 0.079 0.080 0.079 — a miss 0.64 ms, ~8x; floor 0.16. The text is varied and seeded: a repeated line gzips so fast a miss read 0.17 against a 0.08 hit. dispatch-mixed-queue: 0.140 0.163 0.146 0.143 0.137 — the `queue.splice(ahead++)` path, confirmed hot by line coverage; floor 0.29 = 2x the median run.",
+    "encode-hit-256k": 0.087,
+    "encode-admit-64k": 0.079,
+    "dispatch-mixed-queue": 0.143
   }
 }

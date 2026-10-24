@@ -55,12 +55,15 @@ export function observeAction(
   const type = action.type;
   const payload = (action.payload ?? {}) as Record<string, unknown>;
 
-  ctx.stats.dispatched++;
-
   // Skip pure internals entirely (`cell:__exec` — a marker, not a change).
   // `cell:__setMethod` is NOT one: it is the only action carrying what an
   // async or transactional method wrote. See action-kind.ts.
   if (isActionNoise(type)) return;
+  // `dispatched=N` on the heartbeat/stopped line counts what the APP
+  // dispatched. Each cell's boot `__init` and shutdown `__destroy`, and the
+  // `__error` frame of a call already counted, are the framework's — an app
+  // that dispatched nothing read `dispatched=4` with two cells.
+  if (!/:__(?:init|destroy|error)$/.test(type)) ctx.stats.dispatched++;
   if (ctx.suppressTypes.includes(type)) return;
 
   const prefix = type.split(":")[0]?.toLowerCase() ?? "unknown";

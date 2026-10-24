@@ -137,9 +137,13 @@ Deno.test("web target: the service worker is versioned by content, precaches eve
   for (const k of ["aio-notes-pro-abc", "aio-notes-pro-abc@https://h/a/"]) {
     assert(!own.test(k), k);
   }
-  // This scope's own name, or a pre-scope one that holds only this scope's
-  // files (the Chromium test drives both).
-  assertStringIncludes(sw, `return Promise.resolve(m[2] === scope);`);
+  // This scope's own name made before this build's (creation order), or a
+  // pre-scope one that holds only this scope's files (the Chromium tests
+  // drive both).
+  assertStringIncludes(
+    sw,
+    `return Promise.resolve(m[2] === scope && older);`,
+  );
   assertStringIncludes(sw, `rs.every((r) => r.url.startsWith(scope))`);
   // Offline navigation falls back to the shell.
   assertStringIncludes(sw, `c.match("./index.html")`);
@@ -216,6 +220,8 @@ Deno.test("web target: an app icon Chrome cannot install from is said at build t
   assertStringIncludes(webIconProblem({ w: 143, h: 512 }) ?? "", "512×512");
   assertEquals(webIconProblem({ w: 144, h: 144 }), null);
   assertEquals(webIconProblem({ w: 1024, h: 1024 }), null);
+  // Measured too: a 1400×419 icon.png is the same manifest-missing-suitable-icon.
+  assertStringIncludes(webIconProblem({ w: 1400, h: 419 }) ?? "", "SQUARE");
   // Not a PNG: the monogram stands in, and that is said too.
   assertStringIncludes(webIconProblem(null) ?? "", "not a PNG");
 });

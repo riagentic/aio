@@ -44,7 +44,7 @@ import { fromFileUrl } from "@std/path";
  *  Only ever edit this DOWNWARD. To lower it, convert calls to
  *  `tempDir()`/`tempDirSync()` and drop the matching `Deno.remove` from the
  *  happy path (the exit sweep is the net, `dropTempDir` the polite version). */
-const CEILING = 758;
+const CEILING = 756;
 
 const ROOT = fromFileUrl(new URL("../tests/", import.meta.url));
 

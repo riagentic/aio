@@ -951,6 +951,49 @@ Deno.test("publishInstructions: the copy lines name the file the client asks for
   assert(text.includes("FLAT"), text);
 });
 
+Deno.test("publishInstructions: the cp lines name the files where they ARE, and --channel-dir needs only the artifact", async () => {
+  const { publishInstructions } = await import("../src/testing/internal.ts");
+  const m = await buildShipManifest({
+    name: "app",
+    version: "1.0.0",
+    binary: bin("x"),
+    sources: [],
+    channel: "prod",
+    platform: { os: "linux", arch: "x86_64" },
+    url: "app-1.0.0",
+  });
+  // `ship dist/app-1.0.0` printed `cp app-1.0.0 out/prod/` — a file the cwd
+  // does not have — and the same for the manifest written beside it.
+  const text = publishInstructions(m, "app-1.0.0", {
+    artifact: "dist/app-1.0.0",
+    manifest: "dist/linux-x86_64.json",
+  });
+  assertStringIncludes(text, "cp dist/app-1.0.0 out/prod/\n");
+  assertStringIncludes(text, "cp dist/linux-x86_64.json out/prod/");
+  // A file whose name is not the one the manifest fetches lands under it.
+  assertStringIncludes(
+    publishInstructions(m, "app-1.0.0", { artifact: "my build/app" }),
+    "cp 'my build/app' out/prod/app-1.0.0",
+  );
+  // --channel-dir already holds the manifest; the artifact is what is left —
+  // the old text said "copy these TWO files" into some other `out/`.
+  const into = publishInstructions(m, "app-1.0.0", {
+    artifact: "dist/app-1.0.0",
+    channelDir: "/srv/rel",
+  });
+  assertStringIncludes(into, "/srv/rel/prod/linux-x86_64.json is written");
+  assertStringIncludes(into, "cp dist/app-1.0.0 /srv/rel/prod/\n");
+  assert(!into.includes("TWO files"), into);
+  // Both lines name the dir as typed: `join` normalized only the first
+  // (`./rel` → `rel`; on Windows `/srv/rel` → `\\srv\\rel`).
+  const typed = publishInstructions(m, "app-1.0.0", {
+    artifact: "dist/app-1.0.0",
+    channelDir: "./rel",
+  });
+  assertStringIncludes(typed, "./rel/prod/linux-x86_64.json is written");
+  assertStringIncludes(typed, "cp dist/app-1.0.0 ./rel/prod/\n");
+});
+
 // ── the data contract: the update feature's headline guarantee ───────────────
 //
 // `<binary> --aio-data-contract` is MACHINE-READ (by `aio ship`, by
@@ -1720,4 +1763,54 @@ Deno.test("ship: --no-data cannot publish a file that is not an artifact", async
   } finally {
     await dropTempDir(dir);
   }
+});
+
+// `ship dist/<name>` — the obvious spelling — met a raw `No such file or
+// directory (os error 2): readfile 'dist/<name>'`: the build writes the
+// artifact VERSIONED (`dist/<name>-<version>`).
+Deno.test("ship: an unversioned artifact path names the versioned one beside it", async () => {
+  const { shipRelease } = await import("../src/build/ship.ts");
+  const dir = await tempDir("aio-ship-missing-");
+  try {
+    await Deno.writeFile(join(dir, "app-1.0.3"), bin("x"));
+    await Deno.writeTextFile(join(dir, "app-1.0.3.ship.json"), "{}");
+    const err = await assertRejects(() =>
+      shipRelease({ binaryPath: join(dir, "app"), noData: true })
+    );
+    const msg = (err as Error).message;
+    assertStringIncludes(msg, `${join(dir, "app")} does not exist`);
+    assertStringIncludes(msg, `did you mean ${join(dir, "app-1.0.3")}?`);
+    assert(!msg.includes(".ship.json"), msg);
+    // Nothing beside it: the message names the shape the build writes.
+    const none = await assertRejects(() =>
+      shipRelease({ binaryPath: join(dir, "other"), noData: true })
+    );
+    assertStringIncludes(
+      (none as Error).message,
+      join(dir, "other-<version>"),
+    );
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("publishInstructions: files in dist/ are said to be emptied by the next build", async () => {
+  const { publishInstructions } = await import("../src/testing/internal.ts");
+  const m = await buildShipManifest({
+    name: "app",
+    version: "1.0.0",
+    binary: bin("x"),
+    sources: [],
+    channel: "prod",
+    platform: { os: "linux", arch: "x86_64" },
+  });
+  const staged = publishInstructions(m, "app", { staged: true });
+  assertStringIncludes(staged, "the next build EMPTIES");
+  assertStringIncludes(staged, "--channel-dir=<dir>");
+  assert(!publishInstructions(m, "app").includes("EMPTIES"));
+  // --channel-dir already wrote somewhere that stays: nothing to warn about.
+  assert(
+    !publishInstructions(m, "app", { staged: true, channelDir: "/srv/rel" })
+      .includes("EMPTIES"),
+  );
 });

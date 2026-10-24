@@ -118,6 +118,8 @@ function runTray() {
     {
       on: (ch: string, fn: (e: unknown, ...a: unknown[]) => void) =>
         ipc[ch] = fn,
+      handle: (ch: string, fn: (e: unknown, ...a: unknown[]) => void) =>
+        ipc[ch] = fn,
     },
     () => {
       throw new Error("no module is needed without a tray or a show file");

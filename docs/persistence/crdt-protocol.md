@@ -329,7 +329,17 @@ any failure other than "duplicate column" stops the boot.
 ## Op Buffer
 
 Client-side op-log with pluggable storage (localStorage in browser, in-memory in
-tests).
+tests). In the browser each cell's queue is the key `__aio_sync.<appId>:<cell>`.
+A cell that stops syncing (its `sync` option dropped, the cell removed) leaves
+its queue behind with nothing to send it: the page warns once, at connect, with
+the cell, the count of unsent changes and the key (diagnostic
+`sync-orphan-queue`). Turn `sync` back on for a release to deliver them, or
+remove the key to discard them.
+
+An op stamped older than the server's tombstone window while it was made minutes
+ago (a device clock far behind) is made again with a corrected stamp instead of
+dropped — within one page load by both clocks, and across a reload by the
+device-clock stamp its queue entry carries.
 
 ```ts
 interface OpBuffer {

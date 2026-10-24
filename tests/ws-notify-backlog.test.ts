@@ -76,3 +76,52 @@ Deno.test("broadcastUi: a toast skips a peer over the high-water mark, keeps it 
     broadcaster.shutdown();
   }
 });
+
+// An icon frame is STATE (latest wins): skipping a `tray: null` would leave a
+// busy animation running for good. Held for a stuck peer — the latest one —
+// and sent once it drains; said once, in its own words, apart from toasts.
+Deno.test("broadcastUi: an icon frame is never lost — the latest is held for a stuck peer and sent when it drains", async () => {
+  const stuck = fakeClient(1, WS_BUFFER_HIGH_WATER + 1);
+  const fine = fakeClient(2, 0);
+  const connections = new Map<WebSocket, ClientMeta>([
+    [stuck.ws, stuck.meta],
+    [fine.ws, fine.meta],
+  ]);
+  const broadcaster = createBroadcaster({
+    connections,
+    payloadStats: new Map(),
+    getUIState: () => ({}),
+    debug: () => {},
+    syncIntervalMs: 10,
+  });
+  const warns: string[] = [];
+  const origWarn = log.warn;
+  // deno-lint-ignore no-explicit-any
+  log.warn = ((a: string, b?: string) => warns.push(b ?? a)) as any;
+  try {
+    broadcaster.broadcastUi('{"v":2,"t":"notify","d":{"title":"hi"}}');
+    const busy = '{"v":2,"t":"icon","d":{"tray":["data:a","data:b"]}}';
+    const idle = '{"v":2,"t":"icon","d":{"tray":null}}';
+    assertEquals(
+      broadcaster.broadcastUi(busy),
+      2,
+      "held counts: it will arrive",
+    );
+    assertEquals(broadcaster.broadcastUi(idle), 2);
+    assertEquals(stuck.sent, [], "nothing sent while it is not draining");
+    assertEquals(fine.sent.slice(1), [busy, idle]);
+    const iconLines = warns.filter((w) => w.startsWith("appIcon: held"));
+    assertEquals(iconLines.length, 1, JSON.stringify(warns));
+    assert(/client #1/.test(iconLines[0]!));
+    assert(
+      warns.some((w) => w.startsWith("notify: not shown")),
+      "the toast is its own line",
+    );
+    (stuck.ws as unknown as { bufferedAmount: number }).bufferedAmount = 0;
+    await new Promise((r) => setTimeout(r, 400));
+    assertEquals(stuck.sent, [idle], "the LATEST icon, once, after it drained");
+  } finally {
+    log.warn = origWarn;
+    broadcaster.shutdown();
+  }
+});

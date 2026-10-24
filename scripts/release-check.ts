@@ -25,6 +25,8 @@
 //   deno task check:release                # everything (fast, then heavy)
 //   deno task check:release --fast         # static gates + surfaces only
 //   deno task check:release --keep-going   # heavy gates even if a fast one is red
+//   deno task check:release --require-proof  # check:proof BLOCKS on a proof
+//                                            # row behind its target's build
 import { VERSION } from "../src/server/aio-cli.ts";
 import { DEFAULT_ELECTRON_VERSION } from "../src/electron/electron-runtime-fetch.ts";
 import { HEAP_FLOOR_MB } from "../src/server/heap-policy.ts";
@@ -36,6 +38,7 @@ import { fromFileUrl } from "@std/path";
 const root = fromFileUrl(new URL("../", import.meta.url));
 const FAST_ONLY = Deno.args.includes("--fast");
 const KEEP_GOING = Deno.args.includes("--keep-going");
+const REQUIRE_PROOF = Deno.args.includes("--require-proof");
 
 /** One gate's answer. `skipped` marks a gate that did not RUN — it does not
  *  fail the release (only the docker-less lab may skip, and
@@ -95,9 +98,23 @@ function gateLogPath(name: string): string {
  *  to take the whole machine too. See `machineFence` in test-shards.ts. */
 let FENCE: string[] = [];
 
+/** The command a gate runs under this invocation's flags. Pure. */
+export function gateCommand(
+  name: string,
+  cmd: readonly string[],
+  requireProof: boolean,
+): string[] {
+  // `--require-proof`: the proof matrix BLOCKS on a row proven before its
+  // target's build last changed. Opt-in — a cut made on Linux cannot be held
+  // by a Mac this machine does not have; the owner's full run asks for it.
+  return name === "check:proof" && requireProof
+    ? [...cmd, "--require-current"]
+    : [...cmd];
+}
+
 async function run(name: string, cmd: string[]): Promise<Result> {
   const t0 = Date.now();
-  const [bin, ...args] = [...FENCE, ...cmd];
+  const [bin, ...args] = [...FENCE, ...gateCommand(name, cmd, REQUIRE_PROOF)];
   const child = new Deno.Command(bin!, {
     args,
     cwd: root,
@@ -372,6 +389,7 @@ const HEAVY: [string, string[]][] = [
   // (a Mac it does not have would fail it), but a release that never prints it
   // is a release nobody checked it against. `.katana/beta.md` requires every
   // row to be proven or waiting on hardware/time; `--require` is beta's job.
+  // `check:release --require-proof` makes it block (see `gateCommand`).
   ["check:proof", ["deno", "task", "check:proof"]],
   // The perf gate: each metric's p10 against its committed floor. It existed
   // for nine releases outside this list, and boot sat 50% over its floor for
@@ -435,12 +453,15 @@ function labRuntime(): string | null {
   return null;
 }
 
-/** The onboarding lab's gate name — the one gate allowed to skip. */
+/** The onboarding lab's gate name — a gate allowed to skip. */
 const LAB = "lab (fresh ubuntu)";
+/** The real-X-driver gate (tests/gpu-lab-window-bounds.test.ts) — skips, and
+ *  says so, when the GPU lab is not up. */
+const GPU_LAB = "real X driver (GPU lab)";
 
 /** Every heavy gate by name, in run order — the lab included. */
 export function heavyGateNames(): string[] {
-  return [...HEAVY.map(([name]) => name), LAB];
+  return [...HEAVY.map(([name]) => name), LAB, GPU_LAB];
 }
 
 /** Does the heavy tier run? `--fast` never; a red fast tier stops it unless
@@ -686,6 +707,29 @@ async function main(): Promise<void> {
         detail:
           "SKIPPED — no docker/podman on this machine. The one gate that " +
           "tests onboarding on a machine that is not this one did not run.",
+        skipped: true,
+      });
+    }
+    // The real X driver (feedback/critical.md): an aio window must never show
+    // a negative coordinate to an NVIDIA X server — the one place Xephyr (every
+    // other GUI test) cannot look. Needs the GPU lab (scripts/gpu-lab.sh).
+    const labX = `/tmp/.X11-unix/X${
+      Deno.env.get("AIO_GPU_LAB_DISPLAY") ?? "91"
+    }`;
+    let labUp = false;
+    try {
+      Deno.statSync(labX);
+      labUp = true;
+    } catch { /* aio-ok: down is reported below, loudly */ }
+    if (labUp) {
+      heavy.push(await run(GPU_LAB, ["deno", "task", "test:gpu-lab"]));
+    } else {
+      heavy.push({
+        name: GPU_LAB,
+        ok: true,
+        detail: "SKIPPED — the GPU lab is down (sudo scripts/gpu-lab.sh up; " +
+          "scripts/gpu-lab.sh desk muffin). The one gate that shows aio's " +
+          "windows to a real NVIDIA X driver did not run.",
         skipped: true,
       });
     }

@@ -39,9 +39,9 @@ re-issue it from state your app owns.
 Nothing is dropped quietly:
 
 - past 1000 actions queued while offline the OLDEST is dropped and its caller's
-  promise rejects immediately with the real reason (not a timeout 15s later).
-  Calls the client had already accepted — still waiting on the send pacer when
-  the connection dropped — are never evicted by that cap; they replay first
+  promise rejects immediately with the real reason (not a timeout later). Calls
+  the client had already accepted — still waiting on the send pacer when the
+  connection dropped — are never evicted by that cap; they replay first
   (`connectCli`, cap 100, refuses the new call instead when only those are
   left);
 - `isConnectionDegraded()` returns true once a queue passes 80% full — use it
@@ -51,13 +51,12 @@ Nothing is dropped quietly:
 
 **Two send paths, two queues.** The contract above is the one for CELL METHODS
 (`await counter.increment()`), which is what most code uses. The lower-level
-Direct method calls (`cell.method()`) and `useAio().send()` are fire-and-forget:
-they are synchronous and return `false` rather than rejecting a promise, and
-they queue separately — up to 100 actions, dropping the NEWEST (the one you just
-sent) when full. Both queues feed `isConnectionDegraded()`, and both emit a
-diagnostic on a drop, so nothing is invisible either way. If an action must not
-be lost, prefer a cell method — its promise is what tells you the outcome. If
-you use `send()`, check the return value.
+`useAio().send()` is fire-and-forget: it is synchronous, returns no outcome, and
+queues separately — up to 100 actions, dropping the OLDEST when full (newest
+data wins). Both queues replay in the order the calls were made, both feed
+`isConnectionDegraded()`, and both emit a diagnostic on a drop, so nothing is
+invisible either way. If an action must not be lost, prefer a cell method — its
+promise is what tells you the outcome.
 
 ### What `await cell.method()` means while offline
 
@@ -94,15 +93,17 @@ Rate limits (server-enforced, `wsLimits`):
 
 The client paces itself to the budget the server advertises in its hello: every
 frame the page writes (method calls, `send()`, sync ops, `serverFn`, forwarded
-logs) leaves through one writer held to 80% of `messagesPerSec`. A burst —
-`Promise.all` over 1000 `cell.method()` calls — queues and resolves late, never
-refused. A frame the server still drops over a per-second budget is answered
-with `retryAfterMs`; the client holds that call and re-sends it (up to 8 times,
-then the caller gets the server's refusal). A frame refused for what it is (too
-large, not allowed, or bigger than the whole `bytesPerSec` — no re-send could
-ever fit) rejects at once, without holding the calls behind it; a refused frame
-is not charged to the byte window. A server whose `maxMessageBytes` exceeds its
-`bytesPerSec` says so at startup.
+logs) leaves through one writer held to 80% of `messagesPerSec` and, by size, to
+80% of `bytesPerSec` (a frame larger than the writer's burst allowance waits for
+a full one and goes — slowed, never starved). A burst — `Promise.all` over 1000
+`cell.method()` calls — queues and resolves late, never refused. A frame the
+server still drops over a per-second budget is answered with `retryAfterMs`; the
+client holds that call and re-sends it (up to 8 times, then the caller gets the
+server's refusal). A frame refused for what it is (too large, not allowed, or
+bigger than the whole `bytesPerSec` — no re-send could ever fit) rejects at
+once, without holding the calls behind it; a refused frame is not charged to the
+byte window. A server whose `maxMessageBytes` exceeds its `bytesPerSec` says so
+at startup.
 
 A peer that ignores all of that — 50 dropped frames in a row — is closed with
 `1008` and its address refused (HTTP 429, `Retry-After`) for 5 s, doubling per

@@ -629,6 +629,21 @@ export function describe(value: unknown, opts: DescribeOptions = {}): string {
   return parts.filter(Boolean).join("\n");
 }
 
+/** `String(e)` for a thrown value — `"TypeError: x is undefined"`, the name
+ *  kept — where `e` is an Error, and {@link describeThrown} for anything else:
+ *  `${e}` on a thrown `{ code }` said "[object Object]", and on a
+ *  null-prototype value it THREW, from inside the catch reporting it. */
+export function thrownText(v: unknown): string {
+  if (v instanceof Error) {
+    try {
+      return String(v);
+    } catch {
+      // aio-ok: a hostile `toString`/`name` getter — describeThrown answers.
+    }
+  }
+  return describeThrown(v);
+}
+
 /** Text for a THROWN value, for the code that reports it — which must never
  *  throw in its place. `String(x)` does: for an `Object.create(null)` value
  *  ("Cannot convert object to primitive value"), for a `toString` that
@@ -645,7 +660,10 @@ export function describeThrown(v: unknown): string {
     // aio-ok: a hostile `message` getter — fall through to the value itself.
   }
   try {
-    return String(v);
+    const s = String(v);
+    // The default `Object.prototype.toString` answer says nothing: a thrown
+    // `{ code, detail }` reported as "[object Object]". Its JSON says it all.
+    if (!(typeof v === "object" && s.startsWith("[object "))) return s;
   } catch {
     // aio-ok: not convertible to a primitive; try its JSON next.
   }

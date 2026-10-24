@@ -5,6 +5,7 @@ import { log } from "../diagnostics/logger-api.ts";
 const stripTag = (s: string) => s.replace(/^\[aio:vitals\]\s*/, "");
 import type { DiagEvent, VitalAlert } from "./types.ts";
 import { DIAG_THROTTLE_MS, formatDiagEvent } from "./diag-formatter.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 /** Call a user vitals hook, guarded: these run from timers, so a sync throw
  *  OR a rejected promise (an `async` hook type-checks against `void`) would
@@ -15,7 +16,7 @@ export function callVitalsHook<T>(
   arg: T,
 ): void {
   const failed = (e: unknown) =>
-    log.error("vitals", `${name} hook threw — ${e}`);
+    log.error("vitals", `${name} hook threw — ${thrownText(e)}`);
   try {
     const r = hook?.(arg) as PromiseLike<unknown> | undefined;
     if (typeof r?.then === "function") r.then(undefined, failed);

@@ -4,10 +4,17 @@
 import { assert, assertEquals } from "@std/assert";
 import { connectCli } from "aio/server";
 import { stopChild } from "./stop-child.ts";
-import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { childCoverageDir, tempDirSync } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { fromFileUrl } from "@std/path";
 const _childCovDir = childCoverageDir();
+// Every example boots against a PRIVATE data home. Inherited, it was the
+// caller's: `deno test -A tests/examples.test.ts` (the documented single-file
+// form) wrote into the developer's real `~/.ex-counter` — and refused to boot
+// whenever that home held state from an earlier, different `ex-counter`
+// ("persist: REFUSING to boot … stored field(s) no longer match"). Only the
+// full-suite task, which sets AIO_APPS_DIR itself, was ever hermetic.
+const _appsDir = tempDirSync("examples-home-");
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
@@ -79,6 +86,7 @@ function spawnExample(
     env: {
       ...Deno.env.toObject(),
       DENO_COVERAGE_DIR: _childCovDir,
+      AIO_APPS_DIR: _appsDir,
       NO_COLOR: "1",
       FORCE_COLOR: "0",
     },
@@ -332,10 +340,15 @@ Deno.test({
     ]);
     let client: Deno.ChildProcess | null = null;
     try {
+      // Readiness is the health route, not `/`: a headless app's page is a
+      // deliberate 503 ("no UI entry"), which this probe used to read as
+      // "not up yet" until it timed out.
       await waitFor("cli server", async () => {
-        const res = await fetch(`http://localhost:${port}/`);
+        const res = await fetch(`http://localhost:${port}/__aio/health`);
         await res.body?.cancel();
-        return res.status < 500 ? true : null;
+        return res.ok ? true : null;
+      }).catch((e: unknown) => {
+        throw new Error(`${(e as Error).message}${why(server)}`);
       });
       client = spawnExample(
         "targets/cli-remote",

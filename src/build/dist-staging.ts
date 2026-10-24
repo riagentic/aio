@@ -57,6 +57,10 @@ export const DIST_STAGED: readonly string[] = [
   APP_STYLE,
   APP_ICON,
   ELECTRON_VERSION_FILE,
+  // The generated monogram as SVG, written beside icon.png by the bundle
+  // step and read by the packaged shell's `/__aio/icon` fallback
+  // (electron-uds.ts) — dropped by this clean in between until it was listed.
+  "icon.svg",
   // The client bundle's source map — how a forwarded browser error names
   // the author's file instead of `app.js:1:22073`.
   BUNDLE_MAP,
@@ -314,4 +318,159 @@ export async function moveDirContents(
     throw e;
   }
   return true;
+}
+
+/** esbuild's input record for `dist/app.js`, relative to the project root
+ *  (build-bundle.ts writes and reads it — the freshness check's half that is
+ *  not in dist/). */
+export const BUNDLE_INPUTS = join(".aio", "bundle-inputs.json");
+
+/** Where a fleet whose `out` IS dist/ keeps the staged bundle between builds,
+ *  relative to the project root (see {@linkcode stashBundle}). */
+export const BUNDLE_CACHE = join(".aio", "bundle-cache");
+
+const RECORD = "bundle-inputs.json";
+
+async function removeIfThere(path: string): Promise<void> {
+  try {
+    await Deno.remove(path, { recursive: true });
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+}
+
+/** Move dist/'s staged bundle ({@linkcode keepInDistStaging}) and its input
+ *  record into {@linkcode BUNDLE_CACHE}, before a fleet with the default
+ *  `out: "dist"` empties dist/ into the release. Without it every
+ *  `deno task build` re-ran esbuild: the release placement deleted the bundle
+ *  the next build's freshness check needed.
+ *
+ *  The bundle and its record move as ONE pair, and by rename only: a copy
+ *  gets a new mtime, and freshness is "app.js newer than every input" — a
+ *  copied app.js would look newer than an edit it never saw. A move that
+ *  fails is said and leaves no cache (the next build rebuilds: correct, only
+ *  slower). Returns the names cached. */
+export async function stashBundle(
+  root: string,
+  dist: string,
+  /** The cache dir, relative to `root` — a {@linkcode parkOtherShape} slot. */
+  at: string = BUNDLE_CACHE,
+): Promise<string[]> {
+  const cache = join(root, at);
+  await removeIfThere(cache);
+  const names: string[] = [];
+  try {
+    for await (const e of Deno.readDir(dist)) {
+      // Not electron.json: build.ts writes it, not the bundle step, so a
+      // restored copy could reach a target that would otherwise have none.
+      if (
+        e.isFile && keepInDistStaging(e.name) &&
+        e.name !== ELECTRON_VERSION_FILE
+      ) names.push(e.name);
+    }
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return [];
+    throw e;
+  }
+  const record = join(root, BUNDLE_INPUTS);
+  // No bundle or no record: nothing a later build could trust.
+  if (!names.includes(BUNDLE_JS)) return [];
+  try {
+    await Deno.stat(record);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return [];
+    throw e;
+  }
+  try {
+    await Deno.mkdir(cache, { recursive: true });
+    for (const n of names) await Deno.rename(join(dist, n), join(cache, n));
+    await Deno.rename(record, join(cache, RECORD));
+    return names;
+  } catch (e) {
+    console.warn(
+      `⚠ could not keep the bundle in ${at}: ${e} — the next ` +
+        `build re-runs esbuild`,
+    );
+    await removeIfThere(cache);
+    return [];
+  }
+}
+
+/** Put a {@linkcode stashBundle}d bundle back into the (empty) dist/ staging,
+ *  with its record — so the targets' builds find exactly what the last one
+ *  left there, the same as with any other `out`. The record already in
+ *  `.aio/` described the dist/ that was just moved aside, so it goes first
+ *  either way. A cache without its record is never restored. Returns whether
+ *  a bundle was restored. */
+export async function restoreBundle(
+  root: string,
+  dist: string,
+  /** The cache dir, relative to `root` — a {@linkcode parkOtherShape} slot. */
+  at: string = BUNDLE_CACHE,
+): Promise<boolean> {
+  const cache = join(root, at);
+  const record = join(root, BUNDLE_INPUTS);
+  await removeIfThere(record);
+  const names: string[] = [];
+  try {
+    for await (const e of Deno.readDir(cache)) names.push(e.name);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return false;
+    throw e;
+  }
+  try {
+    if (!names.includes(RECORD)) return false;
+    await Deno.mkdir(dist, { recursive: true });
+    for (const n of names) {
+      if (n !== RECORD) await Deno.rename(join(cache, n), join(dist, n));
+    }
+    await Deno.rename(join(cache, RECORD), record);
+    return true;
+  } catch (e) {
+    console.warn(
+      `⚠ could not restore the bundle from ${at}: ${e} — this ` +
+        `build re-runs esbuild`,
+    );
+    await removeIfThere(record);
+    return false;
+  } finally {
+    await removeIfThere(cache);
+  }
+}
+
+/** Where a bundle of ANOTHER shape waits while a target of this one builds,
+ *  relative to the project root: one slot per shape + UI entry. */
+export const BUNDLE_SHAPES = join(".aio", "bundle-shapes");
+
+/** A slot name for a bundle's stamps (`readBundleStamps`). */
+const slotOf = (target: string, ui: string) =>
+  `${target}-${ui.replace(/[^A-Za-z0-9._-]/g, "_")}`;
+
+/** Before a target bundles: when dist/ holds the bundle of ANOTHER shape or
+ *  UI entry (`have`, its stamps), park it — with its input record — in its
+ *  {@linkcode BUNDLE_SHAPES} slot, and bring back this target's own slot
+ *  (`want`) if an earlier build parked one.
+ *
+ *  One dist/app.js serves every target, so a fleet mixing shapes (a browser
+ *  and a web or android target) re-ran esbuild for BOTH on every build: each
+ *  target found the other's bundle. Moved by rename, so the freshness check
+ *  compares real mtimes; that check still decides — a restored bundle whose
+ *  sources moved is rebuilt. Nothing is restored over a bundle that could
+ *  not be parked (no record): what the target builds replaces it whole.
+ *  Returns whether a bundle was restored. */
+export async function parkOtherShape(
+  root: string,
+  dist: string,
+  have: { target?: string; ui: string } | null,
+  want: { target: string; ui: string },
+): Promise<boolean> {
+  const wanted = slotOf(want.target, want.ui);
+  if (have) {
+    if (!have.target) return false; // unstamped: not ours to sort
+    const held = slotOf(have.target, have.ui);
+    if (held === wanted) return false;
+    const parked = await stashBundle(root, dist, join(BUNDLE_SHAPES, held));
+    if (parked.length === 0) return false;
+  }
+  return await restoreBundle(root, dist, join(BUNDLE_SHAPES, wanted));
 }

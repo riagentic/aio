@@ -63,6 +63,7 @@ import {
   abortAllInflight,
   DRAIN_TIMEOUT_MS,
   endShutdownAbort,
+  failStuckCalls,
   settlePending,
 } from "./state/method-cancel.ts";
 import { _setRouterBoot } from "./air/router.ts";
@@ -78,6 +79,8 @@ import type { blocking as ServerBlocking } from "./state/blocking.ts";
 import { blockingServerOnly } from "./state/blocking-reason.ts";
 import { showDesktopNotification } from "./browser/desktop-notify.ts";
 import { notifyPayload } from "./state/notify.ts";
+import { appIconPayload } from "./state/app-icon.ts";
+import { applyAppIcon } from "./browser/app-icon-client.ts";
 import { LARGE_STATE_DOC } from "./state/large-state-doc.ts";
 import { utf8Size } from "./protocol/utf8-size.ts";
 import {
@@ -210,6 +213,9 @@ export {
 export type { UntilOptions } from "./state/async-helpers.ts";
 export { own } from "./state/own.ts";
 export { notify } from "./state/notify.ts";
+/** Present so an app compiles for android too; it says once that there is
+ *  no desktop icon to change there. */
+export { appIcon } from "./state/app-icon.ts";
 /** Present so an app compiles for android too; the WebView has no
  *  Notification API, so it resolves "unsupported" there and says so once. */
 export { requestNotificationPermission } from "./browser/desktop-notify.ts";
@@ -1905,6 +1911,7 @@ export function initStandalone<S, A, E>(
           schedule: (e) => _scheduler().handle(e),
           // No server between the method and the page: show it right here.
           notify: (e) => showDesktopNotification(notifyPayload(e)),
+          appIcon: (e) => applyAppIcon(appIconPayload(e)),
           // Really acquire and dispose. Ignoring `own` here made the in-process
           // harnesses (testCell / testUI / bootCells) more permissive than
           // production — a leaked or misfiring resource could not surface in the
@@ -1961,16 +1968,17 @@ export function initStandalone<S, A, E>(
         // window takes to disappear.
         const deadline = Date.now() + DRAIN_TIMEOUT_MS;
         const left = () => Math.max(1, deadline - Date.now());
-        const stuck = await settlePending(
-          left(),
-          _standaloneCells,
-          _standaloneAppId,
-        );
-        if (stuck > 0) {
+        if (
+          await settlePending(left(), _standaloneCells, _standaloneAppId) > 0
+        ) {
+          const stuck = failStuckCalls(_standaloneCells, _standaloneAppId);
           standaloneLog.warn(
-            `close: ${count(stuck, "call")} still running at the ` +
-              `${DRAIN_TIMEOUT_MS}ms deadline (slow write, or an ignored ` +
-              `abort signal) — their remaining writes are lost`,
+            `close: ${count(stuck.length, "call")} still running at the ` +
+              `${DRAIN_TIMEOUT_MS}ms deadline (${
+                [...new Set(stuck)].join(", ")
+              } — slow ` +
+              `write, or an ignored abort signal) — their callers are ` +
+              `rejected and their remaining writes are lost`,
           );
         }
         await dispatch.drain(left());
@@ -2832,4 +2840,4 @@ export { bytes, count, dur } from "./diagnostics/fmt.ts";
 // but a type, so there is no reason for it to stop at the WebView — and every
 // reason not to: a `catch` block that compiles for three targets must not be
 // the thing that fails to bundle for the fourth.
-export { errorCode } from "./protocol/envelope.ts";
+export { errorCode, errorSummary } from "./protocol/envelope.ts";

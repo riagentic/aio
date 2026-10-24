@@ -128,6 +128,26 @@ jobs:
       - name: Physical proof matrix (report)
         run: deno task check:proof
 
+  # The suite on Windows — ADVISORY (`continue-on-error`): aio ships Windows
+  # artifacts and its suite is run on a Windows 11 VM at every release, but
+  # no CI lane ran it, so a Windows-only regression waited for that run. A
+  # red here is visible on every push without blocking the merge; it becomes
+  # a gate (drop `continue-on-error`) once the lane has been green for a
+  # release.
+  test-windows:
+    needs: gates
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Test (Windows, advisory)
+        run: deno task test
+
   # The real-browser e2e (`tests/e2e-ui-chromium.test.ts` and friends) is
   # `ignore`d when no Chromium is on the machine — so without this job it was
   # skipped in CI silently, and the browser half of the contract was never

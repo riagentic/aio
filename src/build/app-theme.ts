@@ -32,7 +32,7 @@
 //
 // Pure and I/O-free — the server inlines the string into the shell.
 
-import { appHue, type HueKey } from "./app-icon.ts";
+import { appHue, type HueKey, isSoftHue } from "./app-icon.ts";
 
 /** sRGB relative luminance of an HSL triple (h in deg, s/l in 0..1). */
 function luminance(h: number, s: number, l: number): number {
@@ -252,6 +252,16 @@ const PAGE = {
   textDark: [94, 0.1],
 } as const;
 
+/** The highest saturation a neutral keeps under deno.json `"neutral":
+ *  "soft"`. A field report: at 12–14% on a dark surface a magenta hue read
+ *  as purple-brown cards; at 4% no hue shows on a large area. */
+const SOFT_NEUTRAL_SAT = 0.04;
+
+/** A neutral's saturation as `name` wants it — the table's own, or capped
+ *  ({@linkcode SOFT_NEUTRAL_SAT}) for a soft-neutral app. Pure. */
+const neutralSat = (name: HueKey) => (s: number): number =>
+  isSoftHue(name) ? Math.min(s, SOFT_NEUTRAL_SAT) : s;
+
 /** One mode's identity colours as `#rrggbb`: the page background and text,
  *  the accent fill, and a track (the accent's quiet ground: 15% text over
  *  the background). */
@@ -269,18 +279,19 @@ export function appIdentityColors(
   name: HueKey,
 ): { light: IdentityColors; dark: IdentityColors } {
   const hue = appHue(name);
+  const ns = neutralSat(name);
   const [ah, as, al] = accentFill(hue).fill;
   const accent = hslHex(ah, as, al);
   const mode = (
     bg: readonly [number, number],
     tx: readonly [number, number],
   ) => ({
-    background: hslHex(hue, bg[1], bg[0] / 100),
-    text: hslHex(hue, tx[1], tx[0] / 100),
+    background: hslHex(hue, ns(bg[1]), bg[0] / 100),
+    text: hslHex(hue, ns(tx[1]), tx[0] / 100),
     accent,
     track: hslHex(
       hue,
-      bg[1] * 0.85 + tx[1] * 0.15,
+      ns(bg[1]) * 0.85 + ns(tx[1]) * 0.15,
       (bg[0] * 0.85 + tx[0] * 0.15) / 100,
     ),
   });
@@ -337,21 +348,22 @@ export function windowBackground(
 
 export function appThemeCss(name: HueKey): string {
   const hue = appHue(name);
+  const ns = neutralSat(name);
   const { accent, onAccent, fill } = accentFill(hue);
   // The backgrounds accent TEXT lands on, as the HSL the tokens below emit:
   // bg, surface, surface-2, and the tint (10% fill over surface).
   const lum3 = ([h, s, l]: Hsl) => luminance(h, s, l);
-  const surfL: Hsl = [0, 0, 1], surfD: Hsl = [hue, 0.12, 0.13];
+  const surfL: Hsl = [0, 0, 1], surfD: Hsl = [hue, ns(0.12), 0.13];
   const inkLight = accentInk(hue, [
-    lum3([hue, 0.4, 0.99]),
+    lum3([hue, ns(0.4), 0.99]),
     lum3(surfL),
-    lum3([hue, 0.3, 0.97]),
+    lum3([hue, ns(0.3), 0.97]),
     oklabMixLum(fill, surfL, 0.1),
   ], false);
   const inkDark = accentInk(hue, [
-    lum3([hue, 0.14, 0.09]),
+    lum3([hue, ns(0.14), 0.09]),
     lum3(surfD),
-    lum3([hue, 0.1, 0.17]),
+    lum3([hue, ns(0.1), 0.17]),
     oklabMixLum(fill, surfD, 0.1),
   ], true);
   // Neutrals carry a few degrees of the accent's hue. A pure grey next to a
@@ -362,7 +374,7 @@ export function appThemeCss(name: HueKey): string {
   // and that lands verbatim in a stylesheet `am theme adopt` hands to the user.
   // Round to one decimal: far finer than any perceivable step in saturation.
   const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
-  const n = (l: number, s = 0.06) => `hsl(${hue} ${pct(s)} ${l}%)`;
+  const n = (l: number, s = 0.06) => `hsl(${hue} ${pct(ns(s))} ${l}%)`;
   // The SHADOW colour, as #rrggbb, because a shadow needs an alpha suffix and
   // `hsl(…)14` is not a colour — it is a token sequence a custom property will
   // happily hold and `box-shadow` will refuse at computed-value time, which is
@@ -370,7 +382,7 @@ export function appThemeCss(name: HueKey): string {
   // to alpha63 (dark mode used literal hex and was fine). Measured in Chromium:
   // `getComputedStyle(card).boxShadow === "none"`. `tests/app-theme.test.ts`
   // now resolves every token against its consumer, so this cannot recur.
-  const shadowHex = hslHex(hue, 0.14, 0.12);
+  const shadowHex = hslHex(hue, ns(0.14), 0.12);
   return `@layer aio {
 :root{
   --aio-hue:${hue};

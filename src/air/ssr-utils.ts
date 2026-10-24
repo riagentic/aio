@@ -279,6 +279,12 @@ const _ATTR_NAME: Readonly<Record<string, string>> = {
   // `nativesubmit` attribute nothing reads — the form was still intercepted,
   // silently. The `data-native-submit` spelling keeps working unchanged.
   nativeSubmit: "data-native-submit",
+  // `tabIndex` on an SVG element. SVG attribute names are CASE-SENSITIVE, so
+  // the client's `setAttribute("tabIndex")` made an attribute nothing reads
+  // and `<svg role="button" tabIndex={0}>` was unreachable by keyboard — while
+  // the server's `tabIndex="0"` is lowercased by the HTML parser and works.
+  // On an HTML element both spellings were already the same attribute.
+  tabIndex: "tabindex",
   // React's spellings of the NAMESPACED attributes. Written verbatim they made
   // an attribute literally named `xlinkHref`, which nothing reads — the classic
   // sprite icon `<use xlinkHref="#i"/>` rendered blank. Mapped to the prefixed

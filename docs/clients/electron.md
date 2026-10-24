@@ -1030,6 +1030,69 @@ minimized window back to the front — on macOS that includes opening the runnin
 app from Finder, the Dock or `open`, which starts no second process: the window
 answers the system's re-open itself.
 
+### Changing the icon at run time (`appIcon`)
+
+The tray icon, the window/taskbar icon and the tray tooltip can change while the
+app runs — a busy glow while work is queued, the plain icon when idle. The busy
+state usually lives in a cell, so the call is an effect, like `notify`:
+
+```ts
+import { appIcon, cell } from "aio";
+
+export const jobs = cell("jobs", {
+  state: { running: 0 },
+  methods: {
+    start(s) {
+      s.running++;
+      s.$do(appIcon({
+        tray: ["/icons/busy-1.png", "/icons/busy-2.png", "/icons/busy-3.png"],
+        fps: 8,
+        tooltip: `${s.running} running`,
+      }));
+    },
+    idle(s) {
+      s.running = 0;
+      s.$do(appIcon({ tray: null, tooltip: null })); // back to the app's own
+    },
+  },
+});
+```
+
+- An image is PNG bytes, a `data:` URL or an app URL (fetched by the window from
+  the app). An array is an animation, looped by the main process, so a frame
+  costs no message and it keeps running while the window is hidden.
+- A key left out is left as it is; `null` puts back the app's own icon (or the
+  `ui.tray` tooltip).
+- An image larger than 256×256 pixels reaches the window and the tray scaled
+  down to fit 256 (an icon is an X11 window property, re-sent every frame: an
+  8000×8000 PNG would be a 256 MB one). The app's own `icon.png` likewise.
+- Limits, refused loudly (`⚠ appIcon(): …`): at most 64 frames, 512 KB per
+  image. `fps` defaults to 8; above 12 it runs at 12, said once (status-notifier
+  panels lag above that). Windows shows the first 127 tooltip characters.
+- The tray icon and tooltip need `ui.tray`; without it the call is refused.
+- The page has the same calls on `__aioWindow` (both shells): `setIcon(img)`,
+  `setTrayIcon(img)`, `animateIcon(frames, fps)`,
+  `animateTrayIcon(frames, fps)`, `setTrayTooltip(text)`, and `iconState()`.
+  Each resolves to the new state, or rejects with the reason.
+- The state is observable headless: each change of kind is one line in the app
+  log (`am logs appIcon` →
+  `appIcon: window default · tray animated (3 frames,
+  8 fps)`), and
+  `am eval '__aioWindow.iconState()'` returns it in full.
+- A browser tab and Android have no desktop icon: the effect changes nothing
+  there and says so once. A window that connects later (a second window, a
+  reconnect, an app that sets its icon in `onStart`) is sent the icon the app
+  last set, right after its state; a server with no window connected says the
+  change is kept for the next one.
+
+A window that ends up with Electron's default icon (no `icon.png`, an icon route
+that failed, an image Electron cannot read) says so in one `⚠` line with the
+reason.
+
+On Linux each app's window has its own class (`WM_CLASS`, Wayland `app_id`) —
+the app's id — so a panel tells aio apps apart and matches a built app's
+`<app id>.desktop`.
+
 ## Window size and persistence
 
 Declare the initial size on the app:
@@ -1053,6 +1116,18 @@ size; position is kept. A window closed while **maximized** reopens maximized,
 and un-maximizing it returns to the size and position it had before
 (`window-state.json` stores that normal rect plus `"maximized": true`). Delete
 `window-state.json` only if you want a clean slate for both.
+
+**Never at a screen edge.** Every window aio places — the app's, the splash, the
+download window, the Retry / Quit question — lies 64 logical pixels
+(`EDGE_MARGIN`; less on a screen under 512) inside its screen's work area. A
+window manager draws its frame OUTSIDE the rect a client asks for (Cinnamon: an
+invisible 10 px resize border and the title bar; a frameless Electron window
+grows its own shadow edge), so a window placed at x = 0 has its frame at x =
+-10. An NVIDIA X driver has been seen to fault on exactly that and take the
+whole desktop down; aio does not rely on the driver or the window manager to
+bounds-check. A saved window larger than that area opens smaller and
+**maximized** (what a window as big as the screen was). The state file is
+written to a temp file and renamed, so a crash never leaves it empty.
 
 ## The first frame (`electron: { backgroundColor }`)
 

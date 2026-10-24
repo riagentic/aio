@@ -392,7 +392,7 @@ async function* _stream(
     return yield* _stream(rendered, inner);
   }
 
-  // Portal — skip
+  // Portal — skip (see vdom-ssr.ts)
   if (vnode.tag === Portal) return 0;
 
   // Null placeholder (AIO-107)

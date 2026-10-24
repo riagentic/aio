@@ -114,7 +114,9 @@ Deno.test("ws: every whole-state frame server-ws.ts sends itself is metered", ()
   const src = Deno.readTextFileSync(
     new URL("../src/server/server-ws.ts", import.meta.url),
   );
-  const sends = src.match(/encRaw\("state", msg\)/g)?.length ?? 0;
+  // encState (server-broadcast.ts) builds every whole-state frame — the
+  // view plus the cells it covers.
+  const sends = src.match(/encState\(msg, /g)?.length ?? 0;
   const meters = src.match(/onBroadcast\(meta\.id, utf8Size\(frame\)\)/g)
     ?.length ?? 0;
   assert(sends >= 4, `expected the four whole-view sites, found ${sends}`);

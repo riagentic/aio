@@ -295,6 +295,7 @@ export const BRIEF_API: readonly { entry: string; names: readonly string[] }[] =
         "own",
         "blocking",
         "notify",
+        "appIcon",
         "until",
         "race",
         "sleep",
@@ -650,6 +651,7 @@ export const BRIEF_RUN_KEYS: readonly {
     group: "auth",
     keys: [
       "key",
+      "pairing { pake }",
       "users",
       "resolveUser",
       "resolvePeer",
@@ -728,6 +730,7 @@ export const BRIEF_RUN_KEYS: readonly {
       "onEffect",
       "onConnect",
       "onDisconnect",
+      "localConnectHooks (onConnect/onDisconnect for local-socket windows too)",
       "fatalOnStart",
     ],
   },
@@ -973,7 +976,7 @@ ${show(CELL_TS)}
 
 - sync method = one atomic commit; throw = nothing written; NO await/I/O/clock/random inside.
 - async method = every await commits; re-read s after an await; Deno.* allowed.
-- effects (schedule.*, own.*, notify) only via s.$do — never returned. Schedules are NOT persisted:
+- effects (schedule.*, own.*, notify, appIcon) only via s.$do — never returned. Schedules are NOT persisted:
   re-arm in onInit. schedule.every repeats its ORIGINAL action; read Date.now() inside the method.
 - the cell IS the state: notes.items, notes.open(), notes.add(…) → Promise. type alias, not interface.
 - more: am agent --task=cell`;
@@ -1102,7 +1105,8 @@ sync: false) → --task=sync
 
 routes: { "/x/:id": route((ctx) => ctx.json(…)) } (raw HTTP: webhooks, uploads) · assets:
 { "/media": "./media" } in aio.run AND deno.json (to embed) · serverFns/serverFn (above) ·
-notify({ title }) via s.$do · updates: "<channel url>" · feedback: true · plugins:
+notify({ title }) · appIcon({ tray, window, tooltip }) (Electron icon) via s.$do ·
+updates: "<channel url>" · feedback: true · plugins:
 [definePlugin({ … })] · connectCli(url) (aio/server) for a remote CLI client · UDP/multicast →
 node:dgram (stable, no flag); Deno.listenDatagram type-checks but is undefined at runtime
 unless deno.json has "unstable": ["net"] · a multicast send from a socket bound to a LAN address
@@ -1175,7 +1179,9 @@ ${
            --wait=N --display=isolated|current --env-file=.env   supervised daemon, waits for health
          am stop [--all] · am restart · am kill [--stale] · am status · am instances [--long] ·
          am watch · am dev (= deno task dev, foreground) · am open [--print]
-state    am state [path] [--watch]   path: a.b[0] · a[*].x · a.{x,y} · raw server state (--ui = client view)
+state    am state [path] [--watch]   raw server state (--ui = client view)
+         am state --prod [path]      prod too: read-only client view (per-user: AIO_TOKEN=<token>)
+           path: a.b[0] · a[*].x · a.{x,y} · a[?k] · a[?k=v]
          am expect <path> eq|ne|gt|gte|lt|lte|contains|exists|absent [value] [--wait=N]   exit 1 on fail
          am dispatch notes:add milk n1 1 · am dispatch notes:add --args='["milk","n1",1]' (JSON-exact)
            · am dispatch conn:configure host=h port=8000 (one object arg) · --as-server (past access)
@@ -1295,8 +1301,9 @@ const SHIP = `## SHIP — build targets, versions, releases
 - **release** deno task ship keygen (once; key lives outside the repo) → am publish [--channel=C]
   [--notes=…] (build + sign → release/<channel>/<os>-<arch>.json; --dir=D) → host that dir → app:
   aio.run({ updates: "<channel base url>" }) · deno task ship github → CI workflow
-- **prod facts** a binary is prod: no control API (am state/dispatch/surface need dev; am
-  status/health/logs work) · same data dir as dev · --expose → LAN + TLS + key/PIN
+- **prod facts** a binary is prod: no control API (am dispatch/surface need dev; am
+  status/health/logs work; am state --prod reads the client view, per-user: AIO_TOKEN=<token>)
+  · same data dir as dev · --expose → LAN + TLS + key/PIN
 - **verify before calling it done** — headless, NEVER on the human's screen (no window of yours
   on their display, no screen capture): deno task build --smoke (each artifact from a foreign cwd,
   throwaway home, free port; Linux desktop windows on a nested display) · or <artifact>
@@ -1311,7 +1318,7 @@ const SHIP_MIN = `## SHIP
 - deno task compile → dist/<name>-<M.m.build> (+ manifest.json); verify it headless before calling
   it done — deno task build --smoke, or <artifact> --client=server-only + a headless test; never on
   the human's screen · deno task build [--targets=…] for every target · am publish for releases
-- a binary is prod: no am state/dispatch/surface (status/health/logs work) · --expose = LAN + TLS + PIN
+- a binary is prod: no am dispatch/surface; am state --prod = read-only client view (status/health/logs work) · --expose = LAN + TLS + PIN
 - beside a person's copy: <binary> --instance=<name> (own data/lock) · am stop --instance=<name> --app=<id>
 - standalone APK: no Deno, no server — content = deno.json "assets" + relative fetch; state = cells
 - more: am agent --task=ship`;
@@ -1437,7 +1444,8 @@ const AUTH = `## AUTH — who may connect, who may call, who sees what
 
 - **modes** loopback (default bind 127.0.0.1) = open · exposed (--expose / expose: true /
   non-loopback host) with nothing configured → generated key in data/app.key + 6-digit pairing PIN
-  (3 min; am pair for a fresh one) · key: false = open on purpose (warns)
+  (3 min; am pair for a fresh one; pairing: { pake: true } → 8-digit CPace code, cert-bound)
+  · key: false = open on purpose (warns)
 - **single** key: true (persisted) | "fixed" — sent as ?token=, Authorization: Bearer, or cookie
 - **tokens** users: { "<token>": { id: "ann", role: "admin" } } · resolveUser: (token, state) => user |
   null | Promise (wins over users) · sessions: true | { ttlMs }

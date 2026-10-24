@@ -70,11 +70,6 @@ export type ActionSource = "UI" | "Effect" | "System" | "Test";
  *  opened definition — `AioUser` on the main entry is an alias of this. */
 export type AccessUser = WireAioUser & Record<string, unknown>;
 
-/** Loose user shape (all-optional) — predates {@linkcode AccessUser}; kept for
- *  predicates/filters annotated against it (assignable in both directions that
- *  matter: `AccessUser` ⊂ `FilterUser`). */
-export type FilterUser = { id?: string; role?: string; [k: string]: unknown };
-
 /** Shared filter type — used by both persist and visible cell config.
  *  K generic enables autocomplete on state field names when used as keyof S.
  *  `exclude` also accepts dot-paths ("accounts.encSecKey") — deep removal,

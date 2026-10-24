@@ -9,6 +9,7 @@
 
 import {
   AIO_RUNTIME_FLAGS,
+  aioRuntimeLoaded,
   claimRuntimeFlag,
 } from "../diagnostics/runtime-flags.ts";
 import { nearestOf } from "../state/cell-helpers.ts";
@@ -158,13 +159,28 @@ export function args<const S extends ArgsSpec>(
       positionals.push(...argv.slice(i + 1));
       break;
     }
-    if (a === "--help" || a === "-h") {
+    // `-h` is help unless the spec gave `h` to a flag of its own (`host:
+    // { short: "h" }`): that declaration used to be unreachable — `-h
+    // example.com` printed the help and exited 0. `--help` always helps.
+    if (a === "--help" || (a === "-h" && !shorts.has("h"))) {
       io.out(help + "\n");
       return io.exit(EXIT.ok);
     }
     if (a === "--version" && spec.version) {
       io.out(`${spec.name} ${spec.version}\n`);
       return io.exit(EXIT.ok);
+    }
+    // No version of its own and no aio runtime to answer it: passing it
+    // through ran the tool's action as if no flag had been given. A tool that
+    // declares a `version` FLAG owns the word — parsed below, as before.
+    if (
+      a === "--version" && !Object.hasOwn(flagSpecs, "version") &&
+      !aioRuntimeLoaded()
+    ) {
+      return refuse(
+        `--version: ${spec.name} declares no version — add \`version\` to ` +
+          `its args() spec`,
+      );
     }
     if (!a.startsWith("-") || a === "-") {
       positionals.push(a);

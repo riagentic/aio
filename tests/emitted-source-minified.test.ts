@@ -29,6 +29,7 @@ import {
   Unminifiable,
 } from "../src/build/minify-server.ts";
 import { createBlockingPool } from "../src/state/blocking.ts";
+import { cpace } from "../src/server/cpace.ts";
 import {
   boundsFromState,
   centredOn,
@@ -50,7 +51,10 @@ const SITES: Record<string, string[]> = {
     "boundsFromState",
     "windowRect",
     "centredOn", // Electron's own splash (electron-splash.ts)
+    "checkAppIcon", // the shell preload's appIcon validator
+    "checkAppIcon", // …and the main process's (tmplTray)
   ],
+  "src/electron/electron-client-script.ts": ["cpaceSuite"], // pairing: { pake: true }
   "src/electron/electron-uds.ts": ["backoffDelay", "createLineReader"],
   "src/electron/runtime-dialog.ts": ["windowRect", "centredOn"],
   "src/media/encoder.ts": ["fitFrame"],
@@ -290,7 +294,8 @@ Deno.test({
       NSMakePoint: (x: number, y: number) => ({ x, y }),
     }) as (T: unknown, w: number, h: number) => { x: number; y: number };
     const got = aioPlace([2800, 100, 800, 600], 460, 140);
-    assertEquals(want.x, 2400, "the clamp ran");
+    // 1920 + 1280 - 800, less the EDGE_MARGIN (64) the rule keeps inside.
+    assertEquals(want.x, 2336, "the clamp ran");
     assertEquals(
       { x: got.x, y: PH - (got.y + 140) },
       centredOn(want, 460, 140),
@@ -550,4 +555,80 @@ Deno.test("blocking: a function that is NOT self-contained says so, not just `x 
   } finally {
     await pool.dispose();
   }
+});
+
+Deno.test({
+  name:
+    "emitted source: the appIcon validator RUNS in the Electron preload and main process when aio is minified",
+  sanitizeResources: Deno.build.os !== "windows", // see the tests above
+  fn: async () => {
+    await using copy = await minifiedCopy("src/electron/electron-shared.ts");
+    const { shellBridgePreload, tmplTray } = await copy.load(
+      "src/electron/electron-shared.ts",
+    );
+    for (
+      const code of [
+        shellBridgePreload(),
+        tmplTray({ tray: true }, "null", "t"),
+      ]
+    ) {
+      const from = code.indexOf("const __aioIconCheck = ");
+      const to = code.indexOf("const __aioIconLim", from);
+      assert(from >= 0 && to > from, "the emitted validator is not there");
+      const check = new Function(
+        KEEP_NAME,
+        code.slice(from, to) + "\nreturn __aioIconCheck;",
+      )(undefined) as (s: unknown, l: unknown) => { spec: { fps: number } };
+      const lim = { frames: 2, bytes: 10, fps: 12, tooltip: 127 };
+      assertEquals(check({ tray: ["a", "b"], fps: 30 }, lim).spec.fps, 12);
+      let why = "";
+      try {
+        check({ tray: ["a", "b", "c"] }, lim);
+      } catch (e) {
+        why = (e as Error).message;
+      }
+      assertEquals(why, "appIcon(): tray: 3 frames — at most 2");
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "emitted source: the Electron client's CPace (cpaceSuite) RUNS when aio is minified, and pairs with the server's",
+  sanitizeResources: Deno.build.os !== "windows", // see the tests above
+  fn: async () => {
+    await using copy = await minifiedCopy(
+      "src/electron/electron-client-script.ts",
+    );
+    const { electronClientScript } = await copy.load(
+      "src/electron/electron-client-script.ts",
+    );
+    const script: string = electronClientScript(null);
+    const from = script.indexOf(`globalThis.${KEEP_NAME} ??=`);
+    const to = script.indexOf("\nfunction postSeen(", from);
+    assert(from > 0 && to > from, "the emitted CPACE is not where this looks");
+    // A fresh realm: none of the name helpers this process's minified
+    // modules defined — as in Electron's main process.
+    const { runInNewContext } = await import("node:vm");
+    const client = runInNewContext(script.slice(from, to) + "\nCPACE", {
+      crypto,
+      TextEncoder,
+      TextDecoder,
+    }) as typeof cpace;
+    const pin = "12345678", fp = new Uint8Array([1, 2, 3]);
+    const st = await client.start(pin, fp);
+    const r = await cpace.respond(pin, fp, st.sid, st.Ya);
+    assert(r, "the server aborted a well-formed Ya");
+    const f = await client.finish(st, r.Yb, r.ADb);
+    assert(f, "the client aborted a well-formed Yb");
+    // (Uint8Arrays of the other realm: compared as plain arrays.)
+    assertEquals([...f.ta], [...r.ta]);
+    assertEquals([...f.tb], [...r.tb]);
+    const box = await cpace.seal(r.isk, st.sid, '{"profile":1}');
+    assertEquals(await client.open(f.isk, st.sid, box), '{"profile":1}');
+    // A wrong code: the keys differ, so Ta does not check.
+    const w = await cpace.respond("12345679", fp, st.sid, st.Ya);
+    const fw = await client.finish(st, w!.Yb, w!.ADb);
+    assert(!client.same(fw!.ta, w!.ta), "a wrong code produced the same Ta");
+  },
 });

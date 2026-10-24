@@ -268,7 +268,12 @@ methods: {
 ```
 
 **Writes are batched** — consecutive assignments in the same sync frame produce
-one action. Each `await` boundary starts a new batch.
+one action. Each `await` boundary starts a new batch, and so does a call to
+another method or `s.$do(...)` mid-frame (or another call reading state): the
+writes made so far may commit first, so they never land after an action issued
+later. A method called in the FIRST frame (before the first `await`) runs after
+that whole frame, and reads all of its writes — on the server, under
+`bootCells`, and under `testCell` alike.
 
 > ### Keep a method prompt — the one rule that decides UI feel
 >

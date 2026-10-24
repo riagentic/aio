@@ -258,6 +258,7 @@ function withWorkspaceImports(
 const _warned = new Set<string>();
 
 /** Test isolation — re-arm the one-shot config warnings. @internal */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetImportMapWarnings(): void {
   _warned.clear();
 }

@@ -8,6 +8,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   _resetLifecycleFacts,
+  exitAfterFatalStart,
   isServiceSupervised,
   type ProcessFacts,
   processFacts,
@@ -220,4 +221,26 @@ Deno.test("processFacts reads the launcher from the environment, and a process w
   // The public namespace carries both.
   assertEquals(typeof aio.stop, "function");
   assertEquals(typeof aio.restart, "function");
+});
+
+// A fatal `onStart` joins a stop already in flight (one shutdown, not two) —
+// and must still exit non-zero: it used to take the stop's 0, so a broken
+// start read as a clean quit to every supervisor and update judge.
+Deno.test("fatalOnStart joining an in-flight aio.stop() still exits 1", async () => {
+  const order: string[] = [];
+  const exit = (code: number) => void order.push(`exit ${code}`);
+  const before = Deno.exitCode;
+  try {
+    await requestStop({ facts: () => Promise.resolve(base), exit, log: quiet });
+    void exitAfterFatalStart({ exit, log: quiet });
+    assertEquals(
+      Deno.exitCode,
+      1,
+      "non-zero at once, before the deferred exit",
+    );
+    await exited(order);
+    assertEquals(order, ["exit 1"]);
+  } finally {
+    Deno.exitCode = before;
+  }
 });

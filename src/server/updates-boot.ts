@@ -46,6 +46,8 @@ import {
   forgetInstalledDigest,
   readTrust,
   recordInstalledSha256,
+  trustPath,
+  type TrustStore,
   writeTrust,
 } from "./updates-check.ts";
 import {
@@ -1265,15 +1267,54 @@ function isThere(path: string): boolean {
   }
 }
 
+/** The saved channel this boot honours.
+ *
+ *  A `setChannel` choice (`channelBy`) always. A value an older aio wrote
+ *  carries no origin, and that aio wrote one on EVERY first boot as well as on
+ *  `setChannel` — so it cannot be told apart from a choice. The safe reading:
+ *  - it equals what this boot resolves without it → it changes nothing; it is
+ *    dropped, so a later config change takes effect;
+ *  - it differs → kept (it may be an operator's choice, and silently moving an
+ *    install to another channel is the disaster the stamp exists to prevent),
+ *    and said on every boot with both ways out. */
+function pinnedChannel(
+  deps: StartUpdatesDeps,
+  trust: TrustStore,
+  ctx: { flag?: string; env?: string; stamp?: string },
+): string | undefined {
+  const saved = trust.channel;
+  if (!saved || trust.channelBy === "setChannel") return saved;
+  // A one-off flag outranks any pin: nothing to decide, nothing to say.
+  if (ctx.flag !== undefined || ctx.env !== undefined) return saved;
+  const unpinned = resolveUpdates(deps.updates, ctx);
+  if (saved === unpinned.channel) {
+    writeTrust(deps.dataDir, { channel: undefined });
+    return undefined;
+  }
+  const path = trustPath(deps.dataDir);
+  deps.log.warn(
+    "updates",
+    `following channel "${saved}", saved in ${path} by an older aio — which ` +
+      `saved the channel of the FIRST boot, not only a setChannel() choice. ` +
+      `It outranks what this app now resolves to ("${unpinned.channel}").` +
+      (unpinned.kind === "manifest" && saved === "main"
+        ? ` "main" is the default of a GIT source; a manifest source is asked ` +
+          `${unpinned.source}/main/…, which is rarely published.`
+        : "") +
+      ` To follow "${unpinned.channel}": remove "channel" from that file. To ` +
+      `keep "${saved}" and silence this: updates.setChannel("${saved}").`,
+  );
+  return saved;
+}
+
 export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
   sweepRecordTmps(deps.dataDir);
   const trust = readTrust(deps.dataDir);
   const envChannel = Deno.env.get("AIO_UPDATE_CHANNEL") ?? undefined;
+  const ctx = { flag: deps.flag, env: envChannel, stamp: deps.stamp };
   const config = resolveUpdates(deps.updates, {
-    flag: deps.flag,
-    env: envChannel,
-    pinned: trust.channel,
-    stamp: deps.stamp,
+    ...ctx,
+    pinned: pinnedChannel(deps, trust, ctx),
   });
 
   // Static, like everything else on this path: `startUpdates` is awaited from
@@ -1328,16 +1369,14 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
   if (slot) _installUpdatesRuntimeIn(slot, runtime);
   else installUpdatesRuntime(runtime);
   if (processSlot) _aioInstalled = runtime;
-  // Remember the channel this install follows, so a later run keeps following
-  // it without the flag that chose it — but ONLY when the choice was durable.
-  // A one-off `--channel=beta` (or `AIO_UPDATE_CHANNEL` from one shell) used to
-  // be PINNED FOREVER at first boot: an operator who looked at beta once had an
-  // install that silently followed beta for the rest of its life. Pinning is an
-  // explicit act (`setChannel`) or a property of the artifact (the build stamp).
+  // Nothing is pinned at boot. Pinning is an explicit act (`setChannel`); the
+  // build stamp is read afresh on every boot, so it needs no copy. Boot used to
+  // save whatever it resolved — the config literal, the "prod" default, a git
+  // source's "main" — and that copy then outranked the config for good: a
+  // later `channel: "dev"` did nothing, and an app moved from a git source to
+  // a manifest one asked `<source>/main/…` for ever.
   const oneOff = deps.flag !== undefined || envChannel !== undefined;
-  if (!trust.channel && !oneOff) {
-    writeTrust(deps.dataDir, { channel: config.channel });
-  } else if (!trust.channel && oneOff) {
+  if (!trust.channel && oneOff) {
     deps.log.info(
       "updates",
       `following channel "${config.channel}" for this run only — it is not ` +

@@ -363,7 +363,10 @@ export const _globalKeyProbe = { ran: 0, swallowed: 0 };
  *  `super`/`option`) then one key; it matches modifiers exactly unless the
  *  chord says `exact: false`, and an unknown modifier word throws. Its key is
  *  the KEYCAP (`keycapMatch`): `"ctrl+shift+1"` fires though Shift+1 types
- *  `!`, `"alt+f"` fires though macOS Alt+F types `ƒ`. */
+ *  `!`, `"alt+f"` fires though macOS Alt+F types `ƒ`. On a Shift-held press
+ *  that two bindings match, one leaving Shift free and one naming it
+ *  (German Ctrl+Shift+7 types `/`: `"ctrl+/"` and `"ctrl+shift+/"`), only the
+ *  one naming Shift runs. */
 export function onGlobalKey(
   key: string,
   fn: (e: KeyboardEvent) => void,
@@ -402,64 +405,104 @@ export function onGlobalKey(
     const doc = _activeRoot?.root?.ownerDocument ??
       (globalThis as { document?: Document }).document;
     if (!doc) return;
+    const match = (e: KeyboardEvent) =>
+      _chordMatch(e, keyRef.current, chordRef.current, stringRef.current);
+    const inField = (e: KeyboardEvent) => {
+      const t = e.target as
+        | { tagName?: string; isContentEditable?: boolean }
+        | null;
+      const tag = (t?.tagName ?? "").toUpperCase();
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
+        !!t?.isContentEditable;
+    };
+    const gated = (e: KeyboardEvent) =>
+      chordRef.current.ignoreInInput !== false && inField(e);
+    // What this binding answers the OTHER bindings: a keystroke its own input
+    // gate drops is not one it takes, so it never makes another one yield.
+    const takes = (e: KeyboardEvent) => gated(e) ? null : match(e);
     const handler = (ev: Event) => {
       const e = ev as KeyboardEvent;
-      const chord = chordRef.current;
-      const k = keyRef.current;
-      // A chord STRING names a keycap (`keycapMatch`: Shift+1 → "!", macOS
-      // Alt+F → "ƒ" still fire it); the object form keeps `e.key` alone.
-      if (
-        stringRef.current
-          ? !keycapMatch(
-            k,
-            e.key ?? "",
-            e.code ?? "",
-            chord.shift === true,
-            chord.alt === true,
-          )
-          : (e.key ?? "").toLowerCase() !== k.toLowerCase()
-      ) return;
-      // exact: an omitted modifier means "up" — except Ctrl/⌘ under `mod`,
-      // and Shift on a symbol key (Shift is how "?" is typed). A digit is not
-      // a symbol: "ctrl+1" and "ctrl+shift+1" are two bindings.
-      const ex = chord.exact === true;
-      const freeCM = chord.mod === true;
-      const want = (v: boolean | undefined, free: boolean) =>
-        v ?? (ex && !free ? false : undefined);
-      const ctrl = want(chord.ctrl, freeCM);
-      const meta = want(chord.meta, freeCM);
-      const alt = want(chord.alt, false);
-      const shift = want(
-        chord.shift,
-        k.length === 1 && k.toLowerCase() === k.toUpperCase() &&
-          !/[0-9]/.test(k),
-      );
-      if (ctrl !== undefined && e.ctrlKey !== ctrl) return;
-      if (meta !== undefined && e.metaKey !== meta) return;
-      if (alt !== undefined && e.altKey !== alt) return;
-      if (shift !== undefined && e.shiftKey !== shift) return;
-      if (chord.mod !== undefined && (e.ctrlKey || e.metaKey) !== chord.mod) {
-        return;
-      }
-      if (chord.ignoreInInput !== false) {
-        const t = e.target as
-          | { tagName?: string; isContentEditable?: boolean }
-          | null;
-        const tag = (t?.tagName ?? "").toUpperCase();
-        if (
-          tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
-          t?.isContentEditable
-        ) {
-          _globalKeyProbe.swallowed++;
-          return;
+      const m = match(e);
+      if (m === null) return;
+      // Most specific wins: on a Shift-held keystroke, a binding that leaves
+      // Shift free yields to another binding of this document that names
+      // Shift (and would fire for it). German Ctrl+Shift+7 types "/", so with
+      // BOTH "ctrl+/" and "ctrl+shift+/" bound it used to fire both;
+      // "ctrl+/" alone still fires.
+      if (m === "free" && e.shiftKey) {
+        for (const other of _bindings.get(doc) ?? []) {
+          if (other !== takes && other(e) === "set") return;
         }
+      }
+      if (gated(e)) {
+        _globalKeyProbe.swallowed++;
+        return;
       }
       _globalKeyProbe.ran++;
       fnRef.current(e);
     };
+    let set = _bindings.get(doc);
+    if (!set) _bindings.set(doc, set = new Set());
+    set.add(takes);
     doc.addEventListener("keydown", handler);
-    onCleanup(() => doc.removeEventListener("keydown", handler));
+    onCleanup(() => {
+      set.delete(takes);
+      doc.removeEventListener("keydown", handler);
+    });
   });
+}
+
+/** Every live `onGlobalKey` binding's matcher, per document — so a binding can
+ *  see whether a MORE specific one also matches the same keystroke. */
+const _bindings = new WeakMap<
+  Document,
+  Set<(e: KeyboardEvent) => "set" | "free" | null>
+>();
+
+/** Does `e` fire a binding of `key` + `chord`? `null` no; `"set"` yes, with
+ *  the binding naming the Shift state; `"free"` yes, Shift left free. */
+function _chordMatch(
+  e: KeyboardEvent,
+  k: string,
+  chord: KeyChord,
+  isString: boolean,
+): "set" | "free" | null {
+  // A chord STRING names a keycap (`keycapMatch`: Shift+1 → "!", macOS
+  // Alt+F → "ƒ" still fire it); the object form keeps `e.key` alone.
+  if (
+    isString
+      ? !keycapMatch(
+        k,
+        e.key ?? "",
+        e.code ?? "",
+        chord.shift === true,
+        chord.alt === true,
+      )
+      : (e.key ?? "").toLowerCase() !== k.toLowerCase()
+  ) return null;
+  // exact: an omitted modifier means "up" — except Ctrl/⌘ under `mod`,
+  // and Shift on a symbol key (Shift is how "?" is typed). A digit is not
+  // a symbol: "ctrl+1" and "ctrl+shift+1" are two bindings.
+  const ex = chord.exact === true;
+  const freeCM = chord.mod === true;
+  const want = (v: boolean | undefined, free: boolean) =>
+    v ?? (ex && !free ? false : undefined);
+  const ctrl = want(chord.ctrl, freeCM);
+  const meta = want(chord.meta, freeCM);
+  const alt = want(chord.alt, false);
+  const shift = want(
+    chord.shift,
+    k.length === 1 && k.toLowerCase() === k.toUpperCase() &&
+      !/[0-9]/.test(k),
+  );
+  if (ctrl !== undefined && e.ctrlKey !== ctrl) return null;
+  if (meta !== undefined && e.metaKey !== meta) return null;
+  if (alt !== undefined && e.altKey !== alt) return null;
+  if (shift !== undefined && e.shiftKey !== shift) return null;
+  if (chord.mod !== undefined && (e.ctrlKey || e.metaKey) !== chord.mod) {
+    return null;
+  }
+  return shift === undefined ? "free" : "set";
 }
 
 /**

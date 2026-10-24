@@ -28,11 +28,16 @@ import { identityDialogColors } from "../src/build/app-theme.ts";
 import { dialogBackend } from "../src/electron/runtime-dialog.ts";
 import {
   AIO_NESTED_DISPLAY,
+  displayIsUp,
   displayOwner,
   nestedDisplayCookie,
 } from "../src/server/nested-display.ts";
 
-const D = AIO_NESTED_DISPLAY;
+// `$AIO_TEST_DISPLAY` wins, as for every GUI test (src/testing/test-display.ts):
+// a run pointed at another display (the GPU lab) must not draw on `:77` — a
+// Xephyr that is itself a window on the real desktop.
+const EXPLICIT = Deno.env.get("AIO_TEST_DISPLAY") || null;
+const D = EXPLICIT ?? AIO_NESTED_DISPLAY;
 const linux = Deno.build.os === "linux";
 const hasGtk = linux && (() => {
   try {
@@ -42,8 +47,13 @@ const hasGtk = linux && (() => {
     return false;
   }
 })();
-const cookie = linux ? nestedDisplayCookie(D) : null;
-const ignore = !hasGtk || displayOwner(D) !== "mine" || !cookie;
+const cookie = !linux
+  ? null
+  : EXPLICIT
+  ? Deno.env.get("XAUTHORITY") ?? null
+  : nestedDisplayCookie(D);
+const ignore = !hasGtk || !cookie ||
+  !(EXPLICIT ? displayIsUp(D) : displayOwner(D) === "mine");
 /** `bin` is on PATH. */
 const onPath = (bin: string) =>
   (Deno.env.get("PATH") ?? "").split(":").some((d) => {
@@ -147,6 +157,16 @@ async function child(name: string): Promise<Record<string, unknown>> {
   if (name === "above") return await above();
   if (name === "dialogs") return await dialogs();
   if (name === "move") return await moved();
+  if (name === "linger") {
+    // The app goes on after its splash: closed, then a while of nothing.
+    const o = await gtkSplash(await spec(48, 30, {}));
+    if ("why" in o) return { why: o.why };
+    const d = await o.open("Notes", "Starting Notes…") as GtkDialog;
+    await within(d.shown, 5_000, "shown");
+    await d.close();
+    await new Promise((r) => setTimeout(r, 1_500));
+    return { alive: true };
+  }
   const s = name === "2x"
     ? await spec(480, 300, { text: false, progress: false }, "splash@2x.png")
     : await spec(480, 300, { text: "Starting {title}…", progress: true });
@@ -311,10 +331,12 @@ async function moved() {
   await within(d.shown, 5_000, "shown");
   const first = await d.what;
   await settle();
-  const before = pixel(1220, 540);
-  d.move?.({ x: 900, y: 300, width: 640, height: 480 });
+  // The new window's centre (800, 450) is well inside any test screen, so the
+  // splash lands there whole (EDGE_MARGIN keeps it 64 px off an edge).
+  const before = pixel(800, 450);
+  d.move?.({ x: 600, y: 300, width: 400, height: 300 });
   await settle();
-  const after = pixel(1220, 540), old = pixel(500, 400);
+  const after = pixel(800, 450), old = pixel(500, 400);
   await d.close();
   return { first, before, after, old };
 }
@@ -587,6 +609,22 @@ for (const fit of ["contain", "cover"] as const) {
     },
   });
 }
+
+Deno.test({
+  name:
+    "GTK splash: the process lives on after the splash closes, on a desktop that loads no GTK module (its worker's end must not unmap libgtk)",
+  ignore,
+  async fn() {
+    // GTK3_MODULES (Cinnamon's xapp module) held libgtk loaded by chance;
+    // without it the process segfaulted ~1 s after the close.
+    const r = await inChild("linger", {
+      ...testDisplay(),
+      GTK_MODULES: "",
+      GTK3_MODULES: "",
+    });
+    assertEquals(r, { alive: true });
+  },
+});
 
 Deno.test({
   name:

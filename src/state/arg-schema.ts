@@ -28,6 +28,8 @@
  * coercions, deleted.
  */
 
+import { markRefusal } from "./method-rejection.ts";
+
 /** One Standard Schema issue. `path` is what lets an OBJECT schema's failures
  *  be attributed to the field that caused them — `useForm` reads the first
  *  segment as the field name. The spec allows either a bare key or a
@@ -119,10 +121,12 @@ export function validateMethodArgs(
         );
       }
       if (verdict !== true) {
-        throw new Error(
-          `${where} is invalid ${slot}: ${
-            typeof verdict === "string" ? verdict : "the check returned false"
-          }`,
+        throw markRefusal(
+          new Error(
+            `${where} is invalid ${slot}: ${
+              typeof verdict === "string" ? verdict : "the check returned false"
+            }`,
+          ),
         );
       }
       continue;
@@ -154,7 +158,7 @@ export function validateMethodArgs(
     if ("issues" in res && res.issues) {
       const why = res.issues.map((x) => x.message).join("; ") ||
         "it did not match the schema";
-      throw new Error(`${where} is invalid ${slot}: ${why}`);
+      throw markRefusal(new Error(`${where} is invalid ${slot}: ${why}`));
     }
     // COERCED. A schema returns the parsed value, and that is what the method
     // gets — which is the dozen hand-written coercions the reports counted.

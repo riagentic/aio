@@ -21,7 +21,11 @@ import type { SyncOp } from "../../src/sync/types.ts";
 
 const CELL = "todos";
 
+/** Time passing for the engine (see the stale test). */
+const clockShift = { ms: 0 };
+
 function makeClient() {
+  clockShift.ms = 0;
   const dropped: { op: SyncOp; reason: string }[] = [];
   const rejected: { opId: string; reason: string }[] = [];
   const buffer = createOpBuffer(createMemoryStorage(), {
@@ -45,6 +49,8 @@ function makeClient() {
     },
     onStateUpdate: () => {},
     log: { warn: () => {}, debug: () => {} },
+    now: () => Date.now() + clockShift.ms,
+    mono: () => performance.now() + clockShift.ms,
   });
   return { engine, buffer, dropped, rejected };
 }
@@ -52,6 +58,10 @@ function makeClient() {
 Deno.test("client: a stale-beyond-retention rejection drops the op through onDrop, once", async () => {
   const { engine, buffer, dropped, rejected } = makeClient();
   await engine.handleLocalAction(CELL, "add", { t: "milk" });
+  // Made two days ago: it may be a resend whose tombstone was swept. (Made
+  // within the window, a stale refusal is made again instead —
+  // tests/sync/stale-own-op-reissued.test.ts.)
+  clockShift.ms = 49 * 3_600_000;
   const [op] = await buffer.getUnconfirmed(CELL);
   assert(op, "the local change is pending");
 

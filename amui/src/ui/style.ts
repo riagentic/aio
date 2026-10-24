@@ -11,7 +11,10 @@ export const C = {
   borderSoft: "#1c2430",
   text: "#e6edf3",
   text2: "#9aa7b8",
-  dim: "#66738a",
+  // The darkest grey that still reads at WCAG AA (4.5:1) on every surface
+  // above, `border` included — `#66738a` was 3–4:1 and the dev contrast check
+  // filled amui's own log with warnings on every render.
+  dim: "#8794ab",
   green: "#3fb950",
   greenDim: "#238636",
   red: "#f85149",

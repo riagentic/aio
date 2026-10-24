@@ -21,14 +21,6 @@ export type SelectorDef<S> =
     fn: (s: S, deps: any[], ...args: any[]) => unknown;
   };
 
-/** The value a bound selector accessor returns (the selector's own return). */
-// deno-lint-ignore no-explicit-any
-export type SelectorReturn<D> = D extends (s: infer _S, ...a: any[]) => infer R
-  ? R
-  // deno-lint-ignore no-explicit-any
-  : D extends { fn: (...args: any[]) => infer R } ? R
-  : unknown;
-
 /** Bound selectors surface on the cell as accessors. A plain selector's EXTRA
  *  params (beyond the state slice) become the accessor's args —
  *  `byId: (s, id: string) => T` → `cell.byId(id)`; `total: (s) => n` →

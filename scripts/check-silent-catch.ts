@@ -54,7 +54,7 @@ import { fromFileUrl } from "@std/path";
 // fixes (ratcheted to the measured count).
 // 308 → 306 measured when the bug-class ratchets (check-proto-in and
 // friends) joined check:ratchets: the round's fixes had already removed two.
-const CEILING = 289;
+const CEILING = 288;
 
 /** The budget for the PROMISE spelling, counted separately.
  *

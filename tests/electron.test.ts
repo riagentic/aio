@@ -666,6 +666,11 @@ function boundsHarness(
       return v;
     },
     writeFileSync: (p: string, d: string) => void files.set(p, d),
+    // The state is written to a temp file and renamed over (atomic).
+    renameSync: (a: string, b: string) => {
+      files.set(b, files.get(a)!);
+      files.delete(a);
+    },
   };
   const req = (id: string) => {
     if (id === "electron") {
@@ -682,6 +687,9 @@ function boundsHarness(
           p: string,
           d: string,
         ) => (files.set(p, d), Promise.resolve()),
+        rename: (a: string, b: string) => (
+          files.set(b, files.get(a)!), files.delete(a), Promise.resolve()
+        ),
       };
     }
     throw new Error(id);
@@ -717,7 +725,7 @@ Deno.test("electron bounds: a maximized window saves its NORMAL rect and comes b
     const { api, files, state } = boundsHarness(async);
     api.loadBounds(800, 600);
     api.saveBounds(fakeWin(true));
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
     assertEquals(JSON.parse(files.get(state)!), {
       x: 300,
       y: 120,
@@ -736,7 +744,7 @@ Deno.test("electron bounds: a maximized window saves its NORMAL rect and comes b
     assertEquals(api.restoreMax(), true, `async=${async}`);
     // Un-maximized again: the key is gone, the file is exactly the old shape.
     api.saveBounds(fakeWin(false));
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
     assertEquals(JSON.parse(files.get(state)!), {
       x: 300,
       y: 120,
@@ -755,7 +763,7 @@ Deno.test("electron bounds: a FULLSCREEN window saves its NORMAL rect, not the s
     const { api, files, state } = boundsHarness(async);
     api.loadBounds(800, 600);
     api.saveBounds(fakeWin(false, true));
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
     assertEquals(JSON.parse(files.get(state)!), {
       x: 300,
       y: 120,
@@ -783,21 +791,24 @@ Deno.test("electron bounds: the maximized flag survives a fitted rect and a chan
       maximized: true,
     }),
   );
+  // Fitted onto the 1280×900 screen, EDGE_MARGIN (64) inside its bottom.
   assertEquals(api.loadBounds(800, 600), {
     x: 100,
-    y: 300,
+    y: 236,
     width: 800,
     height: 600,
   });
   assertEquals(api.restoreMax(), true);
   assertEquals(api.loadBounds(640, 480), {
     x: 100,
-    y: 420,
+    y: 356,
     width: 640,
     height: 480,
   });
   assertEquals(api.restoreMax(), true);
-  // A pre-maximize-key file: exactly what it loaded to before.
+  // A pre-maximize-key file as big as the screen (what 1.0.24 saved for a
+  // maximized window): never again at x = 0 (its frame would be off-screen,
+  // feedback/critical.md) — inside the margin, and maximized.
   files.set(
     state,
     JSON.stringify({
@@ -810,12 +821,12 @@ Deno.test("electron bounds: the maximized flag survives a fitted rect and a chan
     }),
   );
   assertEquals(api.loadBounds(800, 600), {
-    x: 0,
-    y: 37,
-    width: 1280,
-    height: 863,
+    x: 64,
+    y: 64,
+    width: 1152,
+    height: 772,
   });
-  assertEquals(api.restoreMax(), false);
+  assertEquals(api.restoreMax(), true);
   // No position saved: the saved size, centred on the primary (the one
   // placement rule — never Electron's own center()).
   files.set(

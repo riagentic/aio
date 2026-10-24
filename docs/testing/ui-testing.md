@@ -56,7 +56,12 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   settling the app before the next. You `await` only where you _observe_:
   `expectCell`, `waitFor`, `settle` (each drains the queue first and surfaces
   any queued failure — a typo'd name still fails the test, with the usual name
-  listing). Awaiting an action still works and is equivalent.
+  listing). Awaiting an action still works and is equivalent. An observation you
+  forget to `await` is awaited at teardown: if it fails, THIS test fails and
+  names the missing `await` (it used to fail later as an uncaught error that
+  cancelled the rest of the file); if it passes, a warning says so. A test that
+  fails while actions are still queued — `ui.AddButton.click()` then a plain
+  `assertEquals(todo.items.length, 1)` — says how many had not run.
 - Acting on UI a previous action creates just works:
   `ui.OpenButton.click(); ui.Modal.ConfirmButton.click()` — the modal is
   resolved when its turn comes, not at access time.
@@ -461,7 +466,12 @@ await ui.waitFor(() => ui.html().includes("Signed in as alice"));
 `page.cookies` is what the page holds; `page.reload()` forgets the identity the
 page resolved (the next mount asks `/me` again). Disposing restores `fetch`. The
 app's cells still run in-process under `testUI` — this joins the HTTP side of a
-page (login, your own routes), not its socket.
+page (login, your own routes), not its socket. What the socket would decide
+follows the login, though: with no `user` option, the page reads cells as the
+user its session resolved to (their `visible.forUser` view) and calls methods
+and `serverFn`s as that user (`access`) — the same view and verdicts a real
+socket signed in with that session gets
+(`tests/auth-login-socket-view.test.tsx`).
 
 ### Presence: `onConnect` → an access-gated method
 
@@ -1283,13 +1293,23 @@ helpers replace the boot + browser boilerplate apps used to hand-roll — both
 `await using`-ready, both self-cleaning:
 
 ```ts
+import { assertEquals } from "@std/assert";
+import { cell } from "aio";
 import { testBrowser, testServer } from "aio/testing";
 
+const cart = cell("cart", { state: { items: [] as string[] }, methods: {} });
+
 Deno.test("checkout over the wire", async () => {
-  await using srv = await testServer({ cells: [cart], routes: {/* … */} });
+  await using srv = await testServer({
+    cells: [cart],
+    routes: { "/api/health": () => Response.json({ ok: true }) },
+  });
   // srv.url, srv.port, srv.app, srv.fetch(path), srv.state()
   const res = await srv.fetch("/api/health");
-  assertEquals(res.status, 200);
+  // Assert the BODY, not only the status: a path no route answers falls back
+  // to the app shell — 200 text/html — so `status === 200` alone passes for a
+  // route that does not exist.
+  assertEquals(await res.json(), { ok: true });
 
   await using browser = await testBrowser(`${srv.url}/`); // headless Chromium
   // drive it via `am surface`/trigger over the trojan channel, then assert on

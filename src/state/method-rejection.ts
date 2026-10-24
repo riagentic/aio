@@ -57,6 +57,17 @@ export function withRefusalCode<E extends Error>(e: E, code: string): E {
   return Object.assign(e, { code });
 }
 
+/** Refusals aio raises on the app's behalf — an `args` rule saying no to a
+ *  caller's input. Their `[cell:method]` prefix would otherwise read as aio's
+ *  own error, and a mistyped form value printed the crash box. */
+const _framed = new WeakSet<object>();
+
+/** Mark an error aio throws for a deliberate refusal (see `_framed`). */
+export function markRefusal<E extends Error>(e: E): E {
+  _framed.add(e);
+  return e;
+}
+
 /** Engine error classes: a method that throws one of these has a bug. */
 const BUG_CLASSES = new Set([
   "TypeError",
@@ -83,6 +94,12 @@ export function isDeliberateRejection(e: unknown): boolean {
   // carrying `cell`/`method`, with the original as `cause` — judged as is, a
   // TypeError from a real bug read as a refusal (measured, in this change's
   // own extra check). Judge the whole cause chain: any bug in it is a bug.
+  // An aio-raised refusal anywhere in the chain (the sync runner wraps it).
+  for (
+    let x: unknown = e, depth = 0;
+    x instanceof Error && depth < 8;
+    x = x.cause, depth++
+  ) if (_framed.has(x)) return true;
   for (
     let x: unknown = e, depth = 0;
     x instanceof Error && depth < 8;
@@ -104,13 +121,20 @@ export function isDeliberateRejection(e: unknown): boolean {
  *  async method commits as it goes — so "no state changed" would be a lie
  *  beside the state that did change. Only a sync method, a `transaction:
  *  true` one, or an async one that threw before writing leaves state as it
- *  was. */
+ *  was. `"tx"`: a transaction that threw after an `s.$commit()` — the
+ *  published part stays, the rest is discarded. */
 export function rejectionLine(
   actionType: string,
   e: unknown,
-  committed = false,
+  committed: boolean | "tx" = false,
 ): string {
   const why = e instanceof Error ? e.message : String(e);
+  if (committed === "tx") {
+    return `${actionType} rejected: ${why} — the method threw it after an ` +
+      `\`s.$commit()\`: what that commit published STAYS committed, and ` +
+      `only the writes after it were discarded. The caller's await rejects ` +
+      `with it`;
+  }
   if (committed) {
     return `${actionType} rejected: ${why} — the method threw it AFTER ` +
       `writing, and those earlier writes STAY committed (an async method ` +

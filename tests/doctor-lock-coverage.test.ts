@@ -149,3 +149,53 @@ Deno.test("doctor lock coverage: no lock, or an unlinked dep/aio, is not called 
     await dropTempDir(dir);
   }
 });
+
+// A run that cannot load `dep/aio` (the link missing) PRUNES the lock; the
+// next run re-resolves aio's tools — at whatever is newest — and the coverage
+// check then PASSed a lock that had silently moved off the committed one.
+Deno.test("doctor lock coverage: a lock that LOST committed entries is a WARN naming git checkout", async () => {
+  const dir = await fixture();
+  const git = async (...args: string[]) => {
+    const o = await new Deno.Command("git", {
+      args: ["-C", dir, ...args],
+      env: {
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.invalid",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.invalid",
+      },
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assert(o.success, new TextDecoder().decode(o.stderr));
+  };
+  try {
+    const o = await new Deno.Command(Deno.execPath(), {
+      args: ["cache", ...await cacheTargets(dir, "src/app.ts")],
+      cwd: dir,
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assert(o.success, new TextDecoder().decode(o.stderr));
+    const lockPath = join(dir, "deno.lock");
+    const full = JSON.parse(await Deno.readTextFile(lockPath));
+    // An entry only the app's own graph needs (its tests), committed…
+    full.specifiers["jsr:@std/yaml@1.0.9"] = "1.0.9";
+    await Deno.writeTextFile(lockPath, JSON.stringify(full, null, 2));
+    await git("init", "-q");
+    await git("add", "deno.lock");
+    await git("commit", "-q", "-m", "lock");
+    assertEquals((await lockCoverageLine(dir))?.ok, true, "committed = clean");
+    // …then pruned on disk, while aio's tool entries are all back.
+    delete full.specifiers["jsr:@std/yaml@1.0.9"];
+    await Deno.writeTextFile(lockPath, JSON.stringify(full, null, 2));
+    assertEquals((await checkLockCoverage(dir, CFG)).status, "complete");
+    const line = await lockCoverageLine(dir);
+    assertEquals(line?.ok, false, line?.line);
+    assertStringIncludes(line!.line, "has lost 1 entry");
+    assertStringIncludes(line!.line, "jsr:@std/yaml@1.0.9");
+    assertStringIncludes(line!.line, "git checkout deno.lock");
+  } finally {
+    await dropTempDir(dir);
+  }
+});

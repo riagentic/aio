@@ -26,7 +26,8 @@ import { EXIT_WAIT_MS } from "../server/shutdown-budget.ts";
 // keeps only those); short forms like -c/-r are filtered upstream.
 const DENO_RUNTIME_FLAG =
   /^(--env-file|--env|--config|--no-config|--import-map|--importmap|--reload|--no-remote|--cached-only|--lock|--no-lock|--frozen|--cert|--unstable|--unstable-[\w-]+|--v8-flags|--seed|--location|--inspect|--inspect-brk|--inspect-wait|--allow-[\w-]+|--deny-[\w-]+|--no-npm|--node-modules-dir|--vendor)(=|$)/;
-const isDenoRuntimeFlag = (a: string): boolean => DENO_RUNTIME_FLAG.test(a);
+export const isDenoRuntimeFlag = (a: string): boolean =>
+  DENO_RUNTIME_FLAG.test(a);
 
 /** The positional WORDS an app's own `dev` task hands its entry — `serve` in
  *  `deno run -A src/app.ts serve`. Flags are deliberately excluded: they are
@@ -104,8 +105,15 @@ export function buildDenoArgs(
   passthrough: string[],
   declaredMaxHeap?: string | number | null,
 ): string[] {
-  const denoFlags = passthrough.filter(isDenoRuntimeFlag);
-  const appFlags = passthrough.filter((a) => !isDenoRuntimeFlag(a));
+  // After a bare `--` everything is the app's — an `--env-file` there is its
+  // argument, not one to hoist in front of the entry for Deno.
+  const end = passthrough.indexOf("--");
+  const head = end === -1 ? passthrough : passthrough.slice(0, end);
+  const denoFlags = head.filter(isDenoRuntimeFlag);
+  const appFlags = [
+    ...head.filter((a) => !isDenoRuntimeFlag(a)),
+    ...(end === -1 ? [] : passthrough.slice(end)),
+  ];
   // The heap ceiling, resolved for THIS machine (25% of RAM, floor 4 GB) or
   // from the app's declared `memory.maxHeap`, which wins when it states one.
   // A launcher is the only place that can size it correctly: V8 freezes the

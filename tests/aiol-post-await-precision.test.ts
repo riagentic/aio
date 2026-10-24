@@ -349,6 +349,12 @@ Deno.test("draftReadOffsets: a destructuring-assignment TARGET is a write", () =
   assertEquals(reads("x = { a: s.x }").length, 1);
   assertEquals(reads("[s.a] == v").length, 1);
   assertEquals(reads("f([s.a], s.b)").length, 2);
+  // A KEYWORD before `[` is not an indexed operand: still a pattern.
+  assertEquals(reads("return [s.a] = v;"), []);
+  assertEquals(reads("yield [s.a, s.b] = v;"), []);
+  assertEquals(reads("if (x) y(); else [s.a] = v;"), []);
+  // …but an identifier that merely ENDS in a keyword is an operand.
+  assertEquals(reads("myreturn[s.a] = v").length, 1);
 });
 
 Deno.test("post-await: destructuring writes after an await are not hinted", async () => {

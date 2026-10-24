@@ -339,15 +339,32 @@ export function mergeLaunchFlags(
   recorded: readonly string[],
   typed: readonly string[],
 ): { launch: string[]; replayed: string[]; overridden: string[] } {
-  const appTyped = typed.filter((a) => !AM_ONLY_FLAGS.has(flagName(a)));
+  // A bare `--` ends the options on both sides: what follows it is the APP's
+  // argument list. Appending typed flags after a recorded `-- x` made
+  // `am restart --expose` hand `--expose` to the app as an argument — it
+  // booted unexposed and said nothing. Flags merge before the separator; a
+  // typed argument list replaces the recorded one whole.
+  const split = (a: readonly string[]) => {
+    const i = a.indexOf("--");
+    return i === -1 ? [a, null] as const : [a.slice(0, i), a.slice(i)] as const;
+  };
+  const [recFlags, recTail] = split(recorded);
+  const [typedFlags, typedTail] = split(typed);
+  const appTyped = typedFlags.filter((a) => !AM_ONLY_FLAGS.has(flagName(a)));
   const typedNames = new Set(appTyped.map(flagName));
-  const replayed = recorded.filter((a) => !typedNames.has(flagName(a)));
-  const overridden = recorded
-    .filter((a) => typedNames.has(flagName(a)))
-    .map(flagName);
+  const kept = recFlags.filter((a) => !typedNames.has(flagName(a)));
+  const replayed = [...kept, ...(typedTail ? [] : recTail ?? [])];
+  const overridden = [
+    ...recFlags.filter((a) => typedNames.has(flagName(a))).map(flagName),
+    ...(typedTail && recTail ? ["--"] : []),
+  ];
   // Recorded first, then what was typed: a later occurrence wins in every CLI
   // parser aio ships, so an override that survived the filter still lands last.
-  return { launch: [...replayed, ...appTyped], replayed, overridden };
+  return {
+    launch: [...kept, ...appTyped, ...(typedTail ?? recTail ?? [])],
+    replayed,
+    overridden,
+  };
 }
 
 /** A restart NOTE — said before the start that follows.
@@ -439,12 +456,18 @@ async function restartApp(
   // Preserve the original launch across restart (a field report:
   // restart dropped --env-file → the vault stopped auto-unlocking). Explicit
   // flags on THIS `am restart` win; otherwise replay what start recorded.
-  const explicit = args.filter((a) => a.startsWith("--"));
+  // Words after a bare `--` are the app's, kept verbatim with the marker.
+  const end = args.indexOf("--");
+  const head = end === -1 ? args : args.slice(0, end);
+  const explicit = [
+    ...head.filter((a) => a.startsWith("--")),
+    ...(end === -1 ? [] : args.slice(end)),
+  ];
   const recorded = readLaunchInfo(appId);
   let launchArgs = args;
   if (recorded && recorded.flags.length > 0) {
     const merged = mergeLaunchFlags(recorded.flags, explicit);
-    launchArgs = [...args.filter((a) => !a.startsWith("--")), ...merged.launch];
+    launchArgs = [...head.filter((a) => !a.startsWith("--")), ...merged.launch];
     if (merged.replayed.length > 0) {
       restartNote(
         mode,

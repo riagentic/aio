@@ -22,6 +22,7 @@ import { measureCellState } from "../diagnostics/memory-monitor.ts";
 import { readGauges } from "../diagnostics/memory-ledger.ts";
 import { CELL_METHOD_SEP } from "../state/cell-helpers.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
+import { declaredMethodArgs } from "../state/cell-methods-factory.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
 import {
   _dispatchRefusal,
@@ -35,7 +36,7 @@ import {
   SNAPSHOT_MAX_BODY,
 } from "./read-body.ts";
 import { enc, errorCode } from "../protocol/envelope.ts";
-import { overUtf8 } from "../protocol/utf8-size.ts";
+import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
 import { snapshotShapeError } from "./server-static.ts";
 import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
 import { UNSERIALIZABLE_BYTES } from "../diagnostics/fmt.ts";
@@ -105,6 +106,8 @@ export interface TrojanDeps {
   token?: string;
   certPem?: string;
   expose?: boolean;
+  /** `pairing: { pake: true }` — `am pair` mints an 8-digit PAKE code. */
+  pairingPake?: boolean;
   /** Trojan capabilities from ServerConfig.trojan */
   trojan: {
     getState: () => unknown;
@@ -446,6 +449,9 @@ function handleGet(
   sendToClient: (idx: number, msg: string) => Promise<Response>,
 ): Response | Promise<Response> {
   const { trojan } = deps;
+  /** Connected clients, BOTH transports — one count for every route. */
+  const connectedClients = () =>
+    deps.getWsClients().length + (trojan.udsClients?.() ?? []).length;
 
   if (route === "state") return json(trojan.getState());
 
@@ -621,7 +627,9 @@ function handleGet(
     if (state && typeof state === "object") {
       for (const [name, slice] of Object.entries(state)) {
         try {
-          cellSizes[name] = JSON.stringify(slice)?.length ?? 0;
+          // UTF-8 BYTES, as every consumer labels it — `.length` counts
+          // UTF-16 units, a third of the truth for CJK text.
+          cellSizes[name] = utf8Size(JSON.stringify(slice) ?? "");
         } catch {
           cellSizes[name] = UNSERIALIZABLE_BYTES; // flag, don't throw
           unserializable.push(name);
@@ -635,8 +643,7 @@ function handleGet(
       // listed its one live UDS client. Two routes, one running app, two
       // answers, and the operator has no way to tell which is lying. A local
       // Electron app opens no TCP ports at all, so its clients are ALL here.
-      connections: deps.getWsClients().length +
-        (trojan.udsClients?.() ?? []).length,
+      connections: connectedClients(),
       schedules: trojan.getSchedules().length,
       cells: cellSizes,
       // Only when there IS one — an empty array in every reply is noise, and
@@ -723,7 +730,7 @@ function handleGet(
     if (state && typeof state === "object") {
       for (const [name, slice] of Object.entries(state)) {
         try {
-          sizes[name] = JSON.stringify(slice)?.length ?? 0;
+          sizes[name] = utf8Size(JSON.stringify(slice) ?? "");
         } catch {
           sizes[name] = UNSERIALIZABLE_BYTES;
         }
@@ -733,6 +740,10 @@ function handleGet(
     // list captured at boot, and it makes "this cell did nothing" reportable
     // rather than indistinguishable from "this cell does not exist".
     deps.costMeter.setKnownCells(Object.keys(sizes));
+    // NOW, from the same count `metrics` reports. The meter only learned it
+    // on a broadcast round, and never a zero: every client gone, `am cost`
+    // still said "clients connected 3" and divided the per-client rate by it.
+    deps.costMeter.setClientCount(connectedClients());
     const report = deps.costMeter.report({ windowSec, cell });
     return json({ ...report, stateBytes: sizes });
   }
@@ -844,6 +855,7 @@ async function handlePost(
       /** Args passed beyond the method's required count (see `extra`). */
       let _extra = 0;
       let _shortRequired = 0;
+      let _declared: number | null | undefined;
       if (sepIdx > 0 && Object.keys(methods).length > 0) {
         const cell = action.type.slice(0, sepIdx);
         const method = action.type.slice(sepIdx + 1);
@@ -930,8 +942,14 @@ async function handlePost(
           // them, maybe they are dropped — `am dispatch todo:add hello world`
           // stored "hello" and lost "world" without a word. Said, never
           // refused: "too many" is not knowably wrong (see below).
-          _extra = required !== undefined && Array.isArray(p?.args)
-            ? Math.max(0, p.args.length - required)
+          // Against what the method DECLARES (defaults counted) where that
+          // is known: `inc(s)` handed `5` dropped it under a clean `ok`, and
+          // `add(s, a, b = 1)` handed two was warned about falsely. A rest
+          // parameter (`null`) takes any count.
+          _declared = declaredMethodArgs(cell, method);
+          const takes = _declared === undefined ? required : _declared;
+          _extra = takes != null && Array.isArray(p?.args)
+            ? Math.max(0, p.args.length - takes)
             : 0;
         }
         if (required !== undefined && required > 0) {
@@ -1094,7 +1112,17 @@ async function handlePost(
             ),
           }
           : {}),
-        ...(_extra > 0 && _shortRequired > 0
+        ...(_extra > 0 && typeof _declared === "number"
+          ? {
+            extra:
+              `${action.type} takes ${_declared} argument${
+                _declared === 1 ? "" : "s"
+              } and this call passed ${_declared + _extra} — the extra ` +
+              `${_extra === 1 ? "one was" : `${_extra} were`} DROPPED (the ` +
+              `call still ran). Multi-word text is ONE argument: quote it ` +
+              `(\`am dispatch ${action.type} "hello world"\`).`,
+          }
+          : _extra > 0 && _shortRequired > 0
           ? {
             extra:
               `${action.type} requires ${_shortRequired} argument${
@@ -1444,7 +1472,7 @@ async function handlePost(
       );
     }
     // THIS app's PIN (keyed by its key) — never another app's in the process.
-    const pin = generatePin(deps.token);
+    const pin = generatePin(deps.token, { pake: deps.pairingPake });
     return json({
       ok: true,
       pin,

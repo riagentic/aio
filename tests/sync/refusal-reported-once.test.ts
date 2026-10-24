@@ -30,7 +30,13 @@ interface Rig {
   pending: () => Promise<string[]>;
 }
 
+/** Time passing for the engine: an op made longer ago than the tombstone
+ *  window is TRULY old (one made within it is re-made instead —
+ *  tests/sync/stale-own-op-reissued.test.ts). */
+const passed = { ms: 0 };
+
 function rig(): Rig {
+  passed.ms = 0;
   const rejected: string[] = [];
   const drops: string[] = [];
   const storage = createMemoryStorage();
@@ -50,6 +56,8 @@ function rig(): Rig {
     getConfirmedState: () => ({ todos: {} }),
     setConfirmedState: () => {},
     onStateUpdate: () => {},
+    now: () => Date.now() + passed.ms,
+    mono: () => performance.now() + passed.ms,
   });
   return {
     engine,
@@ -90,7 +98,8 @@ Deno.test("sync refusal: a repeated STALE refusal drops the op once", async () =
     engine.setOnline(false);
     await engine.handleLocalAction("todos", "add", { text: "1" });
     const [id] = await pending();
-    const reason = `${STALE_OP_REASON}: 5h old, past the 4h window`;
+    passed.ms = 25 * 3_600_000; // truly old: made a day ago
+    const reason = `${STALE_OP_REASON}: 25h old, past the 24h window`;
     await engine.handleRejection("todos", id!, reason);
     await engine.handleRejection("todos", id!, reason);
     assertEquals(rejected.length, 1, "one onRejected");

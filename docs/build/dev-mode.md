@@ -307,10 +307,16 @@ can't relaunch faithfully:
 
 When the server restarts (crash, manual restart, `am restart`), existing browser
 tabs auto-reconnect via WebSocket. The server sends a boot ID on each WS connect
-— if the browser detects a different boot ID on reconnect, it reloads the page
-to pick up fresh JS. No stale code in memory after restarts. The reload first
-waits (up to 10s) for the calls queued while the server was down to leave the
-socket, so a restart does not discard them — in dev exactly as in prod.
+— if the browser sees a different boot ID on reconnect, it reloads the page to
+pick up fresh JS. A source run (dev) gets a new ID on every boot, so every
+restart reloads: its code spans files outside the app dir (shared cells, a
+linked framework, the import map) that it cannot cheaply prove unchanged. A
+built app's ID is its build's identity (the served bundle's hash plus the build
+stamp), so a restart of the same build (a crash-restart, `am restart`) keeps
+every open tab as it was, unsaved input included, and a new build reloads them.
+No stale code in memory after restarts. The reload first waits (up to 10s) for
+the calls queued while the server was down to leave the socket, so a restart
+does not discard them — in dev exactly as in prod.
 
 Additionally, when `--open` is passed the browser open is delayed 1.5s on
 startup. Without `--open` aio opens nothing at all. If an existing tab

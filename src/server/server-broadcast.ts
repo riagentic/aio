@@ -29,6 +29,11 @@ import type { ClientMeta } from "./server-ws.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AioUser } from "./aio.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import {
+  createIconReplay,
+  type IconReplay,
+  isIconFrame,
+} from "./icon-replay.ts";
 import { bytes } from "../diagnostics/fmt.ts";
 import { budgetsFor, cellSizeFix } from "../state/budgets.ts";
 import { rawStateControlAllowed } from "./server-auth.ts";
@@ -62,6 +67,9 @@ export interface BroadcastDeps {
   /** How many clients are on the UDS socket. A desktop app's clients are ALL
    *  here and none in `connections` — see the count in `flush`. */
   udsClientCount?: () => number;
+  /** The app's icon replay (icon-replay.ts) — shared with the desktop
+   *  socket. A broadcaster without one keeps its own. */
+  iconReplay?: IconReplay;
   /** Cost meter (`am cost`) — records the EXACT bytes handed to each socket and,
    *  once per round, which cell/key those bytes came from. Attribution lives
    *  here because this is the only place that knows both. */
@@ -84,6 +92,9 @@ export interface Broadcaster {
   broadcastRaw: (msg: string, exclude?: WebSocket) => void;
   /** A raw frame to every UI client (WS + UDS); how many received it. */
   broadcastUi: (raw: string) => number;
+  /** The icon frames a UI client that connects NOW must be sent, oldest
+   *  first, to show the icon the app last set (icon-replay.ts). */
+  iconReplay: () => string[];
   /** Interactive priority: drain the coalescer NOW (client-action latency —
    *  see Coalescer.flushUrgent). */
   flushUrgent: () => void;
@@ -96,6 +107,10 @@ export interface Broadcaster {
 /** Every live broadcaster's "bytes buffered for peers" reader — what the
  *  process-wide `broadcast.bufferedBytes` gauge sums. Left on `shutdown`. */
 const _liveBuffered = new Set<() => number>();
+
+/** A debt-payment pass's count, and the first paid client's user (whose view
+ *  the pass is attributed from — see `_sentView`). */
+type DebtPaid = { n: number; user?: AioUser };
 
 /** Factory — creates an isolated broadcast subsystem with its own throttle state */
 export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
@@ -299,15 +314,28 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     vitalsSystem.pressureMonitor?.onBroadcast(meta.id, _bytes);
   }
 
+  /** The view a full send is attributed from: one a client of THIS round
+   *  actually received (memoized — built already, never built again).
+   *
+   *  It used to be `getUIState()` with no user: a view no socket of a per-user
+   *  app holds, built only for the meter. A `visible.forUser` that reads its
+   *  user (`u!.id`) threw on it, and every round with a full send logged
+   *  "visible.forUser threw — omitting the cell for this client" at ERROR
+   *  level with no such client connected — a false alarm per broadcast, in
+   *  production, burying the real ones (and attributing bytes of a view
+   *  nobody was sent). Pinned by tests/cost-attribution-uses-a-sent-view.test.ts. */
+  const _sentView = (user: AioUser | undefined) => () =>
+    getUIState(user) as Record<string, unknown> | undefined;
+
   /** `am cost` for a debt payment: the whole slice went, outside any round. */
-  function _attributeDebtPaid(): void {
+  function _attributeDebtPaid(user: AioUser | undefined): void {
     if (!costMeter) return;
     attributeRound(costMeter, {
       anyPatchSend: false,
       anyFullSend: true,
       force: false,
       patchesToSend: [],
-      getUIState: getUIState as () => Record<string, unknown> | undefined,
+      getUIState: _sentView(user),
     });
   }
 
@@ -344,6 +372,8 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // wrong, and people act on those. Decided per client (subscriptions
       // differ), so it is observed in the loop and attributed once after it.
       let anyFullSend = false;
+      /** Whose view the first full send carried — what it is attributed from. */
+      let fullSentTo: AioUser | undefined;
       // ONE serialization per distinct VIEW per round (`_viewSnapshotter`).
       const snapshot: SnapshotVerdict = {
         attempted: false,
@@ -455,7 +485,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
                 fullJsonForTracking !== meta.lastFullJson
               ) {
                 _warnBigFullState(fullJsonForTracking, meta);
-                msgToSend = encRaw("state", fullJsonForTracking);
+                msgToSend = encState(fullJsonForTracking, meta.subscriptions);
                 sentKind = "full";
               }
             } else {
@@ -520,7 +550,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
             }`,
           );
           _warnBigFullState(fullJsonForTracking, meta);
-          msgToSend = encRaw("state", fullJsonForTracking);
+          msgToSend = encState(fullJsonForTracking, meta.subscriptions);
         }
 
         if (!msgToSend) continue;
@@ -531,8 +561,10 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           // the handshake, per-action acks and diagnostics — counting in both
           // places double-counts, which is exactly what the wire-accuracy test
           // caught. Here we only record WHICH KIND went out, for attribution.
-          if (sentKind === "full") anyFullSend = true;
-          else anyPatchSend = true;
+          if (sentKind === "full") {
+            if (!anyFullSend) fullSentTo = meta.user;
+            anyFullSend = true;
+          } else anyPatchSend = true;
           if (fullJsonForTracking) meta.lastFullJson = fullJsonForTracking;
           // A patch moved the client past whatever `lastFullJson` describes;
           // a full send makes it exact again. The string is kept either way —
@@ -586,7 +618,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           anyFullSend,
           force,
           patchesToSend,
-          getUIState: getUIState as () => Record<string, unknown> | undefined,
+          getUIState: _sentView(fullSentTo),
         });
       }
       // A round that COMPLETED ends the episode. `degraded()`'s contract is
@@ -722,7 +754,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       failed: false,
       err: undefined,
     };
-    const paid = { n: 0 };
+    const paid: DebtPaid = { n: 0 };
     _payDebt(
       socket,
       meta,
@@ -730,7 +762,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       _viewSnapshotter(verdict),
       paid,
     );
-    if (paid.n > 0) _attributeDebtPaid();
+    if (paid.n > 0) _attributeDebtPaid(paid.user);
     // A failure is recorded like any round's; a success is not an `ok()` for
     // the whole broadcaster — one view building says nothing of the others.
     if (verdict.failed) _stateSerialization.fail(verdict.err);
@@ -747,7 +779,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     meta: ClientMeta,
     why: string,
     fullFor: (meta: ClientMeta) => string | undefined,
-    paid: { n: number },
+    paid: DebtPaid,
   ): boolean {
     if (!meta.needsFull) return true;
     if (socket.readyState !== WebSocket.OPEN) return true; // dies with it
@@ -762,7 +794,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       return true;
     }
     _warnBigFullState(json, meta);
-    const frame = encRaw("state", json);
+    const frame = encState(json, meta.subscriptions);
     try {
       socket.send(frame);
     } catch {
@@ -775,7 +807,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     meta.bpLastSentAt = Date.now();
     // Metered like a round's frame — it IS one, sent outside a round.
     _meterSent(meta, frame);
-    paid.n++;
+    if (paid.n++ === 0) paid.user = meta.user;
     debug?.(
       `broadcast: sending full state (${json.length}B) — client ${
         meta.id.slice(0, 8)
@@ -824,7 +856,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       err: undefined,
     };
     const fullFor = _viewSnapshotter(verdict);
-    const paid = { n: 0 };
+    const paid: DebtPaid = { n: 0 };
     try {
       let any = false;
       for (const [ws, meta] of connections) {
@@ -873,7 +905,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       if (verdict.failed) _stateSerialization.fail(verdict.err);
       // ONE attribution per pass, as a round attributes once however many
       // clients it reached.
-      if (paid.n > 0) _attributeDebtPaid();
+      if (paid.n > 0) _attributeDebtPaid(paid.user);
     }
     return owed;
   }
@@ -980,7 +1012,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     for (const [ws, meta] of connections) {
       if (ws === exclude) continue;
       if (ws.readyState !== WebSocket.OPEN) continue;
-      if (notDraining(_rawLow, ws, ws.bufferedAmount, now)) {
+      if (notDraining(ws, ws.bufferedAmount, now)) {
         _closeNotDraining(ws, meta);
         continue;
       }
@@ -990,16 +1022,38 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     }
   }
 
-  /** Per peer over the mark: its lowest backlog seen and when — see
-   *  `broadcastRaw`. Dropped once it is back under the mark. */
-  const _rawLow = new WeakMap<object, { bytes: number; at: number }>();
-
   /** Close a peer a raw frame could not be delivered to — see `broadcastRaw`.
    *  1013 is "try again later": every aio client reconnects on any close
    *  that is not its own, and the reason says why for anyone else's. Once
    *  per socket by construction — it is no longer OPEN afterwards. */
   /** Clients already told they missed a toast — see `broadcastUi`. */
   const _toastDropWarned = new WeakSet<ClientMeta>();
+  /** …and told their icon frame is held — a separate once, a separate story. */
+  const _iconHeldWarned = new WeakSet<ClientMeta>();
+  /** The LATEST icon frame for each client that was not draining when it was
+   *  sent. An icon is state (latest wins — a skipped `tray: null` would leave
+   *  an animation running), so it is held and sent once the client drains. */
+  const _iconHeld = new Map<WebSocket, string>();
+  const icons = deps.iconReplay ??
+    createIconReplay((m) => log.warn("ws", m));
+  let _iconTimer: ReturnType<typeof setTimeout> | undefined;
+  function _flushIcons(): void {
+    _iconTimer = undefined;
+    for (const [ws, raw] of _iconHeld) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        _iconHeld.delete(ws);
+        continue;
+      }
+      if (ws.bufferedAmount > WS_BUFFER_HIGH_WATER) continue;
+      _iconHeld.delete(ws);
+      try {
+        ws.send(raw);
+      } catch {
+        // aio-ok: a socket mid-close — its reconnect starts from the app's icon
+      }
+    }
+    if (_iconHeld.size > 0) _iconTimer = setTimeout(_flushIcons, 250);
+  }
 
   function _closeNotDraining(ws: WebSocket, meta: ClientMeta): void {
     const held = ws.bufferedAmount;
@@ -1026,13 +1080,31 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   function broadcastUi(raw: string): number {
     let n = 0;
     let dropped: ClientMeta[] | undefined;
+    let held: ClientMeta[] | undefined;
+    const isIcon = isIconFrame(raw);
+    if (isIcon) icons.remember(raw);
     for (const [ws, meta] of connections) {
       try {
         if (ws.readyState !== WebSocket.OPEN) continue;
+        // An icon frame is STATE: never skipped. Over the mark it is held
+        // (replacing an older held one) and sent when the client drains; a
+        // newer one sent now supersedes whatever was held.
+        if (isIcon) {
+          if (ws.bufferedAmount > WS_BUFFER_HIGH_WATER) {
+            _iconHeld.set(ws, raw);
+            (held ??= []).push(meta);
+            _iconTimer ??= setTimeout(_flushIcons, 250);
+          } else {
+            _iconHeld.delete(ws);
+            ws.send(raw);
+          }
+          n++;
+          continue;
+        }
         // The high-water check every other send loop here makes. This one
         // made none, so a notification storm kept feeding a peer that had
         // stopped reading. Unlike `broadcastRaw`, the frame is SKIPPED, not
-        // the peer closed: the only frame on this path is a `notify` toast —
+        // the peer closed: a `notify` toast is
         // fire-and-forget UI with no state behind it, nothing later assumes it
         // arrived, so missing it leaves no gap to repair. Closing a user's
         // connection over a toast would be the disproportionate answer. Not
@@ -1046,6 +1118,19 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       } catch {
         // aio-ok: a socket mid-close; the count is what actually reached one
       }
+    }
+    const freshHeld = (held ?? []).filter((m) => !_iconHeldWarned.has(m));
+    for (const m of freshHeld) _iconHeldWarned.add(m);
+    if (freshHeld.length > 0) {
+      log.warn(
+        "ws",
+        `appIcon: held for ${
+          freshHeld.map((m) => `client #${m.index}`).join(", ")
+        } — not draining the socket (over ${
+          bytes(WS_BUFFER_HIGH_WATER)
+        } of unread frames held); the latest icon is sent once it drains. ` +
+          `(said once per client)`,
+      );
     }
     if (dropped) {
       // Once per socket: a stuck peer during a burst would otherwise print a
@@ -1076,6 +1161,8 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   }
 
   function shutdown(): void {
+    if (_iconTimer !== undefined) clearTimeout(_iconTimer);
+    _iconHeld.clear();
     _liveBuffered.delete(buffered);
     _debtRetry.dispose();
     _unsubscribeRecovered?.();
@@ -1088,6 +1175,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     broadcastTT,
     broadcastRaw,
     broadcastUi,
+    iconReplay: () => icons.frames(),
     flushUrgent: () => coalescer.flushUrgent(),
     /** Broadcast bytes/messages since this process started — see `_lifetime`. */
     lifetimeBroadcast: () => ({ ..._lifetime }),
@@ -1217,6 +1305,26 @@ function _latchFor(owner: object | undefined): BigStateLatch {
     );
   }
   return l;
+}
+
+/** A full `state` frame, naming the cells it COVERS (`s`): the cells of the
+ *  subscription it was filtered by, or `null` when it is the connection's
+ *  whole view. A cell the client holds, that the frame covers and does not
+ *  carry, was WITHHELD (`visible.forUser` failed closed for this user) — the
+ *  client withdraws it instead of keeping its last copy until a reconnect.
+ *  Without `s` an absent cell can also be one the client merely stopped
+ *  subscribing to, which it must keep. Additive: `dec()` keeps unknown
+ *  envelope fields and an older client never reads this one. */
+export function encState(
+  json: string,
+  subs: ReadonlySet<string> | null | undefined,
+): string {
+  const covers = subs
+    ? JSON.stringify([
+      ...new Set([...subs].map((p) => p.split(".", 1)[0])),
+    ])
+    : "null";
+  return `{"v":2,"t":"state","d":${json},"s":${covers}}`;
 }
 
 export function warnBigFullState(

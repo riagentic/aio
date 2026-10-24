@@ -1,5 +1,6 @@
 // Electron main.cjs generator — self-contained client with connect page
 
+import { cpaceSuite } from "../server/cpace.ts";
 import {
   CONNECT_HTML,
   tmplAppMenu,
@@ -10,11 +11,20 @@ import {
   tmplPreloadWrite,
   tmplShowWhenPainted,
   tmplWebGuard,
+  tmplWindowClass,
+  windowClassName,
 } from "./electron-shared.ts";
 
 /** Generates a self-contained Electron main.cjs with a connect page for aio-client */
 /** The client's `app.name` — the name of its profile directory. */
 export const CLIENT_PROFILE = "aio-client";
+
+/** The client window's class (X11 WM_CLASS, Wayland app_id) — and so the
+ *  `StartupWMClass` of the `aio-client.desktop` the client build writes. */
+export const CLIENT_WINDOW_CLASS: string = windowClassName(
+  undefined,
+  CLIENT_PROFILE,
+);
 
 export function electronClientScript(
   bakedUrl?: string | null,
@@ -52,7 +62,7 @@ const crypto = require('crypto');
 
 ${tmplAppMenu("aio client")}
 app.name = '${CLIENT_PROFILE}';
-${tmplCrashGuard()}
+${tmplWindowClass(undefined, CLIENT_PROFILE)}${tmplCrashGuard()}
 ${tmplPermissionGuard()}
 ${tmplWebGuard()}
 ${tmplIpcGuard()}
@@ -712,6 +722,79 @@ function loadProfileFile(file) {
   } catch { return null; }
 }
 
+// CPace (draft-irtf-cfrg-cpace-21, CPACE-X25519-SHA512) — the server's own
+// implementation, embedded as source (src/server/cpace.ts). A minified aio
+// wraps its inner functions in a name helper (KEEP_NAME in
+// src/build/minify-server.ts) this process does not have: defined
+// here — mirrored by hand like blocking-worker.ts's, pinned by
+// tests/emitted-source-minified.test.ts.
+globalThis.__aioName ??= (f, n) => Object.defineProperty(f, 'name', { value: n, configurable: true });
+const CPACE = (${cpaceSuite.toString()})();
+// One POST whose body is made AFTER its connection is up: bodyFor(der) gets
+// the base64 DER of the leaf THIS connection presented ('' over http) — the
+// certificate goes into the CPace generator, so it must be known before the
+// message is. One connection per request (agent: false). Resolves
+// { status, json, der }; a bodyFor that throws fails the request with it.
+function postSeen(url, bodyFor) {
+  return new Promise((resolve, reject) => {
+    const tls = url.startsWith('https');
+    let der = '';
+    const req = (tls ? https : http).request(url, {
+      method: 'POST', timeout: 8000, rejectUnauthorized: false, agent: false,
+      headers: { 'content-type': 'application/json' },
+    }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { if (data.length < 65536) data += chunk; });
+      res.on('end', () => { let j = null; try { j = JSON.parse(data); } catch {} resolve({ status: res.statusCode, json: j, der }); });
+    });
+    req.on('socket', (sock) => sock.once(tls ? 'secureConnect' : 'connect', async () => {
+      try {
+        if (tls) { const peer = sock.getPeerCertificate(); der = peer && peer.raw ? Buffer.from(peer.raw).toString('base64') : ''; }
+        req.end(JSON.stringify(await bodyFor(der)));
+      } catch (e) { req.destroy(e); }
+    }));
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+  });
+}
+const PAKE_RELAY = 'the certificate this client sees is not the one the app serves — a TLS proxy, or something answering in its place. Nothing was sent; pair on the app\\'s own network path.';
+// PAKE pairing (an 8-digit code, pairing: { pake: true }): both sides prove
+// they know the code without sending it, and the exchange is bound to the
+// certificate THIS client sees (its SHA-256 is in CPace's channel
+// identifier). A relay with its own certificate gets keys that do not match
+// and one online guess. Every refusal is final: no fallback to the code.
+async function pairPake(base, pin) {
+  const fpOf = (der) => CPACE.fingerprint(der ? new Uint8Array(Buffer.from(der, 'base64')) : new Uint8Array(0));
+  let st = null, der1 = '';
+  const m1 = await postSeen(base + '/__aio/pair', async (der) => {
+    der1 = der;
+    st = await CPACE.start(pin, await fpOf(der));
+    return { cpace: CPACE.SUITE, sid: CPACE.b64(st.sid), Ya: CPACE.b64(st.Ya) };
+  });
+  if (m1.status !== 200 || !m1.json) return m1;
+  const yb = CPACE.unb64(m1.json.Yb, 32), adb = CPACE.unb64(m1.json.ADb);
+  if (!yb || !adb || typeof m1.json.id !== 'string') throw new Error('the app answered PAKE message 1 with something malformed');
+  // ADb is the app's own word for the certificate it serves: a mismatch is
+  // said here, before a guess is spent. (A relay that forges ADb still fails
+  // below — the certificate is in the generator too.)
+  if (!CPACE.same(adb, await fpOf(der1))) throw new Error(PAKE_RELAY);
+  const f = await CPACE.finish(st, yb, adb);
+  if (!f) throw new Error('the app\\'s PAKE share is invalid — the exchange was aborted');
+  const m2 = await postSeen(base + '/__aio/pair', (der) => {
+    if (der !== der1) throw new Error('the certificate changed between the two pairing requests — ' + PAKE_RELAY);
+    return { cpace: CPACE.SUITE, id: m1.json.id, Ta: CPACE.b64(f.ta) };
+  });
+  if (m2.status !== 200 || !m2.json) return m2;
+  const tb = CPACE.unb64(m2.json.Tb, 64), box = CPACE.unb64(m2.json.box);
+  if (!tb || !box || !CPACE.same(tb, f.tb)) throw new Error('what answered could not prove it knows the code — it is not the app');
+  const text = await CPACE.open(f.isk, st.sid, box);
+  let pr = null; try { pr = JSON.parse(text); } catch {}
+  if (!pr || typeof pr !== 'object') throw new Error('the app\\'s sealed profile did not open');
+  // The certificate the profile names must cover the one this client met.
+  if (der1 && !(typeof pr.cert === 'string' && pinMatches(pr.cert, der1))) throw new Error(PAKE_RELAY);
+  return { status: 200, json: pr };
+}
+
 // PIN pairing — submit the code the app shows on startup; the server returns
 // the full profile (cert + key) so we pin + save + connect forever after.
 async function pairWith(win, info) {
@@ -721,9 +804,13 @@ async function pairWith(win, info) {
     "document.getElementById('err') && (document.getElementById('err').textContent = " + JSON.stringify(m) + ")"
   ).catch(() => {});
   try {
-    const res = await postJson(base + '/__aio/pair', { pin: info.pin });
+    // An 8-digit code is a PAKE code (pairing: { pake: true }): it is never
+    // sent, and there is no fallback — see pairPake.
+    const pake = /^[0-9]{8}$/.test(String(info.pin));
+    const res = pake ? await pairPake(base, String(info.pin)) : await postJson(base + '/__aio/pair', { pin: info.pin });
     if (res.status !== 200 || !res.json || !res.json.key) {
-      throw new Error(res.status === 401 ? 'Invalid or expired pairing code': 'Pairing failed (HTTP ' + res.status + ')');
+      const said = res.json && typeof res.json.error === 'string' ? ': ' + res.json.error : '';
+      throw new Error(res.status === 401 ? 'Invalid or expired pairing code' + (pake && res.json && res.json.hint ? ' — ' + res.json.hint : '') : 'Pairing failed (HTTP ' + res.status + ')' + said);
     }
     const pr = res.json;
     // The pairing reply is as untrusted as a .aioapp file: the same port rule

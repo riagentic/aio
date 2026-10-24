@@ -109,6 +109,29 @@ pub fn shortcut_file_name(title: &str) -> String {
         .to_owned()
 }
 
+/// The AppUserModelID of the app's window — its title, the controls made
+/// spaces, trimmed as JavaScript trims, at most 128 UTF-16 units — or empty.
+/// The app's window sets it (`appUserModelId`, src/server/sfx-shortcut.ts)
+/// and the Start-menu shortcut must carry the same, or the taskbar files the
+/// window under "Electron"; both are checked against ../shortcut-names.json.
+pub fn app_user_model_id(title: &str) -> String {
+    // String.prototype.trim's set: WhiteSpace and LineTerminator.
+    let js_space = |c: char| {
+        matches!(
+            c,
+            '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}'
+                | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
+                | '\u{205f}' | '\u{3000}' | '\u{feff}'
+        )
+    };
+    let spaced: String = title
+        .chars()
+        .map(|c| if c < ' ' || c == '\u{7f}' { ' ' } else { c })
+        .collect();
+    let units: Vec<u16> = spaced.trim_matches(js_space).encode_utf16().take(128).collect();
+    String::from_utf16_lossy(&units)
+}
+
 /// The offset just past the magic: the end of the file, or — for an
 /// Authenticode-signed exe — the start of the certificate table that signing
 /// appended (after padding the file to 8 bytes).
@@ -282,6 +305,18 @@ mod tests {
         for pair in names {
             let (title, file) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
             assert_eq!(shortcut_file_name(title), file, "{title:?}");
+        }
+    }
+
+    #[test]
+    fn app_user_model_ids() {
+        let all: serde_json::Value =
+            serde_json::from_str(include_str!("../shortcut-names.json")).unwrap();
+        let ids = all["ids"].as_array().unwrap();
+        assert!(ids.len() > 5);
+        for pair in ids {
+            let (title, id) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
+            assert_eq!(app_user_model_id(title), id, "{title:?}");
         }
     }
 

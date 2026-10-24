@@ -19,8 +19,11 @@ import {
   tmplAppMenu,
   tmplBounds,
   tmplBoundsTracking,
+  tmplCertificateGuard,
+  tmplChromiumSwitches,
   tmplCrashGuard,
   tmplGuestPreloads,
+  tmplIconFit,
   tmplIpcGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
@@ -34,6 +37,7 @@ import {
   tmplTray,
   tmplWebGuard,
   tmplWillNavigate,
+  tmplWindowClass,
   tmplWindowShape,
   udsPreloadScript,
   udsProdHTML,
@@ -98,9 +102,9 @@ const { app, BrowserWindow, Menu, protocol } = require('electron');
 const { connect } = require('net');
 const path = require('path');
 const fs = require('fs');
-// Electron 41 + Linux: CloudPrintEnable triggers mDNS discovery that blocks window.print() dialog via Avahi timeout
-app.commandLine.appendSwitch('disable-features', 'CloudPrintEnable');
-${tmplAppMenu(opts.meta?.title ?? opts.title)}
+${tmplChromiumSwitches()}${tmplWindowClass(opts.meta, opts.title)}${
+    tmplAppMenu(opts.meta?.title ?? opts.title)
+  }
 app.name = ${JSON.stringify(slug)};
 ${tmplProfileDir(opts.meta?.profileDir)}${
     tmplCrashGuard(opts.meta?.confirmUnload)
@@ -242,6 +246,7 @@ ${tmplWindowShape(opts.meta, { preload: "preloadFile" })}
   }));
   __aioIpcBind(win, _appOrigin); // before any handler can run (tmplIpcGuard)
 
+${tmplIconFit()}
   let __aioIcon = null;
   try {
     const { nativeImage } = require('electron');
@@ -256,11 +261,16 @@ ${tmplWindowShape(opts.meta, { preload: "preloadFile" })}
     const b64 = fs.existsSync(iconPath)
       ? fs.readFileSync(iconPath).toString('base64')
       : ${JSON.stringify(opts.defaultIcon ?? "")};
-    if (b64) {
-      __aioIcon = nativeImage.createFromDataURL('data:image/png;base64,' + b64);
-      win.setIcon(__aioIcon);
-    }
-  } catch {}
+    if (!b64) throw new Error('no ' + iconPath + ' and no default icon was passed');
+    __aioIcon = nativeImage.createFromDataURL('data:image/png;base64,' + b64);
+    if (__aioIcon.isEmpty()) throw new Error((fs.existsSync(iconPath) ? iconPath : 'the default icon') + ' is not an image Electron can read');
+    __aioIcon = __aioIconFit(__aioIcon);
+    win.setIcon(__aioIcon);
+  } catch (e) {
+    // Nothing said "this window has no icon" before: the default just showed.
+    __aioIcon = null;
+    console.warn("⚠ this window has no icon of its own — Electron's default shows: " + ((e && e.message) || e));
+  }
 
 ${tmplTray(opts.meta, "__aioIcon", opts.title)}
 ${tmplShowWhenPainted(opts.meta?.showWhenPainted)}
@@ -946,18 +956,7 @@ ${tmplRendererDiagnostics(true)}
 ${tmplKeyboardShortcuts(opts.meta?.shortcuts)}
 
   if (!USE_PROTOCOL) {
-    // Reads the URL that FAILED (arg 3), compared to this app's own origin —
-    // see the twin in electron-scripts.ts. Checking the app's own URL instead
-    // made this a constant true, trusting every bad cert from every host.
-    app.on('certificate-error', (event, _wc, failedUrl, _err, _cert, cb) => {
-      let sameOrigin = false;
-      try { sameOrigin = new URL(failedUrl).origin === new URL(${
-    JSON.stringify(url)
-  }).origin; } catch { sameOrigin = false; }
-      if (sameOrigin) { event.preventDefault(); cb(true); }
-      else cb(false);
-    });
-  }
+${tmplCertificateGuard(url)}  }
 
   // AIO-73: aio:/// (no host) fails — use aio://app/ (with host component)
   win.loadURL(USE_PROTOCOL ? 'aio://app/': ${JSON.stringify(url)});

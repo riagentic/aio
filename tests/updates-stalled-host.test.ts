@@ -81,20 +81,23 @@ Deno.test({
   async fn() {
     await using host = silentHost();
     const before = new Set(await descendants());
-    // Windows has no /proc: one look at its process table takes seconds, and
-    // git must still be running when it is taken.
+    // Windows has no /proc: one look at its process table takes seconds —
+    // over 12 s on a loaded machine — and git must still be running when it
+    // is taken.
     const pending = gitLsRemote(
       `${host.url}/repo.git`,
       "main",
-      WIN ? 12_000 : 1500,
+      WIN ? 30_000 : 1500,
     );
     // git's transport helper (and git, its parent) is up once the silent host
     // has a connection.
     await host.connected;
     const spawned = (await descendants()).filter((p) => !before.has(p));
+    // Settled before any assert: a throw here left git running into the next
+    // test (its leak check failed for this one's git).
+    const r = await pending;
     // The instrument: git AND its transport helper were both seen.
     assert(spawned.length >= 2, `saw only ${spawned.length} process(es)`);
-    const r = await pending;
     assert(!r.ok);
     const t0 = Date.now();
     let left = await running(spawned);

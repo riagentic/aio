@@ -44,7 +44,7 @@ import type { ComponentFn } from "../air/vdom-types.ts";
 import type { UIElementInfo, UISurfaceNode } from "../air/ui-surface.ts";
 import type { KeyModifiers } from "../air/ui-trigger.ts";
 import { _reshapedNote } from "./ui-test-wire.ts";
-import { _buildTestUI, _dropWindowHold } from "./ui-test-build.ts";
+import { _buildTestUI, _dropWindowHold, _QUEUED } from "./ui-test-build.ts";
 import type { PartialMount } from "./ui-test-build.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -485,6 +485,16 @@ export function testUI(
           e.message = frozenWriteMessage(raw);
         }
         if (e instanceof Error) e.message += _reshapedNote();
+        // Actions queue and run at the next observation point, so a plain read
+        // right after `ui.X.click()` sees the state BEFORE the click.
+        const queued =
+          (ui as unknown as { [_QUEUED]?: () => number })[_QUEUED]?.() ?? 0;
+        if (e instanceof Error && queued > 0) {
+          e.message += `\n  testUI: ${queued} queued action(s) had not run ` +
+            `yet when this failed. Actions run in order at the next observation ` +
+            `point — \`await ui.settle()\` (or \`await ui.expectCell(…)\`) ` +
+            `before reading state or the DOM directly.`;
+        }
         bodyErr = { e };
       }
       // Always dispose. dispose drains the action queue — un-awaited action

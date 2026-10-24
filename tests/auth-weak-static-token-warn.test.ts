@@ -76,3 +76,51 @@ for (const prod of [false, true]) {
     }
   });
 }
+
+// A static map is known at boot, so an entry that names nobody (a bare string,
+// no id) is said THEN — not on the first login, where dev refuses its token.
+// By position, never by token.
+Deno.test("boot warns about a users: entry that names nobody, without its token", async () => {
+  const dir = await tempDir("aio-users-shape-");
+  const lines: string[] = [];
+  const prev = getLogger();
+  setLogger(
+    {
+      logDir: "",
+      pub: (_lvl: string, cat: string, msg?: string) =>
+        lines.push(`${cat} ${msg ?? ""}`),
+      perf: () => {},
+      flush: () => Promise.resolve(),
+      // deno-lint-ignore no-explicit-any
+    } as any,
+  );
+  const tok = crypto.randomUUID();
+  let server;
+  try {
+    server = createServer({
+      port: freePort(),
+      title: "shape",
+      getUIState: () => ({}),
+      dispatch: () => {},
+      baseDir: dir,
+      debug: () => {},
+      distDir: join(dir, "dist"),
+      users: {
+        [crypto.randomUUID()]: { id: "alice", role: "user" },
+        // deno-lint-ignore no-explicit-any
+        [tok]: "bob" as any,
+      },
+    });
+  } finally {
+    setLogger(prev);
+  }
+  try {
+    const warn = lines.filter((l) => l.includes("users: entry"));
+    assertEquals(warn.length, 1, lines.join("\n"));
+    assert(warn[0]!.includes("#2") && warn[0]!.includes("a string"), warn[0]);
+    assert(!warn[0]!.includes(tok), "the token itself is never logged");
+  } finally {
+    await server.shutdown();
+    await dropTempDir(dir);
+  }
+});

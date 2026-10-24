@@ -2,6 +2,7 @@
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
 import { keepServerOf, windowSizeOf } from "./config-sources.ts";
+import { parentPidOf } from "./process-liveness.ts";
 import {
   contentSecurityPolicy,
   cspNonce,
@@ -70,7 +71,7 @@ import {
   RESTART_EXIT_CODE,
   restartBlockedReason,
 } from "./dev-restart.ts";
-import { count } from "../diagnostics/fmt.ts";
+import { count, thrownText } from "../diagnostics/fmt.ts";
 import { redactUrlToken } from "../diagnostics/redact.ts";
 
 /** Where a server that outlives its window is reached — pure. An app with a
@@ -251,23 +252,9 @@ export const WINDOWLESS_STOP_LINE =
   "it. The reason is the line above; reinstalling the app repairs a damaged " +
   "copy.";
 
-/** Parse `AIO_PARENT_PID`: decimal digits, integer > 0, else absent.
- *
- *  Same vocabulary as `--port` / `AIO_PORT` (`intArg` / `envPort`): `Number()`
- *  also accepts `0x1A2B`, `1e3`, `+42` and `0b101`, four spellings nobody types
- *  on purpose. A non-decimal value used to arm the parent watch against a
- *  surprising pid (or, on the Electron window, a *different* one from the
- *  server) — now both sides treat it as unset. Pure so a test can pin the
- *  refuse list without reloading the module.
- *
- *  @decider */
-export function parentPidOf(raw: string | undefined): number | undefined {
-  if (raw === undefined || raw.trim() === "") return undefined;
-  const s = raw.trim();
-  const n = Number(s);
-  if (!/^\d+$/.test(s) || !Number.isInteger(n) || n <= 0) return undefined;
-  return n;
-}
+// `parentPidOf` lives in process-liveness.ts (a leaf the lock and the dev
+// supervisor import too — ONE parser of AIO_PARENT_PID); re-exported here.
+export { parentPidOf };
 
 /** One parent watch per process — see `AIO_PARENT_PID` in startLifecycle. */
 let _parentWatched = false;
@@ -439,6 +426,9 @@ export interface LifecycleDeps<S, A> {
   // Network
   port: number;
   token: string | undefined;
+  /** `pairing: { pake: true }` — the boot banner's code is an 8-digit PAKE
+   *  code (pairing.ts / cpace.ts). */
+  pairingPake?: boolean;
   users: Record<string, AioUser> | undefined;
   /** True when ANY per-user auth is configured (`users`, `resolveUser`, or
    *  `auth: true`) — the deciders that make an exposed app secured WITHOUT a
@@ -689,19 +679,19 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // outcome is routed to the same place either way.
   if (onStart) {
     const failed = (e: unknown) => {
-      log.error(`hook onStart: ${e}`);
+      log.error(`hook onStart: ${thrownText(e)}`);
       diagEmit({
         type: "hook-start-failed",
         severity: "error",
         source: "lifecycle",
         message: "onStart hook threw — app may be in broken state",
-        detail: { error: String(e) },
+        detail: { error: thrownText(e) },
         hint:
           "Check your onStart callback. The app continues running but may not be fully initialized.",
       });
       if (fatalOnStart) {
         log.error("fatalOnStart is true — exiting due to onStart failure");
-        Deno.exit(1);
+        void exitAfterFatalStart();
       }
     };
     try {
@@ -725,7 +715,18 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // itself — gracefully, every phase — when that pid is gone. Opt-in, same in
   // dev and prod, observe-only until the parent actually disappears.
   if (!libraryMode && !_parentWatched) {
-    const parentPid = parentPidOf(Deno.env.get("AIO_PARENT_PID") ?? undefined);
+    const rawParent = Deno.env.get("AIO_PARENT_PID");
+    const parentPid = parentPidOf(rawParent);
+    // Set but unusable: the launcher asked for "die with me" and would not
+    // get it — an orphan that keeps serving, with nothing said.
+    if (parentPid === undefined && rawParent?.trim()) {
+      log.warn(
+        `AIO_PARENT_PID=${
+          JSON.stringify(rawParent)
+        } is not a process id (decimal digits, > 0) — ignored: this app ` +
+          `will NOT stop when the process that started it is gone`,
+      );
+    }
     if (parentPid !== undefined) {
       _parentWatched = true;
       const timer = setInterval(() => {
@@ -974,8 +975,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     // profile (cert + key) and connect forever — no file to hand over.
     // Scoped to this app's key: a process hosting two apps shows two codes,
     // and each pairs only its own app (see pairing.ts).
-    const pin = generatePin(token);
-    log.info(`pair code: ${pin}  (enter it in the aio client → Add app)`);
+    const pin = generatePin(token, { pake: deps.pairingPake });
+    log.info(
+      `pair code: ${pin}  (enter it in the aio client → Add app)` +
+        (deps.pairingPake ? " — PAKE: the code never crosses the wire" : ""),
+    );
   }
 
   // LAN discovery — exposed apps answer UDP broadcast probes so the aio
@@ -1115,6 +1119,8 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       colors: identityDialogColors(hue, electronConfig?.downloadWindow),
 
       tray: ui.tray,
+      // The window class (X11 WM_CLASS, Wayland app_id) — windowClassName.
+      appId,
       // WHICH Chromium profile this window opens. Two homes of one app are
       // two instances (the lock key says so) and must not share one userData
       // directory — the shared cache is what answered
@@ -1593,6 +1599,8 @@ export type LifecycleHooks = {
 };
 
 let _ending: Promise<void> | null = null;
+/** A fatal `onStart` asked for the exit — see `exitAfterFatalStart`. */
+let _fatalExit = false;
 
 /** Deferred by a macrotask, run once: the shutdown contract for EVERY app in
  *  the process, then `act`, then exit. A second call while one is in flight
@@ -1618,13 +1626,28 @@ function endProcess(
           );
         } finally {
           _ending = null;
-          exit(code);
+          const fatal = _fatalExit;
+          _fatalExit = false;
+          exit(fatal ? 1 : code);
           resolve();
         }
       })();
     }, 0);
   });
   return _ending;
+}
+
+/** `fatalOnStart`: end the process with exit 1 — after the full shutdown
+ *  contract, like every other stop. A bare `Deno.exit(1)` skipped it: no
+ *  final persist, no `onStopping`/`onStop`, worker cells never drained, so
+ *  every write committed since the last flush (the failing `onStart`'s own
+ *  included) was gone on the next launch. @internal */
+export function exitAfterFatalStart(hooks: LifecycleHooks = {}): Promise<void> {
+  // Non-zero from this line on: an `unload` confirm reads the code, and a
+  // stop/restart already in flight (which this joins) must not exit 0.
+  _fatalExit = true;
+  Deno.exitCode = 1;
+  return endProcess(() => {}, 1, hooks);
 }
 
 /** Stop the app cleanly: every app in this process runs its full shutdown

@@ -30,10 +30,15 @@ import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { DENO_JSON_NAMES, parseDenoJson } from "../server/deno-json.ts";
 import { HEY } from "../diagnostics/fmt.ts";
 import { redactUrlToken } from "../diagnostics/redact.ts";
-import { neutralCwd, spawnInheritingOrNull } from "../server/no-console.ts";
+import {
+  firstRunVerdict,
+  neutralCwd,
+  spawnInheritingOrNull,
+} from "../server/no-console.ts";
 import { sharedElectronDir, sharedRuntimeForStart } from "./shared-runtime.ts";
 import { autoPruneSharedStore } from "./shared-prune.ts";
 import { launchArtifactPath } from "../server/updates-apply.ts";
+import { alignShortcutAumid, appUserModelId } from "../server/sfx-shortcut.ts";
 import {
   bakedElectronRuntime,
   bakedElectronVersion,
@@ -1528,9 +1533,7 @@ export const MAIN_SCRIPT_SELF_REMOVE =
  *  not emitted for them. Pure.
  *  @internal exported for its test */
 export function mainScriptAumid(title: string | undefined): string {
-  const id = (title ?? "")
-    // deno-lint-ignore no-control-regex
-    .replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 128);
+  const id = appUserModelId(title);
   return id
     ? `if (process.platform === 'win32') require('electron').app.` +
       `setAppUserModelId(${JSON.stringify(id)});\n`
@@ -1665,6 +1668,28 @@ async function spawnElectron(
   // nothing aio needs; the binary it would start is started directly. A real
   // binary ($ELECTRON_PATH, a packaged or fetched runtime) is returned as is.
   const bin = await realElectronBin(launcher);
+  // Windows holds the first start of an executable it has not run before —
+  // for seconds, inside `spawn()`, with the event loop stopped. Waited out
+  // here instead, off the loop (see `firstRunVerdict`).
+  const verdict = await firstRunVerdict(bin);
+  if (verdict !== "given" && verdict !== "not-windows") {
+    log.warn("electron", `the window's first start may pause: ${verdict}`);
+  }
+  // The Start-menu shortcut files the window under the app's own name and
+  // icon on the taskbar only when it carries the window's AppUserModelID.
+  const aumid = alignShortcutAumid({
+    install: dirname(Deno.execPath()),
+    title: opts.title,
+  });
+  if (aumid === "set") {
+    log.info("electron", "the Start-menu shortcut now carries the window's id");
+  } else if (aumid !== "kept") {
+    log.warn(
+      "electron",
+      `the taskbar may show this window as "Electron": the Start-menu ` +
+        `shortcut could not be given its id — ${aumid}`,
+    );
+  }
   // DECIDED BEFORE the temp file exists: a refusal must not leave the script
   // it would have run behind in /tmp.
   const sandbox = await sandboxSwitches(bin, !!opts.requireSandbox);

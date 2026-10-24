@@ -21,7 +21,7 @@ import { isStandalone, resolveAppDir, resolveEntry } from "./config-rules.ts";
 export { isStandalone, resolveAppDir, resolveEntry };
 import { resolveMacHost } from "./dmg.ts";
 import { resolveSplash } from "./splash.ts";
-import { declaredHue } from "./app-icon.ts";
+import { declaredThemeHue, type HueKey } from "./app-icon.ts";
 import { type SplashSpec, splashWithVersion } from "../electron/splash.ts";
 import { isValidBundleId } from "./build-ios.ts";
 // The bundle-id shape rule is Apple's, and iOS already owns its one copy.
@@ -232,6 +232,9 @@ export interface BuildConfig {
    *  `_cameraPermission` in build-android.ts for the other half (the WebView
    *  says which key to add when a page asks for a camera it cannot have). */
   androidCamera: boolean;
+  /** deno.json `android.schemes` — the deep-link URL schemes the APK opens
+   *  (`_androidSchemes`; `_deepLinkFilters` in build-android.ts). */
+  androidSchemes?: string[];
   /** deno.json `android.colorScheme` — which of light/dark the APK's page
    *  sees (`prefers-color-scheme`). See `_androidColorScheme`. */
   androidColorScheme: "system" | "dark" | "light";
@@ -251,9 +254,10 @@ export interface BuildConfig {
   binaryName: string;
   appTitle: string | undefined;
   /** deno.json `hue` — the identity colour chosen instead of hashed from
-   *  `binaryName` (`declaredHue`). Every generated icon, theme and splash
-   *  reads `hue ?? appId ?? binaryName`. */
-  hue?: number;
+   *  `binaryName` (`declaredHue`), with deno.json `neutral` on it
+   *  (`declaredThemeHue`). Every generated icon, theme and splash reads
+   *  `hue ?? appId ?? binaryName`. */
+  hue?: HueKey;
   /** deno.json `appId`, slugged — the id the binary RUNS as whatever its file
    *  is named (the fleet names files by `title`, else the folder), so the key
    *  every generated icon, theme and splash hashes and the monogram's letter
@@ -383,6 +387,59 @@ function assertKnownFlags(args: readonly string[]): void {
 export function _androidCamera(raw: unknown): boolean | null {
   if (raw === undefined) return false;
   return typeof raw === "boolean" ? raw : null;
+}
+
+/** URL schemes an app may not claim as its own deep link: the web's, the
+ *  system's and the ones other apps already answer. */
+const RESERVED_SCHEMES = new Set([
+  "http",
+  "https",
+  "file",
+  "content",
+  "intent",
+  "javascript",
+  "data",
+  "about",
+  "blob",
+  "ws",
+  "wss",
+  "android-app",
+  "market",
+  "tel",
+  "mailto",
+  "sms",
+  "smsto",
+  "mms",
+  "geo",
+  "chrome",
+]);
+
+/** deno.json `android.schemes` — the URL schemes the APK opens
+ *  (`myapp://…`), validated: an array of RFC 3986 schemes in lower case,
+ *  none of the reserved ones. Absent → `[]`. `{ error }` names what is wrong
+ *  (refused by name, like `android.camera`). Pure. */
+export function _androidSchemes(raw: unknown): string[] | { error: string } {
+  if (raw === undefined) return [];
+  const bad = (why: string) => ({
+    error: `deno.json android.schemes ${why} — it is the list of URL ` +
+      `schemes the APK opens, e.g. ["myapp"] for myapp://…`,
+  });
+  if (!Array.isArray(raw)) {
+    return bad(`must be an array, not ${JSON.stringify(raw)}`);
+  }
+  for (const s of raw) {
+    if (typeof s !== "string" || !/^[a-z][a-z0-9+.-]*$/.test(s)) {
+      return bad(
+        `has ${JSON.stringify(s)}: a scheme is lower-case letters, digits, ` +
+          `"+", "-" or "." after a first letter (Android matches them ` +
+          `case-sensitively, so "MyApp" would never match)`,
+      );
+    }
+    if (RESERVED_SCHEMES.has(s)) {
+      return bad(`has "${s}", which belongs to the system or the web`);
+    }
+  }
+  return [...new Set(raw as string[])];
 }
 
 /** deno.json `android.colorScheme`, validated — `null` for a value that is
@@ -530,17 +587,18 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   // `build.splash` — checked on EVERY build (a key validated only when it
   // fires is a typo that ships), its image included.
   // deno.json `hue` — refused here, on every build, rather than drawn wrong.
-  let hue: number | undefined;
-  try {
-    hue = declaredHue(mainConfig);
-  } catch (e) {
-    console.error(`${NO} ${(e as Error).message}`);
-    Deno.exit(1);
-  }
   const declaredAppId = typeof mainConfig.appId === "string" &&
       mainConfig.appId
     ? slugify(mainConfig.appId)
     : undefined;
+  // …and `neutral`, which rides on the same key (`declaredThemeHue`).
+  let hue: HueKey | undefined;
+  try {
+    hue = declaredThemeHue(mainConfig, declaredAppId ?? binaryName);
+  } catch (e) {
+    console.error(`${NO} ${(e as Error).message}`);
+    Deno.exit(1);
+  }
   const splashDecl = resolveSplash(mainConfig, {
     root,
     appId: hue ?? declaredAppId ?? binaryName,
@@ -645,7 +703,12 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   // moment it was compiled.
 
   const androidCfg = mainConfig.android as
-    | { applicationId?: string; camera?: unknown; colorScheme?: unknown }
+    | {
+      applicationId?: string;
+      camera?: unknown;
+      colorScheme?: unknown;
+      schemes?: unknown;
+    }
     | undefined;
   const androidApplicationId = androidCfg?.applicationId;
   // `android.camera` — opt-in, and CHECKED ON EVERY BUILD, not only an android
@@ -661,6 +724,12 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
         JSON.stringify(androidCfg?.camera)
       } — it decides whether the APK declares android.permission.CAMERA`,
     );
+    Deno.exit(1);
+  }
+  // `android.schemes` — deep links, checked on every build like the camera.
+  const androidSchemes = _androidSchemes(androidCfg?.schemes);
+  if ("error" in androidSchemes) {
+    console.error(`${NO} ${androidSchemes.error}`);
     Deno.exit(1);
   }
   const androidColorScheme = _androidColorScheme(androidCfg?.colorScheme);
@@ -707,6 +776,13 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
       Deno.exit(1);
     }
     if (release.secretWarning) console.warn(`${HEY} ${release.secretWarning}`);
+  }
+  // Misspelt or invalid android keys: said on every build, never refused.
+  if (mainConfig.android !== undefined || androidBuild !== undefined) {
+    const { _androidConfigWarnings } = await import("./build-android.ts");
+    for (const w of _androidConfigWarnings(mainConfig)) {
+      console.warn(`${HEY} ${w}`);
+    }
   }
   const androidDevUrl = Deno.args.find((a) =>
     a.startsWith("--android-dev-url=")
@@ -778,6 +854,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     androidDevUrl,
     androidApplicationId,
     androidCamera,
+    androidSchemes,
     androidColorScheme,
     allowServerOnly: Deno.args.includes("--allow-server-only"),
     entryFromFlag: entryArg !== undefined,

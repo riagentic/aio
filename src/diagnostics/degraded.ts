@@ -463,6 +463,7 @@ export function degradedReport(): {
 
 /** Test hook: how many trackers are live right now. A long-running server
  *  must not accumulate one per resource ever touched. */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _degradedRegistrySize(): number {
   return _registry.size;
 }

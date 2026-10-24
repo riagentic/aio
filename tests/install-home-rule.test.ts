@@ -96,7 +96,7 @@ Deno.test("install.ps1 + run.ps1: aio is installed under the RUNTIME's home (HOM
       "if (Test-Path -LiteralPath (Join-Path $old '.git')) { return $old }",
     );
     const fresh = dflt[1]!.indexOf(
-      "return Join-Path (Get-AioUserHome) '.local\\lib\\aio'",
+      "return [System.IO.Path]::Combine((Get-AioUserHome), '.local\\lib\\aio')",
     );
     assert(old > 0 && fresh > old, `${script}: ${dflt[1]}`);
     assertStringIncludes(
@@ -189,7 +189,7 @@ Deno.test("am update + am upgrade: the aio home is the installers' ONE rule — 
         "$old = Join-Path $env:USERPROFILE '.local\\lib\\aio'",
         "if (Test-Path -LiteralPath (Join-Path $old '.git')) { return $old }",
         "}",
-        "return Join-Path (Get-AioUserHome) '.local\\lib\\aio'",
+        "return [System.IO.Path]::Combine((Get-AioUserHome), '.local\\lib\\aio')",
       ],
       script,
     );

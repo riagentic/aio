@@ -31,7 +31,14 @@ const lines = [
   "",
   "export const ANDROID_TEMPLATE: Record<string, string> = {",
   ...entries.map(([path, content]) =>
-    `  ${JSON.stringify(path)}: ${JSON.stringify(content)},`
+    // Kotlin's own `${…}` string templates are source, not a lost interpolation.
+    path.endsWith(".kt") && content.includes("${")
+      ? `  ${
+        JSON.stringify(path)
+      }: // aio-ok(placeholders): Kotlin string templates\n    ${
+        JSON.stringify(content)
+      },`
+      : `  ${JSON.stringify(path)}: ${JSON.stringify(content)},`
   ),
   "}",
   "",

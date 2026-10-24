@@ -22,6 +22,7 @@ import { CONNECT_HTML } from "../src/electron/electron-shared.ts";
 import { generateRoot, issueLeaf } from "../src/server/x509.ts";
 import { ROOT_PERMITTED_DNS, ROOT_PERMITTED_IPS } from "../src/server/tls.ts";
 import { answerPinProof } from "../src/server/pin-proof.ts";
+import { NO_USER_DATA } from "./no-user-data.ts";
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -144,7 +145,8 @@ function boot(
       on: (n: string, f: (...a: unknown[]) => void) => {
         handlers[n] = f;
       },
-      getPath: () => opts.userData ?? "/nonexistent-aio-client-test",
+      getPath: () => opts.userData ?? NO_USER_DATA,
+      setDesktopName() {}, // its window class (electron-shell-parity.test.ts)
       quit() {},
       // Asked for only on darwin (the dock); never ready in a unit test.
       whenReady: () => new Promise(() => {}),
@@ -1195,7 +1197,7 @@ Deno.test("aio-client strict pin: a pinned host with ANOTHER certificate gets no
 
 Deno.test("aio-client strict pin: the page load is refused even for a host on the validated list, and for a certificate Chromium itself would accept", async () => {
   const { rootA, a1, a2, b1 } = await pki();
-  const c = boot({ strictPin: true, userData: "/nonexistent-aio-client-test" });
+  const c = boot({ strictPin: true, userData: NO_USER_DATA });
   c.api.pinCert(new URL(HOST).host, a1.certPem + rootA.certPem);
   // The door the default leaves open: connectTo validated the address.
   c.api._trustedHosts.add(new URL(HOST).host);

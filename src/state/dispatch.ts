@@ -81,6 +81,69 @@ export function markInflight<T extends object>(
   return { ...action, [INFLIGHT]: true };
 }
 
+/** Async-method write-sets still waiting for their microtask flush.
+ *
+ *  A non-transactional async method's writes are coalesced and dispatched on a
+ *  microtask. Until then they were invisible to everyone else, so any action
+ *  issued in between — a sync `inc()` in the same tick, a second call's
+ *  `s.n++`, three calls resuming from one awaited promise — read the old value
+ *  and its commit silently overwrote theirs: `Promise.all([c.inc(), c.inc()])`
+ *  ended at 1. The microtask is only a coalescing window, never a reordering:
+ *  a write made BEFORE an action is enqueued, or before another call reads
+ *  state, commits first. */
+const _unflushed = new Set<() => void>();
+
+/** Register (`on`) or drop a batcher's pending flush. @internal */
+export function _trackUnflushed(flush: () => void, on: boolean): void {
+  if (on) _unflushed.add(flush);
+  else _unflushed.delete(flush);
+}
+
+/** Set for the one `dispatch()` call a write-set flush makes — see
+ *  {@link _dispatchWriteSet}. */
+let _writeSetNext = false;
+let _writeSetLanded: (() => void) | undefined;
+
+/** Dispatch an async method's write-set. While the loop is draining it goes
+ *  AHEAD of every action still queued: its writes were made before any of
+ *  those reduce, so landing behind them let the late write-set overwrite what
+ *  they did — `async a(s) { s.n += 1; c.inc() }` (or a transaction's
+ *  `s.$commit()`) in a call's first frame, whose body runs inside the loop,
+ *  ended with the `+10` lost. Ahead of the queue, in the order made.
+ *  `landed` runs the moment it is reduced — committed, or refused with the
+ *  state left as it was — inline or queued.
+ *  @internal */
+export function _dispatchWriteSet<T>(
+  dispatch: () => T,
+  landed?: () => void,
+): T {
+  _writeSetNext = true;
+  _writeSetLanded = landed;
+  try {
+    return dispatch();
+  } finally {
+    _writeSetNext = false;
+    _writeSetLanded = undefined;
+  }
+}
+
+/** For a dispatcher of its own (testCell's): take the landing callback of
+ *  the write-set being dispatched right now, to call once it has reduced.
+ *  @internal */
+export function _takeWriteSetLanded(): (() => void) | undefined {
+  const landed = _writeSetLanded;
+  _writeSetNext = false;
+  _writeSetLanded = undefined;
+  return landed;
+}
+
+/** Commit every pending async write-set except `except`'s own. @internal */
+export function flushUnflushedWrites(except?: () => void): void {
+  const n = _unflushed.size;
+  if (n === 0 || (n === 1 && except && _unflushed.has(except))) return;
+  for (const f of [..._unflushed]) if (f !== except) f();
+}
+
 /** Performance budgets in milliseconds */
 
 /** `"cell:method"` for an async-method exec effect, else null.
@@ -222,7 +285,7 @@ export function _isTTPausedRefusal(e: unknown): boolean {
 export { deepFreeze } from "./immutable.ts";
 import { deepFreeze } from "./immutable.ts";
 import { cloneExecEffect, isExecEffect } from "./exec-effect.ts";
-import { count, overLimit } from "../diagnostics/fmt.ts";
+import { count, describeThrown, overLimit } from "../diagnostics/fmt.ts";
 import { _outsideTracking } from "./signal.ts";
 import { _captureCaller, type Reenter } from "./method-policy.ts";
 
@@ -403,13 +466,9 @@ export function createDispatch<S, A, E>(
     getState,
     setState,
     onDone,
-    log,
-    onPerf,
-    perfLog,
     perfCheck,
     perfBudget,
   } = deps;
-  const getBreakdown = deps.reduceBreakdown;
   const effectTimeout = deps.effectTimeout ?? 30_000; // 0 = disabled
   const perfEnabled = perfCheckOn(perfCheck); // default: on
   const reduceBudget = perfBudget?.reduce ?? DEFAULT_REDUCE_BUDGET;
@@ -447,8 +506,13 @@ export function createDispatch<S, A, E>(
     cid: string;
     /** The caller's `ttl`/`"first"` read scope — see `_captureCaller`. */
     enter?: Reenter;
+    /** A queued write-set's commit callback — see `_dispatchWriteSet`. */
+    landed?: () => void;
   };
   const queue: QueueEntry[] = [];
+  // Write-sets queued ahead of everything else and not yet reduced — the
+  // next one goes behind them (`_dispatchWriteSet`).
+  let ahead = 0;
 
   const _reportOpts: ReportErrorOpts = {
     onError: deps.reportOpts?.onError,
@@ -461,6 +525,58 @@ export function createDispatch<S, A, E>(
     redactState: deps.reportOpts?.redactState,
     redactAction: deps.reportOpts?.redactAction,
   };
+
+  // OBSERVE-ONLY never breaks dispatch — the rule the hooks already follow,
+  // applied to every reporting call the drain makes: a log line, an error
+  // report, a diagnostic event, a perf callback. Unguarded, a logger that
+  // threw (a test's console stub JSON-parsing a perf line an over-budget
+  // reducer printed) escaped the drain and aborted the action with
+  // DISPATCH_ABORTED — the reporter decided whether the state changed. Every
+  // reporter the loop calls goes through `observe`; a failure is counted in
+  // `errorCount()` and said once on the raw console.
+  let observeFailed = false;
+  function observe(fn: () => void): void {
+    try {
+      fn();
+    } catch (e) {
+      errors++;
+      if (observeFailed) return;
+      observeFailed = true;
+      try {
+        // aio-ok: raw console on purpose — the levelled logger is what just
+        // threw (or may), so it cannot carry the line that says so.
+        console.error(
+          `aio dispatch: a reporter (logger, onError, onPerf, perfLog or a ` +
+            `diagnostic listener) threw; the action was NOT affected, the ` +
+            `report was lost (further reporter failures are counted in ` +
+            `errorCount(), not printed): ${describeThrown(e)}`,
+        );
+      } catch {
+        // aio-ok: the console itself threw — no channel is left to say it;
+        // errorCount() above still counts the failure.
+      }
+    }
+  }
+  const log: DispatchDeps<S, A, E>["log"] = {
+    debug: (m) => observe(() => deps.log.debug(m)),
+    warn: (m) => observe(() => deps.log.warn(m)),
+    error: (m) => observe(() => deps.log.error(m)),
+  };
+  const report = (err: AioError) =>
+    observe(() => reportAioError(err, _reportOpts));
+  const emit = (ev: Parameters<typeof diagEmit>[0]) =>
+    observe(() => diagEmit(ev));
+  const onPerf = deps.onPerf &&
+    ((t: PerfTiming) => observe(() => deps.onPerf!(t)));
+  const perfLog = deps.perfLog &&
+    ((...a: Parameters<NonNullable<DispatchDeps<S, A, E>["perfLog"]>>) =>
+      observe(() => deps.perfLog!(...a)));
+  const getBreakdown = deps.reduceBreakdown &&
+    ((): ReduceBreakdown | undefined => {
+      let b: ReduceBreakdown | undefined;
+      observe(() => b = deps.reduceBreakdown!());
+      return b;
+    });
 
   function tag(v: unknown): string {
     const o = v as Record<string, unknown>;
@@ -559,7 +675,7 @@ export function createDispatch<S, A, E>(
         repeatOffender: perfCell ? _countBudgetMiss(perfCell) : false,
       },
     );
-    reportAioError(err, _reportOpts);
+    report(err);
     if (perfLog) {
       perfLog(source, type ?? "unknown", duration, budget, getBreakdown?.());
     }
@@ -583,16 +699,16 @@ export function createDispatch<S, A, E>(
         `(state diffs, action log, checkpoint, journal, timeline). ` +
         `Observe-only hooks never break dispatch, so this was reported and ` +
         `swallowed (further failures of this action type are counted, not ` +
-        `logged). Original: ${e instanceof Error ? e.message : String(e)}`,
+        `logged). Original: ${describeThrown(e)}`,
       { cellName: actionType.split(":")[0], actionType },
     );
-    reportAioError(err, _reportOpts);
-    diagEmit({
+    report(err);
+    emit({
       type: "hook-error",
       severity: "error",
       source: "dispatch",
       message: `afterAction hook threw for '${actionType}': ${
-        e instanceof Error ? e.message : String(e)
+        describeThrown(e)
       }`,
       detail: { actionType },
       hint:
@@ -631,6 +747,11 @@ export function createDispatch<S, A, E>(
   }
 
   function dispatchNow(action: A): Promise<unknown> {
+    // Read once, at the door: a dispatch the reduce below makes is not it.
+    const writeSet = _writeSetNext;
+    const landed = _writeSetLanded;
+    _writeSetNext = false;
+    _writeSetLanded = undefined;
     // TIME TRAVEL PAUSED — refuse, don't pretend.
     //
     // This drop used to happen inside `reduce`, which returned the state
@@ -773,7 +894,7 @@ export function createDispatch<S, A, E>(
         `dispatch queue depth exceeded (${QUEUE_MAX})`,
         { actionType: (action as Record<string, unknown>)?.type as string },
       );
-      reportAioError(err, _reportOpts);
+      report(err);
       return rejectDropped(err);
     }
     let resolve!: (value?: unknown) => void;
@@ -785,8 +906,21 @@ export function createDispatch<S, A, E>(
     // Swallow the unhandled-rejection that would otherwise surface for
     // fire-and-forget callers (B-4: awaiters still receive the rejection).
     promise.catch(() => {});
+    // Writes an async method made before this action was issued land first.
+    // Only outside a drain: there a flush would QUEUE the write-set, and the
+    // method still running would stop reading its own writes until it lands.
+    if (!dispatching) flushUnflushedWrites();
     const cid = generateCorrelationId();
-    queue.push({ action, resolve, reject, cid, enter: _captureCaller() });
+    const queued: QueueEntry = {
+      action,
+      resolve,
+      reject,
+      cid,
+      enter: _captureCaller(),
+    };
+    if (writeSet) queued.landed = landed;
+    if (writeSet && dispatching) queue.splice(ahead++, 0, queued);
+    else queue.push(queued);
     if (dispatching) return promise;
     dispatching = true;
 
@@ -805,7 +939,7 @@ export function createDispatch<S, A, E>(
               `dispatch overflow (${DISPATCH_MAX} iterations, depth ${depth}) — possible infinite loop`,
               { actionType: tag(queue[0]!.action) },
             );
-            reportAioError(err, _reportOpts);
+            report(err);
             // B-4: dropped actions must REJECT, not resolve — `await cell.method()`
             // has to learn the state change was never applied. Same contract as
             // close() and QUEUE_OVERFLOW above.
@@ -813,19 +947,32 @@ export function createDispatch<S, A, E>(
               entry.reject(err);
             }
             queue.length = 0;
+            ahead = 0;
             try {
               onDone();
             } catch (e) {
               const err2 = createAioError("EFFECT_ERROR", e, {
                 actionType: "onDone",
               });
-              reportAioError(err2, _reportOpts);
+              report(err2);
             }
             clearCorrelationId();
             overflowed = true;
             break;
           }
+          // An async method whose body ran in the previous entry's effects
+          // (every call's first frame does: its body IS an effect) left its
+          // writes on a microtask — and this loop is synchronous, so every
+          // action already queued, and every call or `$do` that body issued,
+          // reduced BEFORE them, and the late write-set then overwrote what
+          // those reduced: `async a(s) { s.n += 1; c.inc() }` ended at 1, not
+          // 11. Those writes were MADE before the next entry runs, so they
+          // land before it (`_dispatchWriteSet` puts them ahead). Not inside
+          // the body itself (the enqueue above): a flush there would hide the
+          // still-running frame's own writes from it.
+          flushUnflushedWrites();
           const entry = queue.shift()!;
+          if (ahead > 0) ahead--;
           inFlight = entry;
           setCorrelationId(entry.cid);
           const current = entry.action;
@@ -866,7 +1013,7 @@ export function createDispatch<S, A, E>(
                 ? { rejected: rejectionLine(actionType ?? "?", e) }
                 : {}),
             }, getState() as Record<string, unknown>);
-            reportAioError(err, _reportOpts);
+            report(err);
             // Said right after the rejection, because the rejection's own
             // words ("no state changed") are true of the CALLER and false of
             // the app: the queued action below commits. Silence here left the
@@ -886,12 +1033,12 @@ export function createDispatch<S, A, E>(
             // paths emitted, so the blank-screen health card stayed silent
             // while a reducer crashed on every dispatch.
             if (!refusal) {
-              diagEmit({
+              emit({
                 type: "reduce-error",
                 severity: "error",
                 source: "dispatch",
                 message: `Reduce threw for action '${actionType ?? "?"}': ${
-                  e instanceof Error ? e.message : String(e)
+                  describeThrown(e)
                 }`,
                 detail: {
                   actionType,
@@ -904,6 +1051,7 @@ export function createDispatch<S, A, E>(
             // B-4: a reducer throw means the state change never applied —
             // `await cell.method()` must learn the action failed, not resolve
             // cleanly. Mirrors QUEUE_OVERFLOW / DISPATCH_CLOSED contract.
+            entry.landed?.(); // refused: it reduced to the state as it was
             entry.reject(err);
             inFlight = null;
             clearCorrelationId();
@@ -930,7 +1078,7 @@ export function createDispatch<S, A, E>(
               }`,
               { cellName: actionType?.split(":")[0], actionType },
             );
-            reportAioError(err, _reportOpts);
+            report(err);
             // B-4: malformed reduce shape = action not applied — reject the
             // awaiter so `await cell.method()` learns the failure rather than
             // resolving as if the state had advanced.
@@ -980,7 +1128,7 @@ export function createDispatch<S, A, E>(
                     effectType: effType,
                   },
                 );
-                reportAioError(err, _reportOpts);
+                report(err);
                 // do NOT push — drop the effect rather than corrupt its payload
               }
             }
@@ -1012,6 +1160,7 @@ export function createDispatch<S, A, E>(
             ? deepFreeze(reduced.state)
             : Object.freeze(reduced.state);
           setState(nextState);
+          entry.landed?.();
           if (
             deps.debug && prev !== reduced.state &&
             typeof reduced.state === "object" && reduced.state &&
@@ -1073,7 +1222,7 @@ export function createDispatch<S, A, E>(
                   `reducer returned invalid effect (missing .type string) — ` +
                     `skipping. Action was: ${actionType} (logged once per action)`,
                 );
-                diagEmit({
+                emit({
                   type: "effect-invalid",
                   severity: "warning",
                   source: "dispatch",
@@ -1168,7 +1317,7 @@ export function createDispatch<S, A, E>(
                       undefined,
                       asyncCid,
                     );
-                    reportAioError(err, _reportOpts);
+                    report(err);
                     // "Abandoned" has to mean abandoned. The tracked promise was
                     // only removed from `effectPromises` when the underlying
                     // promise SETTLED — so an effect that never settles (a hung
@@ -1204,9 +1353,7 @@ export function createDispatch<S, A, E>(
                       log.warn(
                         `async effect '${
                           effectType ?? "?"
-                        }' rejected after timeout: ${
-                          e instanceof Error ? e.message : String(e)
-                        }`,
+                        }' rejected after timeout: ${describeThrown(e)}`,
                       );
                       return;
                     }
@@ -1230,7 +1377,7 @@ export function createDispatch<S, A, E>(
                       undefined,
                       asyncCid,
                     );
-                    reportAioError(err, _reportOpts);
+                    report(err);
                   }).finally(() => effectPromises.delete(tracked));
                 _trackedRef = tracked;
                 effectPromises.add(tracked);
@@ -1241,7 +1388,7 @@ export function createDispatch<S, A, E>(
                 actionType,
                 effectType,
               });
-              reportAioError(err, _reportOpts);
+              report(err);
             }
           }
 
@@ -1269,7 +1416,7 @@ export function createDispatch<S, A, E>(
             const err = createAioError("EFFECT_ERROR", e, {
               actionType: "onDone",
             });
-            reportAioError(err, _reportOpts);
+            report(err);
           }
         }
         // If onDone queued new actions, loop back to drain them
@@ -1306,9 +1453,10 @@ export function createDispatch<S, A, E>(
             `actions; the listed actions must be retried by their callers.`,
           { actionType: inFlight ? tag(inFlight.action) : undefined },
         );
-        reportAioError(err, _reportOpts);
+        report(err);
         const stranded = inFlight ? [inFlight, ...queue] : [...queue];
         queue.length = 0;
+        ahead = 0;
         inFlight = null;
         for (const e of stranded) e.reject(err);
       }

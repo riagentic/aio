@@ -77,6 +77,9 @@ Deno.test("platforms: resolve accepts host, dedupes, and NAMES the unknown", () 
     `every unknown name must be listed, not silently dropped: ${bad.error}`,
   );
   assert(bad.error.includes("macos-arm64"), "and the valid ones shown");
+  // An Object.prototype name is not a platform (`in` said it was).
+  const proto = resolvePlatforms(["constructor", "toString"]);
+  assert(!proto.ok, "a prototype key is not a platform");
 });
 
 Deno.test("platforms: the host keeps the bare name, cross builds are labelled", () => {

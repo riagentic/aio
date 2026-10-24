@@ -45,7 +45,8 @@ export interface Removal {
   /** Guide with the full recipe, relative to the repo root. */
   readonly guide: string;
   /** How the removed spelling is found in an app's SOURCE (code only — see
-   *  `removalsInSource`). A cell-config key needs none (`key:` is the
+   *  `removalsInSource`). Tooling-only, so a runtime row's pattern lives in
+   *  removals.ts (`CORE_PATTERNS`) and the page does not carry it. A cell-config key needs none (`key:` is the
    *  pattern); an API shape names its own. Absent = not textually findable
    *  (the type-checker or the CLI refuses it instead). A pattern that can
    *  also spell an app's OWN name (`appVersion:`, `type Action`) needs a
@@ -134,7 +135,6 @@ export const CORE_REMOVALS: readonly Removal[] = [
     now: "factor",
     hint:
       "rename the option key: { every, backoff: 2 } → { every, factor: 2 } (same meaning)",
-    pattern: /\bevery\s*:[^}]*\bbackoff\s*:/,
     ...ALPHA70,
   },
   {
@@ -143,7 +143,6 @@ export const CORE_REMOVALS: readonly Removal[] = [
     now: "schedule.backoff(id, attempt, action, opts)",
     hint:
       "swap the last two arguments: the action is 3rd and the options 4th, like after/every",
-    pattern: /schedule\.(?:backoff|poll)\([^,()]+,[^,()]+,\s*\{/,
     ...ALPHA70,
   },
   {
@@ -152,11 +151,6 @@ export const CORE_REMOVALS: readonly Removal[] = [
     now: "visible",
     hint:
       "rename the cell config key: ui: → visible: (access gates calls, visible gates reads) — aiol --safe-fix does it",
-    // A CELL's `ui:` takes "all"/"none" or a filter object; the app-level
-    // `aio.run({ ui: { width } })` window config never takes a string and
-    // never those filter keys — so this matches the cell key alone.
-    pattern:
-      /(?:^|[{,\s])ui\s*:\s*(?:["']|\{\s*(?:include|exclude|forUser|publicFields)\b)/,
     ...ALPHA70,
   },
   {
@@ -165,7 +159,6 @@ export const CORE_REMOVALS: readonly Removal[] = [
     now: "cellDefaults.visible",
     hint:
       "rename the app-level default: cellDefaults: { ui } → cellDefaults: { visible }",
-    pattern: /\bcellDefaults\s*:\s*\{[^}]*\bui\s*:/,
     ...ALPHA70,
   },
   {
@@ -174,7 +167,6 @@ export const CORE_REMOVALS: readonly Removal[] = [
     now: "listensTo: { handler: other.method }",
     hint:
       "use the object form, which names the sync method that reacts: listensTo: { onThing: other.method }",
-    pattern: /\blistensTo\s*:\s*\[/,
     ...ALPHA70,
   },
   // alpha76 — the pre-beta sweep: every "deprecated through beta" spelling that
@@ -187,7 +179,6 @@ export const CORE_REMOVALS: readonly Removal[] = [
       "call s.$do(schedule.after(...)) inside the method and keep `return` for " +
       "values — a returned effect resolved the caller with undefined, so the " +
       "two meanings could never share the channel; aiol --safe-fix rewrites it",
-    pattern: /\breturn\s+(?:schedule|own)\.\w+\s*\(/,
     ...ALPHA76,
   },
   {
@@ -197,13 +188,6 @@ export const CORE_REMOVALS: readonly Removal[] = [
     hint:
       'take the dep slices as ONE tuple parameter: { deps: ["prices"], fn: (s, [prices], id) => … } — ' +
       "so a parameterized selector can still take its own args; aiol --safe-fix rewrites it",
-    // A NON-EMPTY deps list (zero deps is never the spread form) whose `fn`
-    // takes a second parameter that is not the tuple: `fn: (s, prices)` is
-    // legacy, `fn: (s, [prices])` is current, and `fn: (s)` ignores its deps
-    // and is neither. The lookahead swallows the whitespace ITSELF: `,\s*`
-    // followed by `(?!\[)` backtracks to zero spaces and passes on `, [p]`.
-    pattern:
-      /\bdeps\s*:\s*\[\s*[^\]\s][^\]]*\]\s*,\s*fn\s*:\s*(?:async\s*)?\(\s*\w+[^,)]*,(?!\s*\[)/,
     ...ALPHA76,
   },
   {

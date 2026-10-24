@@ -158,6 +158,7 @@ export function applyLocalFirst(
   const kept: string[] = [];
   const unable: string[] = [];
   const filtered: string[] = [];
+  const workers: string[] = [];
   for (const f of composed.cells) {
     if (f.__aio.syncConfig) continue; // the cell already asked for sync
     if (f.__aio.syncOptOut) {
@@ -181,6 +182,15 @@ export function applyLocalFirst(
     // converting a filtered cell into one whose filter is silently void.
     if (f.__aio.persist && f.__aio.persist !== "all") {
       filtered.push(`${f.__aio.id} (a persist filter)`);
+      continue;
+    }
+    // A worker cell's methods run in their own isolate, and a sync op is
+    // replayed through the cell on the main one — the pool refuses the pair
+    // ("the two owners would fight. Pick one."). Adopting it turned the
+    // app-level switch into a refused boot, telling the author to undo a
+    // `sync: true` they never wrote. Declined, and said, like a filter.
+    if (f.__aio.worker) {
+      workers.push(f.__aio.id);
       continue;
     }
     // Only methods-style cells replay as CRDT ops (the browser stub builds
@@ -207,6 +217,11 @@ export function applyLocalFirst(
       (filtered.length
         ? `; server-only (a visible/persist filter cannot survive CRDT replication): ${
           filtered.join(", ")
+        }`
+        : "") +
+      (workers.length
+        ? `; server-only (worker: true runs methods off the main isolate): ${
+          workers.join(", ")
         }`
         : ""),
   );

@@ -23,6 +23,17 @@ import "../src/server/win-pipe.ts";
 // set and this changes nothing.
 import "./store-sandbox.ts";
 
+// …and Linux keeps libgtk open for the life of the process once a GTK splash
+// or dialog has run (src/electron/gtk-splash.ts pinGtk — closing it crashed
+// the process). A test that reaches the first one would be failed for "a
+// dynamic library was loaded during the test"; opened here, it is the
+// process's. No libgtk on the box: nothing to pin, and the splash says so
+// itself when one is asked for.
+if (Deno.build.os === "linux") {
+  const { pinGtk } = await import("../src/electron/gtk-splash.ts");
+  pinGtk();
+}
+
 // …and aio's own UI tests cross the wire: `testUI`'s `wire.strict` is opt-in
 // (an app's tests written against 1.0.19 keep the harness they passed on),
 // and this suite opts in for every file. A value already set wins.

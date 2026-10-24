@@ -181,9 +181,11 @@ methods: {
 
 Writes batch **per await-gap**, not per assignment: everything assigned between
 two `await`s commits as a single action (the batch flushes on the next
-microtask, and later writes in the same tick join it). The method above writes
-four fields and produces **two** actions, not four. The trigger action
-(`cell:save`) appears in time-travel alongside them.
+microtask, and later writes in the same tick join it) — unless the method calls
+another method or `s.$do(...)` in between, or another call reads state: then
+what it wrote so far may commit first, as its own action, so nothing lands out
+of order. The method above writes four fields and produces **two** actions, not
+four. The trigger action (`cell:save`) appears in time-travel alongside them.
 
 ---
 
@@ -244,10 +246,10 @@ never raw dispatch with string action types.
 **AIO6** All bound cell methods return a Promise — sync methods resolve with
 their return value (`undefined` when they return nothing) once the dispatch is
 applied, async methods resolve with the return value. A failing call rejects. A
-REFUSED call (a `validate` hook, a machine guard) rejects over the wire; in
-process it resolves unchanged unless the app sets `refusalsReject: true` (the
-test harnesses do). Use `await` to read state after the change is applied.
-Unawaited calls are fire-and-forget.
+REFUSED call (a `validate` hook) rejects over the wire; in process it resolves
+unchanged unless the app sets `refusalsReject: true` (the test harnesses do).
+Use `await` to read state after the change is applied. Unawaited calls are
+fire-and-forget.
 
 **AIO7** Sync methods (reducers) MUST NOT contain side effects -- only state
 mutations and fire-and-forget dispatches. No fetch, file I/O, or timers in sync

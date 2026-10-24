@@ -24,6 +24,7 @@ import {
   readAppLocalAliases,
 } from "./server-html-importmap.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { clientOf } from "./aio-run-config.ts";
 
 /** Does a path exist? (`Deno.stat` without the throw.) @internal */
 async function exists(path: string): Promise<boolean> {
@@ -80,6 +81,10 @@ export async function lint(
   config?: { reduce?: unknown; execute?: unknown },
   baseDir?: string,
   prod = false,
+  // Not passed: THE client decider `aio.run` uses (`clientOf` — its config's
+  // `client`, then the app's deno.json `client`), so `checkCells(cells)` on a
+  // server-only app checks it as one. It was always "browser", and failed
+  // on the App.tsx a server-only app never has. The boot passes its decision.
   headless = false,
   useElectron = true,
   // THE ui-entry decider's value (`ui.entry`, default App.tsx). The boot check
@@ -98,6 +103,11 @@ export async function lint(
   const r: Lint = { ok: [], warn: [], hint: [], fail: [] };
   config ??= {};
   baseDir ??= Deno.cwd();
+  if (arguments.length < 5) {
+    const c = clientOf({}, config as { client?: string }).value;
+    headless = c === "server-only" || c === "cli";
+    if (headless) headlessClient ??= c;
+  }
 
   // `checkCells(cells)` — the form the name promises. A list of
   // cells where the state goes is composed here, exactly as `aio.run({ cells
@@ -213,6 +223,7 @@ export async function lint(
       r.fail.push(`${uiEntry} not found at ${appFile}`);
       r.hint.push(
         "  create it: export default function App() { return <div>Hello</div> }",
+        '  or, for an app with no UI: `"client": "server"` in deno.json (or `client: "server-only"` in aio.run, --client=server-only)',
       );
     }
   }

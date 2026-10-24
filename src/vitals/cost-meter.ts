@@ -185,6 +185,10 @@ export interface CostMeter {
   /** Cells that exist, so idle ones can be shown as idle rather than missing. */
   setKnownCells(cells: string[]): void;
   setClientCount(n: number): void;
+  /** Process-lifetime STATE frames (patch + full) and their bytes, on BOTH
+   *  transports — monotonic, never cleared by `reset()`: it backs the
+   *  Prometheus counters, and a counter that resets is not a counter. */
+  lifetime(): { bytes: number; count: number };
   report(
     opts?: { windowSec?: number; cell?: string; now?: number },
   ): CostReport;
@@ -208,6 +212,7 @@ export function createCostMeter(opts: {
   let round = 0;
   /** When this meter started watching (creation, or the last `reset()`). */
   let observedSince = now();
+  const life = { bytes: 0, count: 0 };
 
   const p95 = (xs: number[]): number => {
     if (xs.length === 0) return 0;
@@ -218,6 +223,13 @@ export function createCostMeter(opts: {
   return {
     recordSend(bytes, clientId, kind) {
       sends.push({ at: now(), bytes, clientId, kind });
+      if (kind !== "other") {
+        life.bytes += bytes;
+        life.count++;
+      }
+    },
+    lifetime() {
+      return { ...life };
     },
     beginRound() {
       return ++round;

@@ -50,10 +50,16 @@ function threadCpu(): Map<string, number> | null {
 }
 
 /** The thread that burned the most between two samples — the pool's worker
- *  while it crunches. */
-function busiest(a: Map<string, number>, b: Map<string, number>): string {
+ *  while it crunches. Only threads the pool started count: under load another
+ *  test file's busy thread in this process can out-burn it. */
+function busiest(
+  a: Map<string, number>,
+  b: Map<string, number>,
+  mine: Set<string>,
+): string {
   let best = "", most = -1;
   for (const [tid, t] of b) {
+    if (mine.size > 0 && !mine.has(tid)) continue;
     const d = t - (a.get(tid) ?? t);
     if (d > most) most = d, best = tid;
   }
@@ -73,9 +79,14 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** A size-1 pool whose worker is up: a cold worker can still be loading at
  *  the cancel, which is not the case under test. */
 async function warmPool() {
+  const before = threadCpu();
   const pool = createBlockingPool({ size: 1 });
   assertEquals(await pool.run("warm", () => 1), 1);
-  return pool;
+  const after = threadCpu();
+  const mine = new Set(
+    [...(after?.keys() ?? [])].filter((t) => !before?.has(t)),
+  );
+  return Object.assign(pool, { mine });
 }
 
 Deno.test("blocking: cancelling a task inside a sync loop warns that its thread keeps running", async () => {
@@ -90,7 +101,7 @@ Deno.test("blocking: cancelling a task inside a sync loop warns that its thread 
       });
       const s0 = threadCpu();
       await sleep(300);
-      const tid = s0 && busiest(s0, threadCpu()!);
+      const tid = s0 && busiest(s0, threadCpu()!, pool.mine);
       assertEquals(pool.cancel("crunch"), true);
       const c0 = threadCpu();
       assertEquals(
@@ -129,7 +140,7 @@ Deno.test("blocking: a task that yields between chunks stops at cancel, with no 
       });
       const s0 = threadCpu();
       await sleep(300);
-      const tid = s0 && busiest(s0, threadCpu()!);
+      const tid = s0 && busiest(s0, threadCpu()!, pool.mine);
       assertEquals(pool.cancel("chunked"), true);
       await p.catch(() => {});
       await sleep(100); // the slice in flight ends

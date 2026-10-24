@@ -274,3 +274,21 @@ export async function descendantPids(pid: number): Promise<number[]> {
   await walk(pid).catch(() => {});
   return out;
 }
+
+/** Parse `AIO_PARENT_PID`: decimal digits, integer > 0, else absent.
+ *
+ *  Same vocabulary as `--port` / `AIO_PORT` (`intArg` / `envPort`): `Number()`
+ *  also accepts `0x1A2B`, `1e3`, `+42` and `0b101`, four spellings nobody types
+ *  on purpose. A non-decimal value used to arm the parent watch against a
+ *  surprising pid (or, on the Electron window, a *different* one from the
+ *  server) — now both sides treat it as unset. Pure so a test can pin the
+ *  refuse list without reloading the module.
+ *
+ *  @decider */
+export function parentPidOf(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const s = raw.trim();
+  const n = Number(s);
+  if (!/^\d+$/.test(s) || !Number.isInteger(n) || n <= 0) return undefined;
+  return n;
+}

@@ -486,7 +486,10 @@ Deno.test("boot: a one-off --channel is NOT pinned forever", async () => {
   }
 });
 
-Deno.test("boot: the channel an app is BUILT for is pinned", async () => {
+// The channel a boot RESOLVES is not saved: the stamp is read afresh on every
+// boot, and a saved copy outranked every later config change
+// (tests/updates-channel-pin.test.ts has the rest).
+Deno.test("boot: the channel a boot resolves is followed, not pinned", async () => {
   const data = await tmp();
   try {
     const started = startUpdates({
@@ -500,7 +503,7 @@ Deno.test("boot: the channel an app is BUILT for is pinned", async () => {
       argv: [],
     });
     assertEquals(started.channel, "prod");
-    assertEquals(readTrust(data).channel, "prod");
+    assertEquals(readTrust(data).channel, undefined);
     started.stop();
   } finally {
     await Deno.remove(data, { recursive: true });

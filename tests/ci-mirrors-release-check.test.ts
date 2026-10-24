@@ -164,3 +164,16 @@ Deno.test("ci: the suite runs the ratchets first, and the ratchets keep check:re
     "deno.json check:ratchets must run scripts/check-report-dirs.ts",
   );
 });
+
+Deno.test("ci: the suite runs on Windows too — advisory, and saying so", async () => {
+  // aio ships Windows artifacts; no CI lane ran its suite there, so a
+  // Windows-only regression waited for the release VM run.
+  const ci = await Deno.readTextFile(REPO + ".github/workflows/ci.yml");
+  const job = ci.match(
+    /\n  test-windows:\n([\s\S]*?)(?=\n  [\w-]+:\n|(?![\s\S]))/,
+  );
+  assertEquals(!!job, true, "a test-windows job");
+  assertEquals(/runs-on:\s*windows-latest/.test(job![1]!), true);
+  assertEquals(/continue-on-error:\s*true/.test(job![1]!), true);
+  assertEquals(/run:\s*deno task test\b/.test(job![1]!), true);
+});

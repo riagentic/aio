@@ -3,13 +3,13 @@
 // Split into:
 //   cell-types.ts    — shared types, tagSource, RESERVED_KEYS
 //   cell-machine.ts  — machine validation
-//   cell-catalog.ts  — catalog building, flattenOnto, bindCell
+//   cell-catalog.ts  — catalog building, bindCell
 //   cell-create.ts   — cell() + createCellFromMethods/Actions
 //   cell-compose.ts  — composeCells, resolveCells, registry
 //   cell-test.ts     — testCell, TestContext
 //
 // Only re-exports symbols that were public in the original cell.ts.
-// Internal helpers (buildCatalog, flattenOnto, validateMachine, RESERVED_KEYS)
+// Internal helpers (buildCatalog, validateMachine, RESERVED_KEYS)
 // are imported directly by sibling files and NOT exposed here.
 
 export {

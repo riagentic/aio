@@ -12,15 +12,20 @@
     <activity
       android:name="aio.app.MainActivity"
       android:exported="true"
-      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode"
+      {{DEEP_LINK_ATTR}}
+      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|fontScale|density"
     >
       <!-- configChanges: a rotation (or a keyboard) must not recreate the
            activity — that destroyed the WebView and RELOADED the app, losing
-           everything on screen not yet saved. The WebView resizes itself. -->
+           everything on screen not yet saved. The WebView resizes itself.
+           fontScale|density: the system font size and display size did the
+           same (measured on API 35: each reloaded the page); MainActivity's
+           onConfigurationChanged carries the new font size to the page. -->
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
         <category android:name="android.intent.category.LAUNCHER" />
       </intent-filter>
+      {{DEEP_LINK_FILTERS}}
     </activity>
   </application>
 </manifest>

@@ -87,7 +87,7 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "ff991fa09c684398",
+          "sig": "8b413df7ff87b11f",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
@@ -121,6 +121,7 @@
             "splash": "opt:ea477d9f8e15434e",
             "tray": "opt:bb7b2f54156b6da6",
             "profileName": "opt:2fb40568533c1a6d",
+            "appId": "opt:2fb40568533c1a6d",
             "profileDir": "opt:2fb40568533c1a6d",
             "guestPreloads": "opt:object",
             "guestPreloads.dir": "req:2fb40568533c1a6d",
@@ -128,7 +129,7 @@
             "showFile": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "ff991fa09c684398"
+            "8b413df7ff87b11f"
           ]
         },
         "AioUser": {
@@ -148,6 +149,51 @@
           },
           "sigs": [
             "8f42e0e209205a30"
+          ]
+        },
+        "appIcon": {
+          "kind": "function",
+          "sig": "732187d2e43d6be2",
+          "members": {
+            "param0": "req:813bcab7b3a6a607|9dc2d27049d85db1~AppIconOptions",
+            "return": "req:d8bf2fe5a5750770"
+          },
+          "sigs": [
+            "b10bee5d70014f58"
+          ]
+        },
+        "AppIconEffect": {
+          "kind": "typeAlias",
+          "sig": "407476b4854236b8",
+          "members": {
+            "type": "req:16b268ca4ef0ef1e",
+            "window": "opt:a761b4391af4e5e9",
+            "tray": "opt:a761b4391af4e5e9",
+            "tooltip": "opt:cb5114588202887c",
+            "fps": "opt:f6522636230fa080"
+          },
+          "sigs": [
+            "407476b4854236b8"
+          ]
+        },
+        "AppIconImage": {
+          "kind": "typeAlias",
+          "sig": "b658d46f33d9bb73",
+          "sigs": [
+            "b658d46f33d9bb73"
+          ]
+        },
+        "AppIconOptions": {
+          "kind": "typeAlias",
+          "sig": "d939a709c3b1c912",
+          "members": {
+            "window": "opt:22d5b2cf9b1d6ce5",
+            "tray": "opt:22d5b2cf9b1d6ce5",
+            "tooltip": "opt:cb5114588202887c",
+            "fps": "opt:f6522636230fa080"
+          },
+          "sigs": [
+            "d939a709c3b1c912"
           ]
         },
         "ArgSchemas": {
@@ -403,7 +449,7 @@
         },
         "CellsConfig": {
           "kind": "typeAlias",
-          "sig": "57dbfeaf19f8b5d3",
+          "sig": "864d60326c4a7420",
           "members": {
             "appId": "opt:2fb40568533c1a6d",
             "cells": "opt:58dbae2820cab862",
@@ -435,11 +481,14 @@
             "assets": "opt:09b94ba87da5c3f0",
             "client": "opt:2cf33547ada6ef98",
             "keepServer": "opt:0ecca0fe3beba89b",
+            "localConnectHooks": "opt:0ecca0fe3beba89b",
             "transport": "opt:0af4963515624cbb",
             "takeover": "opt:0ecca0fe3beba89b",
             "serverUrl": "opt:2fb40568533c1a6d",
             "users": "opt:b9481918a0e71c7d",
             "key": "opt:2cb46dfffc218cf2",
+            "pairing": "opt:object",
+            "pairing.pake": "opt:0ecca0fe3beba89b",
             "resolveUser": "opt:d955cf9950ae24e5",
             "resolvePeer": "opt:575c0615f7db27b1",
             "peerTypes": "opt:2fb40568533c1a6d",
@@ -503,7 +552,7 @@
             "onCheckpointRestore": "opt:bc30aaf8d4dd00e2"
           },
           "sigs": [
-            "57dbfeaf19f8b5d3"
+            "864d60326c4a7420"
           ]
         },
         "CellState": {
@@ -881,6 +930,18 @@
             "b5d318ba84b54b13"
           ]
         },
+        "errorSummary": {
+          "kind": "function",
+          "sig": "b939a1dfc2ed63d2",
+          "members": {
+            "param0": "req:8a0195ffd96928c3|e2e9e83e047a6f75~unknown",
+            "param1": "req:8831ebb37d4c9a1d|",
+            "return": "req:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "083919d5efa664e6"
+          ]
+        },
         "FeedbackInput": {
           "kind": "typeAlias",
           "sig": "034c20cfae5ff364",
@@ -1123,7 +1184,7 @@
         },
         "MethodDraftMeta": {
           "kind": "typeAlias",
-          "sig": "e5f6a4c36fc87d55",
+          "sig": "a1059e554facc784",
           "members": {
             "typeParams": "req:b4703fac1525d195",
             "$signal": "req:81e067736a358b70",
@@ -1132,25 +1193,25 @@
             "$commit.return": "req:b5f6ae1b8a43e31d",
             "$live": "req:432f010c9f2192b5",
             "$do": "req:fn",
-            "$do.param0": "req:0d2f431b65d16a80|1bd45a6ee26435aa~OwnEffect+21c0196216d23f86~NotifyEffect+2cd23def62fa15a2~ScheduleEffect",
-            "$do.param1": "opt:05b4106abcd855d0|[]1bd45a6ee26435aa~OwnEffect+[]21c0196216d23f86~NotifyEffect+[]2cd23def62fa15a2~ScheduleEffect",
+            "$do.param0": "req:71c3d1d88c32c388|1bd45a6ee26435aa~OwnEffect+21c0196216d23f86~NotifyEffect+2cd23def62fa15a2~ScheduleEffect+7a301ef28e76a313~AppIconEffect",
+            "$do.param1": "opt:0ceab72795492e32|[]1bd45a6ee26435aa~OwnEffect+[]21c0196216d23f86~NotifyEffect+[]2cd23def62fa15a2~ScheduleEffect+[]7a301ef28e76a313~AppIconEffect",
             "$do.return": "req:b5f6ae1b8a43e31d"
           },
           "sigs": [
-            "e5f6a4c36fc87d55"
+            "a1059e554facc784"
           ]
         },
         "MethodDraftServed": {
           "kind": "typeAlias",
-          "sig": "3b3848fe2e92a3b1",
+          "sig": "f86a8ed539daeb29",
           "members": {
             "$do": "req:fn",
-            "$do.param0": "req:0d2f431b65d16a80|1bd45a6ee26435aa~OwnEffect+21c0196216d23f86~NotifyEffect+2cd23def62fa15a2~ScheduleEffect",
-            "$do.param1": "opt:05b4106abcd855d0|[]1bd45a6ee26435aa~OwnEffect+[]21c0196216d23f86~NotifyEffect+[]2cd23def62fa15a2~ScheduleEffect",
+            "$do.param0": "req:71c3d1d88c32c388|1bd45a6ee26435aa~OwnEffect+21c0196216d23f86~NotifyEffect+2cd23def62fa15a2~ScheduleEffect+7a301ef28e76a313~AppIconEffect",
+            "$do.param1": "opt:0ceab72795492e32|[]1bd45a6ee26435aa~OwnEffect+[]21c0196216d23f86~NotifyEffect+[]2cd23def62fa15a2~ScheduleEffect+[]7a301ef28e76a313~AppIconEffect",
             "$do.return": "req:b5f6ae1b8a43e31d"
           },
           "sigs": [
-            "3b3848fe2e92a3b1"
+            "f86a8ed539daeb29"
           ]
         },
         "MethodsCellConfig": {
@@ -1660,14 +1721,11 @@
         },
         "serverFn": {
           "kind": "function",
-          "sig": "192427111136b168",
-          "members": {
-            "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
-            "return": "req:3ce35dd87c8ee1b7",
-            "typeParams": "req:0cc36f35257b0011"
-          },
+          "sig": "ef35bfa1567c3852",
           "sigs": [
-            "4b4da5cc06396a7d"
+            "4b4da5cc06396a7d",
+            "defef86fb2bcda48",
+            "a5ae0b0a0979ff39"
           ]
         },
         "serverFns": {
@@ -2113,6 +2171,17 @@
             "3f4963fafaf0a7c7"
           ]
         },
+        "projectRoot": {
+          "kind": "function",
+          "sig": "2be58b61f351099e",
+          "members": {
+            "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "return": "req:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "55ae70c3a1f0fe0a"
+          ]
+        },
         "SafeFixFn": {
           "kind": "typeAlias",
           "sig": "f8dd9b5af167ddfc",
@@ -2372,13 +2441,11 @@
         },
         "effect": {
           "kind": "function",
-          "sig": "475384653d047765",
-          "members": {
-            "param0": "req:9187e4d5b30a1caa|b119ba689df454b9~fnOrConstructor",
-            "return": "req:cb4e735bb1e34533"
-          },
+          "sig": "e7b6500bb50d2feb",
           "sigs": [
-            "19b1905af1d537b0"
+            "19b1905af1d537b0",
+            "71ee84082eaca435",
+            "942b59d6df15f021"
           ]
         },
         "ErrorBoundary": {
@@ -3175,13 +3242,11 @@
         },
         "Transition": {
           "kind": "function",
-          "sig": "749eeefbffd966c6",
-          "members": {
-            "param0": "req:0f12f444318d74bc|bf8f94aca200880e~TransitionProps",
-            "return": "req:c14ff19b4055d02a"
-          },
+          "sig": "1ed51b6a234a531f",
           "sigs": [
-            "ec3dc7e6cf1757f6"
+            "ec3dc7e6cf1757f6",
+            "3673de737c203065",
+            "3673de737c203065"
           ]
         },
         "TransitionFn": {
@@ -3193,13 +3258,11 @@
         },
         "TransitionGroup": {
           "kind": "function",
-          "sig": "f10006d454543760",
-          "members": {
-            "param0": "req:5652140f2a619810|09d71ffb0b38f97f~TransitionGroupProps",
-            "return": "req:0570dc44ff1f8156"
-          },
+          "sig": "9653fac9cc364a01",
           "sigs": [
-            "f686b63051bb8879"
+            "f686b63051bb8879",
+            "db292256a2fabd71",
+            "db292256a2fabd71"
           ]
         },
         "TransitionGroupProps": {
@@ -3980,6 +4043,17 @@
             "07852ad8903d85ff"
           ]
         },
+        "targetBundles": {
+          "kind": "function",
+          "sig": "75f24459641ae0fc",
+          "members": {
+            "param0": "req:97ef4ed1783bf07b|dfa2c59f3b81d9cb~typeOperator",
+            "return": "req:0ecca0fe3beba89b"
+          },
+          "sigs": [
+            "c3b89acc55e0f03c"
+          ]
+        },
         "targetForFlags": {
           "kind": "function",
           "sig": "5648430de3dd2fd9",
@@ -4070,9 +4144,10 @@
         },
         "CliIO": {
           "kind": "typeAlias",
-          "sig": "d63860cbb57719bc",
+          "sig": "39877268431b5a5f",
           "members": {
             "tty": "req:0ecca0fe3beba89b",
+            "errTty": "opt:0ecca0fe3beba89b",
             "color": "req:0ecca0fe3beba89b",
             "read": "req:b65609ec0d32340c",
             "out": "req:95e3a86a9dde5c81",
@@ -4081,7 +4156,7 @@
             "exit": "req:d90b5638d30fe63a"
           },
           "sigs": [
-            "d63860cbb57719bc"
+            "39877268431b5a5f"
           ]
         },
         "Column": {
@@ -4269,14 +4344,15 @@
         },
         "ProgressOptions": {
           "kind": "typeAlias",
-          "sig": "8c1c813d9450ca1f",
+          "sig": "634236c8059ca113",
           "members": {
             "label": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
-            "io": "opt:05ef30584a4acc84"
+            "io": "opt:05ef30584a4acc84",
+            "stream": "opt:3f7cd3eb9317b05a"
           },
           "sigs": [
-            "8c1c813d9450ca1f"
+            "634236c8059ca113"
           ]
         },
         "prompt": {
@@ -4351,13 +4427,14 @@
         },
         "SpinnerOptions": {
           "kind": "typeAlias",
-          "sig": "3093a17e81f8abf2",
+          "sig": "9a9ea02a6bc8e85f",
           "members": {
             "intervalMs": "opt:f6522636230fa080",
-            "io": "opt:05ef30584a4acc84"
+            "io": "opt:05ef30584a4acc84",
+            "stream": "opt:3f7cd3eb9317b05a"
           },
           "sigs": [
-            "3093a17e81f8abf2"
+            "9a9ea02a6bc8e85f"
           ]
         },
         "style": {
@@ -4845,7 +4922,7 @@
         },
         "LockData": {
           "kind": "typeAlias",
-          "sig": "b7b459be2f25cb06",
+          "sig": "82169257fb4d4a1c",
           "members": {
             "appId": "req:2fb40568533c1a6d",
             "pid": "req:f6522636230fa080",
@@ -4863,6 +4940,7 @@
             "cwd": "req:2fb40568533c1a6d",
             "home": "opt:2fb40568533c1a6d",
             "socketPath": "opt:2fb40568533c1a6d",
+            "httpSocketPath": "opt:2fb40568533c1a6d",
             "host": "opt:2fb40568533c1a6d",
             "handoff": "opt:2fb40568533c1a6d",
             "trojanPort": "opt:f6522636230fa080",
@@ -4882,7 +4960,7 @@
             "settings": "opt:09b94ba87da5c3f0"
           },
           "sigs": [
-            "b7b459be2f25cb06"
+            "82169257fb4d4a1c"
           ]
         },
         "markAsync": {
@@ -5871,17 +5949,18 @@
         },
         "PeerOptions": {
           "kind": "typeAlias",
-          "sig": "d387fb9d5a7af312",
+          "sig": "1f2e70dad6926749",
           "experimental": true,
           "members": {
             "token": "opt:edfbf1925d9c26f3",
             "offline": "opt:34ee1ba0601a3022",
             "readyTimeoutMs": "opt:f6522636230fa080",
             "ackTimeoutMs": "opt:f6522636230fa080",
-            "as": "opt:2fb40568533c1a6d"
+            "as": "opt:2fb40568533c1a6d",
+            "instance": "opt:cb5114588202887c"
           },
           "sigs": [
-            "d387fb9d5a7af312"
+            "1f2e70dad6926749"
           ]
         },
         "PeerStream": {
@@ -7852,6 +7931,21 @@
             "7613720efb0fc4fb"
           ]
         },
+        "fitView": {
+          "kind": "function",
+          "sig": "8205f4fe3454d379",
+          "members": {
+            "param0": "req:f3d5d2724880c056|a98fbd1dd5214a9d~typeLiteral",
+            "param1": "req:f3d5d2724880c056|a98fbd1dd5214a9d~typeLiteral",
+            "param2": "req:6b58607247301ed8|",
+            "param3": "req:6d9bc514f3b8e5c5|",
+            "param4": "req:88e14d4e5f509fb3|",
+            "return": "req:04d6fa4c8080e4f0"
+          },
+          "sigs": [
+            "93f35aa212579231"
+          ]
+        },
         "Fragment": {
           "kind": "variable",
           "sig": "unpinned"
@@ -8382,6 +8476,62 @@
           },
           "sigs": [
             "9c274d94fee52f1d"
+          ]
+        },
+        "zoomAt": {
+          "kind": "function",
+          "sig": "0bc7ccdbeeff19fd",
+          "members": {
+            "param0": "req:7199cb5eaf4c1a19|8b88accc439d21c5~ZoomView",
+            "param1": "req:be1856ed7cd18fe5|b3d9da3d9fc5eb30~number",
+            "param2": "req:be1856ed7cd18fe5|b3d9da3d9fc5eb30~number",
+            "param3": "req:be1856ed7cd18fe5|b3d9da3d9fc5eb30~number",
+            "param4": "req:6d9bc514f3b8e5c5|",
+            "param5": "req:88e14d4e5f509fb3|",
+            "return": "req:04d6fa4c8080e4f0"
+          },
+          "sigs": [
+            "790a41faeea5a9da"
+          ]
+        },
+        "ZoomPan": {
+          "kind": "function",
+          "sig": "b72faa8cbac944a6",
+          "members": {
+            "param0": "req:371c19680d9e2bcc|04042db905b37eff~ZoomPanProps",
+            "return": "req:df9e68ff8b581ce9"
+          },
+          "sigs": [
+            "334e019eed43cfd0"
+          ]
+        },
+        "ZoomPanProps": {
+          "kind": "interface",
+          "sig": "5ab4765d6d85660c",
+          "members": {
+            "children": "opt:6c07231efa1e49da",
+            "minScale": "opt:f6522636230fa080",
+            "maxScale": "opt:f6522636230fa080",
+            "initial": "opt:04d6fa4c8080e4f0",
+            "onView": "opt:7480f8e922f42abd",
+            "controls": "opt:0ecca0fe3beba89b",
+            "class": "opt:2fb40568533c1a6d",
+            "style": "opt:13f82d5fa6ff79be"
+          },
+          "sigs": [
+            "5ab4765d6d85660c"
+          ]
+        },
+        "ZoomView": {
+          "kind": "interface",
+          "sig": "7d9f8cc22db3cd14",
+          "members": {
+            "x": "req:f6522636230fa080",
+            "y": "req:f6522636230fa080",
+            "scale": "req:f6522636230fa080"
+          },
+          "sigs": [
+            "7d9f8cc22db3cd14"
           ]
         }
       }

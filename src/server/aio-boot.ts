@@ -23,7 +23,7 @@ import { createDB } from "../db/async-db.ts";
 import { initSchema, loadTables, readSyncedTables } from "../db/state-sync.ts";
 // The db module owns the "is this a missing worker?" verdict — importing the
 // predicate keeps ONE decider for a failure that surfaces in two places.
-import { dbWorkerMissingHint } from "../db/async-db.ts";
+import { dbWorkerMissingHint, pragmaRefusals } from "../db/async-db.ts";
 import type { DbMapping, TableDef } from "./sql.ts";
 import "./sql.ts"; // load order: evaluated here, as before the split
 import { deepMerge } from "../state/deep-merge.ts";
@@ -65,7 +65,7 @@ import "./aio-cli.ts"; // load order: evaluated here, as before the split
 import "../sync/compact.ts"; // load order: evaluated here, as before the split
 import "../sync/state-patch.ts"; // load order: evaluated here, as before the split
 import { dirname, join, resolve, SEPARATOR } from "@std/path";
-import { appDirs, appsDirEnv } from "./app-dirs.ts";
+import { appDirs, appHome, appsDirEnv, instanceOfAppsDir } from "./app-dirs.ts";
 import type { BudgetLedger } from "../state/budgets.ts";
 import {
   AioError,
@@ -87,7 +87,7 @@ import { cloneState } from "../state/immutable.ts";
 import "../sync/server-store.ts"; // load order: evaluated here, as before the split
 import "../state/rejection-tracker.ts"; // load order: evaluated here, as before the split
 import "./op-placement.ts"; // load order: evaluated here, as before the split
-import { count } from "../diagnostics/fmt.ts";
+import { count, thrownText } from "../diagnostics/fmt.ts";
 import {
   bootStoreGen,
   planStoreGenRecord,
@@ -125,6 +125,7 @@ import {
   restoreDropWatcher,
   selfWrittenDrift,
   shapeDriftRefusal,
+  sharedStoreWarning,
   withRestoreDropWatch,
 } from "./boot-restore.ts";
 
@@ -330,6 +331,14 @@ export interface BootResult<S> {
    *  recorded it (store-gen.ts) — the journal's tail is older than the
    *  store. */
   storeSavedElsewhere: boolean;
+  /** The `db:` tables bound to a state path — state is their source of
+   *  truth, so the app's own SQL writes to them are warned about
+   *  (`guardMirroredWrites`). */
+  mirroredTables: {
+    table: string;
+    path: readonly string[];
+    pk: string | null;
+  }[];
   /** Undeclared cells whose journal lines are held, not replayed (see
    *  `journalHeldCellsKey`) — the orchestrator leaves them out of replay and
    *  names them. */
@@ -482,6 +491,37 @@ async function bootStorageOpening<S>(
     }
   }
 
+  // `--instance=<name>` (here or via `am`) is a PRIVATE copy only because
+  // AIO_APPS_DIR moves the DERIVED home — and the lock and socket with it. An
+  // app that pins its own appDir or dbPath outside that root keeps opening
+  // the everyday data while its lock lives in the instance's scope: two live
+  // processes on one database, nothing said. Warned, not refused — the app
+  // boots as it always did.
+  const instance = instanceOfAppsDir(appsDirEnv());
+  if (instance !== undefined) {
+    const root = resolve(appsDirEnv()!);
+    const outside = (p: string) => !resolve(p).startsWith(root + SEPARATOR);
+    const pinned = [
+      // The home this boot registered (an author's appDir, or the derived
+      // one under the root) — `cfg.appDir` is not handed to the boot.
+      outside(appDirs(appId).home) ? `appDir ${appDirs(appId).home}` : "",
+      dbPathOverride && !dbPathOverride.startsWith(":memory:") &&
+        !dbPathOverride.startsWith("file::memory:") && outside(dbPathOverride)
+        ? `dbPath ${resolve(dbPathOverride)}`
+        : "",
+    ].filter(Boolean);
+    if (pinned.length > 0) {
+      log.warn(
+        `--instance=${instance} is NOT isolated: this app pins its ` +
+          `${pinned.join(" and ")}, outside the instance's root ${root} — ` +
+          `it reads and writes the same data as every other run of the app, ` +
+          `while its lock lives in the instance's scope (so nothing stops ` +
+          `both from running at once). Derive appDir/dbPath from ` +
+          `resolveHome() in "aio/server", or leave them unset.`,
+      );
+    }
+  }
+
   // ── 1. SQLite ─────────────────────────────────────────────────────
   // Resolve `db:` keys to SQL tables + the state arrays they mirror BEFORE any
   // file is opened: an ambiguous or impossible binding must fail before it can
@@ -616,24 +656,36 @@ async function bootStorageOpening<S>(
       }
       return fresh;
     };
-    if (!onDisk) return await recover();
+    // The app's own pragmas are checked once open: SQLite ignores an unknown
+    // name or value without an error (see `pragmaRefusals`).
+    const checked = async (db: DB): Promise<DB> => {
+      if (dbPragmas?.length) {
+        for (const why of await pragmaRefusals(db, dbPragmas)) {
+          log.error(`dbPragmas: ${why}.`);
+        }
+      }
+      return db;
+    };
+    if (!onDisk) return await checked(await recover());
     // One recovery per database at a time, across processes (`singleton:
     // false` shares a data dir): taken when this boot checks integrity or a
     // previous one left a recovery to finish — the only times there is
     // anything to race over.
     const integrity = await import("./db-integrity.ts");
-    return cfg.checkIntegrityOnBoot || integrity.recoveryPending(dbPath)
-      ? await integrity.withRecoveryLock(
-        dbPath,
-        recover,
-        (lock) =>
-          log.warn(
-            `db: waiting for another process to finish checking/recovering ` +
-              `${dbPath} (it holds ${lock}) — this boot continues when it ` +
-              `is done`,
-          ),
-      )
-      : await recover();
+    return await checked(
+      cfg.checkIntegrityOnBoot || integrity.recoveryPending(dbPath)
+        ? await integrity.withRecoveryLock(
+          dbPath,
+          recover,
+          (lock) =>
+            log.warn(
+              `db: waiting for another process to finish checking/recovering ` +
+                `${dbPath} (it holds ${lock}) — this boot continues when it ` +
+                `is done`,
+            ),
+        )
+        : await recover(),
+    );
   };
 
   // Sync cells need the SQLite op-log even without user tables — a
@@ -799,8 +851,18 @@ async function bootStorageOpening<S>(
         // Client-facing — the same projection every other wire uses. A cell
         // hidden by `ui: "none"` is absent from it, and `null` here means
         // "must not be sent", which the handler honours by sending nothing.
+        //
+        // THIS cell's projection only. Projecting the whole state ran every
+        // other cell's `visible.forUser` with no user — a view no client
+        // holds — on each server-side write to a sync cell, and a filter that
+        // reads its user (`u!.id`) logged "visible.forUser threw — omitting
+        // the cell for this client" at ERROR each time, with no such client.
+        // Pinned by tests/sync-snapshot-projects-one-cell.test.ts.
         getClientCellState: (cell: string) => {
-          const ui = cfg.getUIState(getState()) as
+          const all = getState() as Record<string, unknown>;
+          const ui = cfg.getUIState(
+            Object.hasOwn(all, cell) ? { [cell]: all[cell] } : {},
+          ) as
             | Record<string, unknown>
             | undefined;
           const slice = ui?.[cell];
@@ -901,6 +963,13 @@ async function bootStorageOpening<S>(
         log,
       );
       if (migrated) storedKeysOnDisk = Object.keys(migrated);
+      const shared = await sharedStoreWarning(
+        asyncDb,
+        appId,
+        persistKey,
+        openedDbPath ?? appDirs(appId, cfg.appDir).stateDb,
+      );
+      if (shared) log.warn(shared);
       /** Slices of `persist: "none"` cells the live store still held. */
       let stale: string[] = [];
       if (migrated && cfg.persistingCellIds) {
@@ -1051,8 +1120,22 @@ async function bootStorageOpening<S>(
       // "Fix permissions or set persist: false" was attached to a malformed
       // or unreadable database as well — where neither is a fix, and the
       // second silently discards the data the reader is trying to keep.
+      // A read-only refusal names the paths SQLite cannot write — the db is
+      // often NOT one of them (a stale read-only `-shm`; see unwritableDbPaths).
+      const dbFile = /readonly database/i.test(String(e))
+        ? openedDbPath
+        : undefined;
+      const ro = dbFile && !dbFile.startsWith(":memory:") &&
+          !dbFile.startsWith("file:")
+        ? (await import("./db-integrity.ts")).unwritableDbPaths(dbFile)
+        : [];
       throw new Error(
         `persistence unavailable: ${e}\n` +
+          (ro.length
+            ? `This user cannot write: ${ro.join(", ")} — fix the owner ` +
+              `or mode of exactly these (a run as another user, e.g. ` +
+              `sudo, leaves them behind).\n`
+            : "") +
           `If the file is malformed or corrupt: boot with ` +
           `checkIntegrityOnBoot: true (quarantines it and restores from ` +
           `<db>.snapshot when one exists — docs/persistence/sqlite.md), or ` +
@@ -1290,6 +1373,7 @@ async function bootStorageOpening<S>(
           appsDir: appsDir && dirs.home === join(appsDir, appId)
             ? appsDir
             : undefined,
+          pinned: dirs.home !== appHome(appId) || !!dbPathOverride,
         });
         // The database is released by `bootStorage` (every refusal's one
         // exit), so the removal this message advises can succeed.
@@ -1400,7 +1484,7 @@ async function bootStorageOpening<S>(
         state = next as S;
       }
     } catch (e) {
-      log.error(`hook onRestore: ${e}`);
+      log.error(`hook onRestore: ${thrownText(e)}`);
     }
   }
 
@@ -1512,7 +1596,7 @@ async function bootStorageOpening<S>(
         log.info("checkpoint: state restored from checkpoint");
       }
     } catch (e) {
-      log.error(`checkpoint: onCheckpointRestore threw — ${e}`);
+      log.error(`checkpoint: onCheckpointRestore threw — ${thrownText(e)}`);
     }
   }
 
@@ -1845,6 +1929,7 @@ async function bootStorageOpening<S>(
     storeHeldState: hadPersistedState,
     strayJournal,
     storeSavedElsewhere,
+    mirroredTables: dbBindings.filter((b) => b.path.length > 0),
     journalHeld,
   };
 }

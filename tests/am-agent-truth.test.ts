@@ -40,7 +40,12 @@ import {
   SCOPED_GLOBAL_FLAGS,
   VERB_FLAGS,
 } from "../src/am/am-flags.ts";
-import { CREATE_FLAGS, TARGETS, TEMPLATES } from "../src/am/am-help-text.ts";
+import {
+  CREATE_FLAGS,
+  TARGETS,
+  TEMPLATES,
+  TRIGGER_ACTIONS,
+} from "../src/am/am-help-text.ts";
 import { DISPLAY_FLAG } from "../src/am/am-display.ts";
 import { AIO_RUNTIME_FLAGS } from "../src/diagnostics/runtime-flags.ts";
 import { scaffold, standardTasks } from "../src/am/am-cmd-create.ts";
@@ -295,14 +300,8 @@ Deno.test("am agent: expect operators and trigger actions are the CLI's", () => 
   );
   assertEquals(shownOps.sort(), ops.sort());
 
-  const inspect = read("src/am/am-cmd-inspect.ts");
-  const from = inspect.indexOf("const actions = new Set([");
-  const actions = [
-    ...inspect.slice(from, inspect.indexOf("]);", from)).matchAll(
-      /"([a-zA-Z]+)"/g,
-    ),
-  ]
-    .map((m) => m[1]!);
+  // THE list `am trigger` accepts (am-help-text.ts, read by cmdTrigger).
+  const actions = [...TRIGGER_ACTIONS];
   const tasks = body("tasks");
   const at = tasks.indexOf(`am trigger [idx] "App:AddButton" `);
   assert(at !== -1, "trigger line moved");

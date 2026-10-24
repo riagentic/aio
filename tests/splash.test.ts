@@ -1336,16 +1336,18 @@ Deno.test("splash place: centred on the app window's saved bounds, fitted to a s
   // A saved window on a screen that is gone: moved into the one it overlaps
   // most, as Electron moves the window itself, then centred on.
   const half = { x: 3500, y: 300, width: 800, height: 600 };
-  assertEquals(at({ target: half }), { x: 3280, y: 420 });
+  // (Moved EDGE_MARGIN — 64 — inside DP-0.8's right edge: 4000-64-800.)
+  assertEquals(at({ target: half }), { x: 3216, y: 420 });
   // Overlapping none: the first screen, as Electron's own fit picks.
   const gone = { x: 5000, y: 300, width: 800, height: 600 };
-  assertEquals(at({ target: gone }), { x: 1840, y: 512 });
-  // Kept inside the screen; one larger than it sits at its top-left.
+  assertEquals(at({ target: gone }), { x: 1776, y: 576 });
+  // Kept EDGE_MARGIN inside the screen (an NVIDIA X driver has crashed on a
+  // window at its edge, feedback/critical.md); one larger sits at the margin.
   assertEquals(at({ target: { x: 0, y: 392, width: 100, height: 100 } }), {
-    x: 0,
-    y: 392,
+    x: 64,
+    y: 456,
   });
-  assertEquals(at({ w: 3000, target: null }), { x: 0, y: 932 });
+  assertEquals(at({ w: 3000, target: null }), { x: 64, y: 932 });
   // The saved file (the main script's own rule): no position → the size
   // alone; unreadable → the declared size; a declared size that changed wins.
   assertEquals(boundsFromState('{"width":900,"height":700}', 800, 600), {

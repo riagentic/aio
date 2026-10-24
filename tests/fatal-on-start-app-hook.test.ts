@@ -63,3 +63,19 @@ Deno.test("without fatalOnStart the failure is logged and the app keeps running"
   assertEquals(r.code, 7, r.text);
   assert(r.text.includes("onStart hook error"), r.text);
 });
+
+// The exit runs the shutdown contract first, like every other stop. A bare
+// `Deno.exit(1)` skipped it: `onStopping`/`onStop` never ran and the final
+// persist never happened — a worker cell's write committed by the failing
+// `onStart` itself was gone on the next launch.
+Deno.test("fatalOnStart: the exit runs the shutdown contract (onStopping, onStop) first", async () => {
+  const r = await boot(
+    `onStopping() { console.log("PROBE_STOPPING"); },
+  onStop() { console.log("PROBE_STOP"); },
+  async onStart() { await c.inc(); throw new Error("late"); }`,
+    true,
+  );
+  assertEquals(r.code, 1, r.text);
+  assert(r.text.includes("PROBE_STOPPING"), r.text);
+  assert(r.text.includes("PROBE_STOP\n"), r.text);
+});

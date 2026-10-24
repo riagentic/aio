@@ -58,8 +58,8 @@ import { processPlan } from "./am-components.ts";
 import type { StartedBy } from "./am-instance.ts";
 import { trojanGet } from "./am-http.ts";
 import {
+  appIdOnPort,
   notAnsweringLine,
-  resolveLockTarget,
   startedByInstance,
 } from "./am-cmd-stop.ts";
 import {
@@ -148,19 +148,26 @@ export async function cmdStatus(
   // comment states the rule: "a flag the help lists as global, silently
   // ignored by one verb of three, is worse than a flag that does not exist".
   let appId = resolveAmAppId(flags.app);
+  /** `--port=N` with no aio app on N (and no `--app`): STOPPED (exit 1, the
+   *  documented shape), never the cwd app's lock — that answered "started",
+   *  exit 0, about a port nobody named. */
+  let nothingOnPort = false;
   if (flags.port !== undefined) {
-    const t = resolveLockTarget(flags);
-    if (t.kind === "target") appId = t.target.appId;
-    else if (t.kind === "none") {
-      outError(t.error, mode);
+    const r = await appIdOnPort(flags);
+    if (r.ok) appId = r.appId;
+    else if (r.nothingThere) {
+      // An explicit `--app` still names its own instance; only the cwd's
+      // GUESS is never a stand-in for the port.
+      nothingOnPort = !flags.app;
+      if (mode === "pretty") sayErr(`am: ${r.error}`);
+    } else {
+      outError(r.error, mode);
       Deno.exit(1);
     }
-    // `probe`: nothing of ours holds that port — fall through to the
-    // stopped/probe reporting below with the cwd's own id.
   }
   // Wherever the instance's home is: `am status` and `am instances` read the
   // same fact, so they can never disagree about an `appDir`-homed app again.
-  const pf = liveLock(appId);
+  const pf = nothingOnPort ? null : liveLock(appId);
   // Another apps root's app under this lock folder name: answered, and said.
   const otherAppsDir = sayOtherRoot(pf);
 
@@ -172,6 +179,7 @@ export async function cmdStatus(
   // every appId. Saying which id was asked about, and what else is running,
   // makes it one answer.
   if (!pf) {
+    const crash = nothingOnPort ? null : lastRunCrash(appId);
     const others = runningApps();
     // Its PROFILES are not "the app", but they are what the reader is looking
     // for when the app itself is stopped: name each, with the command.
@@ -188,6 +196,7 @@ export async function cmdStatus(
       {
         appId,
         status: "stopped",
+        ...(crash ? { crashed: true, lastError: crash } : {}),
         running: others.map((i) =>
           i.profile ? `${i.appId}@${i.profile}` : i.appId
         ),
@@ -206,7 +215,16 @@ export async function cmdStatus(
       mode,
       () =>
         stack(
-          `${mark("warn")} ${style.bold(appId)}  ${style.dim("stopped")}`,
+          `${mark("warn")} ${style.bold(appId)}  ${
+            style.dim(crash ? "stopped — crashed" : "stopped")
+          }`,
+          crash !== null &&
+            block(
+              "bad",
+              `Its last run did not shut down cleanly (a crash, or a kill).`,
+              crash,
+              `am logs --app=${appId}`,
+            ),
           inInstances.length > 0 &&
             block(
               "info",
@@ -248,8 +266,15 @@ export async function cmdStatus(
   // Lock file exists but process dead → stale, clean up
   if (!alive) {
     removePid(appId, pf);
+    const crash = lastRunCrash(appId);
     out(
-      mode === "pretty" ? `${appId}: stopped` : { appId, status: "stopped" },
+      mode === "pretty"
+        ? `${appId}: stopped${crash ? ` — crashed: ${crash}` : ""}`
+        : {
+          appId,
+          status: "stopped",
+          ...(crash ? { crashed: true, lastError: crash } : {}),
+        },
       mode,
     );
     Deno.exit(1);
@@ -724,5 +749,60 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
       })),
       mode,
     );
+  }
+}
+
+/** How a STOPPED app's last run ended, from the tail of its framework log:
+ *  null when it shut down cleanly (or the tail cannot tell), else its last
+ *  error line — or `"no shutdown line …"` when it simply stopped writing. A
+ *  clean shutdown, however it was asked for, writes the `app stopped
+ *  uptime=…` summary after the run's `app started`; a crash, an exit from the
+ *  crash handler or a kill never does. `am status` said plain "stopped" for
+ *  both. Pure. */
+export function crashOfLog(text: string): string | null {
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const isStop = (l: string) => /\bstopped\b/.test(l) && /\buptime\b/.test(l);
+  const isStart = (l: string) =>
+    /\bapp\b.*\bstarted\b/.test(l) && /\bcells\b/.test(l);
+  const isCrash = (l: string) => l.includes("[crash-handler]");
+  const stop = lines.findLastIndex(isStop);
+  const start = lines.findLastIndex(isStart);
+  if (stop >= 0 && stop > start) return null;
+  if (start < 0 && !lines.some(isCrash)) return null; // the tail cannot tell
+  const err = lines.slice(Math.max(start, 0)).findLast((l) =>
+    /\bERROR\b|"level":\s*"error"/.test(l)
+  );
+  if (err === undefined) {
+    return "no shutdown line — the process ended without one";
+  }
+  // The message alone: no timestamp/level, no `  key=value` data fields.
+  return err.replace(/^\S+ \S+\s+ERROR\s+/, "")
+    .split(/\s{2,}(?=[\w.]+=)/)[0]!
+    .replace(/\s+/g, " ")
+    .slice(0, 300);
+}
+
+/** `crashOfLog` over the tail of `appId`'s `app.log`, or null without one. */
+function lastRunCrash(appId: string): string | null {
+  let f: Deno.FsFile;
+  try {
+    f = Deno.openSync(join(appDirs(appId).logs, "app.log"));
+  } catch {
+    return null; // aio-ok: never ran here, or no log — nothing to say
+  }
+  try {
+    const size = f.statSync().size;
+    const tail = Math.min(size, 65_536);
+    const buf = new Uint8Array(tail);
+    f.seekSync(size - tail, Deno.SeekMode.Start);
+    let got = 0;
+    while (got < tail) {
+      const n = f.readSync(buf.subarray(got));
+      if (n === null) break;
+      got += n;
+    }
+    return crashOfLog(new TextDecoder().decode(buf.subarray(0, got)));
+  } finally {
+    f.close();
   }
 }

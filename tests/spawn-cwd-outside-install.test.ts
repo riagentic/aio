@@ -72,10 +72,11 @@ const KEEPS_ITS_CWD: [string, string, number, string][] = [
   [
     "src/server/no-console.ts",
     "symbols.CreateProcessW(",
-    2,
+    3,
     "raw CreateProcessW: the hidden-console helper passes " +
-    "`hiddenConsoleHelper().cwd`, the swap helper its caller's `cwd` " +
-    "(both pinned by tests/no-console.test.ts)",
+    "`hiddenConsoleHelper().cwd`, the swap helper its caller's `cwd`, the " +
+    "first-run verdict `neutralCwd()` in a buffer it holds across the call " +
+    "(all pinned by tests/no-console.test.ts)",
   ],
   [
     "src/server/pick-path.ts",

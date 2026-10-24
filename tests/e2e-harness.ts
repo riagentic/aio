@@ -8,7 +8,11 @@
 
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { aioTestDir } from "../src/testing/test-strict.ts";
-import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
+import {
+  childCoverageDir,
+  dropTempDir,
+  tempDir,
+} from "../src/testing/temp-dir.ts";
 import { browserHomeEnv, dropBrowserProfile } from "../src/testing/chromium.ts";
 import { stopChild } from "./stop-child.ts";
 import { freePort } from "../src/testing/server-test.ts";
@@ -153,7 +157,9 @@ export interface Tab {
 }
 
 async function writeApp(spec: E2eApp): Promise<string> {
-  const dir = await Deno.makeTempDir({ prefix: "aio-e2e-" });
+  // Registered (tempDir): a run that dies before any cleanup still has the
+  // exit sweep remove it.
+  const dir = await tempDir("aio-e2e-");
   await Deno.mkdir(`${dir}/src`);
   await Deno.writeTextFile(
     `${dir}/deno.json`,
@@ -197,10 +203,20 @@ async function writeApp(spec: E2eApp): Promise<string> {
 
 /** Boot a real aio server for the given app on a free port. */
 export async function boot(spec: E2eApp): Promise<Server> {
-  const dir = await writeApp(spec);
-  const port = freePort();
+  return await bootDir(await writeApp(spec), { own: true });
+}
+
+/** Boot the app in `dir` (already written) — on `port` (default: a free one),
+ *  with `args` after the harness's own (`--prod`). `own`: the dir is removed
+ *  if the boot fails (it was the harness's to begin with); otherwise it stays
+ *  the caller's either way — a restart of one app boots its dir twice. */
+export async function bootDir(
+  dir: string,
+  opts: { port?: number; args?: string[]; own?: boolean } = {},
+): Promise<Server> {
+  const port = opts.port ?? freePort();
   const base = `http://localhost:${port}`;
-  const proc = spawnServer(dir, port);
+  const proc = spawnServer(dir, port, opts.args);
   // A dead server is not a slow server, and `waitFor` swallows whatever its
   // probe throws — so the readiness loop is explicit here. A crash now reports
   // itself in milliseconds with its own stack trace instead of burning the
@@ -216,6 +232,9 @@ export async function boot(spec: E2eApp): Promise<Server> {
     // Let the drain loops catch the child's final pipe chunks (bounded), so
     // the message carries the whole stack trace, not a race-truncated prefix.
     await settleOutput(proc);
+    // The app dir is the caller's only once boot returns: a server that never
+    // came up left every /tmp/aio-e2e-* behind.
+    if (opts.own) await dropTempDir(dir);
     throw new Error(
       `${why}\n--- server output (last ${CHILD_LOG_CAP}B) ---\n` +
         serverOutput(proc),
@@ -349,7 +368,11 @@ function _e2eAppsDir(): string {
   return dir;
 }
 
-export function spawnServer(dir: string, port: number): Deno.ChildProcess {
+export function spawnServer(
+  dir: string,
+  port: number,
+  extraArgs: string[] = [],
+): Deno.ChildProcess {
   const proc = new Deno.Command(Deno.execPath(), {
     // DISPLAY comes from the nested test display, not the developer's session:
     // this harness passes --client=server-only so nothing opens today, but
@@ -376,6 +399,7 @@ export function spawnServer(dir: string, port: number): Deno.ChildProcess {
       "src/app.ts",
       "--client=server-only",
       `--port=${port}`,
+      ...extraArgs,
     ],
     cwd: dir,
     stdin: "null",
@@ -411,7 +435,12 @@ export function spawnServer(dir: string, port: number): Deno.ChildProcess {
 
 /** Open a real headless-Chromium tab against the server and resolve when its
  *  app client has registered. */
-export async function openTab(server: Server): Promise<Tab> {
+/** A headless-Chromium tab on `url` with its own throwaway profile — no
+ *  trojan needed (a `--prod` server has none). `close` stops it and drops the
+ *  profile. */
+export async function launchBrowser(
+  url: string,
+): Promise<{ proc: Deno.ChildProcess; close: () => Promise<void> }> {
   const profile = await tempDir("aio-e2e-prof-");
   const proc = new Deno.Command(BROWSER!, {
     args: [
@@ -423,20 +452,24 @@ export async function openTab(server: Server): Promise<Tab> {
       `--password-store=basic`,
       `--use-mock-keychain`,
       `--user-data-dir=${profile}`,
-      `${server.base}/`,
+      url,
     ],
     env: browserHomeEnv(profile),
     stdin: "null",
     stdout: "null",
     stderr: "null",
   }).spawn();
-
   const close = async () => {
     await stopChild(proc, { quiet: true });
     // Its helpers too, before the profile goes: they outlive the browser
     // and wrote the removed profile back (aio-e2e-prof-* orphans).
     await dropBrowserProfile(profile);
   };
+  return { proc, close };
+}
+
+export async function openTab(server: Server): Promise<Tab> {
+  const { proc, close } = await launchBrowser(`${server.base}/`);
   let index: number;
   try {
     const before = await currentBrowserIndices(server);
@@ -481,7 +514,9 @@ export async function openTab(server: Server): Promise<Tab> {
   };
 }
 
-async function currentBrowserIndices(server: Server): Promise<number[]> {
+export async function currentBrowserIndices(
+  server: Pick<Server, "base">,
+): Promise<number[]> {
   try {
     const cs = await (await fetch(`${server.base}/__aio/trojan/clients`))
       .json() as { index: number; type: string }[];
@@ -511,6 +546,6 @@ export async function withE2E(
   } finally {
     for (const t of tabs) await t.close();
     await server.stop();
-    await Deno.remove(server.dir, { recursive: true }).catch(() => {});
+    await dropTempDir(server.dir);
   }
 }

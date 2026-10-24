@@ -16,7 +16,13 @@ import { DENO_JSON_NAMES } from "../server/deno-json.ts";
 import { resolveShare, type ShareRoot } from "../server/app-dirs.ts";
 import { basename, dirname, join, relative, resolve } from "@std/path";
 import { serverOnlyDynamic } from "./esbuild-plugin.ts";
-import { DIST_STAGED, emptyDir, foreignDistRefusal } from "./dist-staging.ts";
+import {
+  BUNDLE_INPUTS,
+  DIST_STAGED,
+  emptyDir,
+  foreignDistRefusal,
+  parkOtherShape,
+} from "./dist-staging.ts";
 import { type BuildConfig, isStandalone } from "./build-config.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
@@ -35,7 +41,7 @@ import {
   servedWorkers,
 } from "../server/graph-validator.ts";
 import { bytes } from "../diagnostics/fmt.ts";
-import { bad, ok, staged, step, warn } from "./build-say.ts";
+import { bad, ok, staged, stagedInto, step, warn } from "./build-say.ts";
 import { minifyDeclared } from "./minify-server.ts";
 import { HEY, NO } from "../diagnostics/fmt.ts";
 import {
@@ -52,7 +58,7 @@ import {
  *  `build.ts` sweeps everything but app.js/style.css/icon.png out of it before
  *  compiling — the record would be gone before the next freshness check. */
 function inputsManifestPath(root: string): string {
-  return join(root, ".aio", "bundle-inputs.json");
+  return join(root, BUNDLE_INPUTS);
 }
 
 interface BundleInputs {
@@ -581,6 +587,7 @@ export async function runBundle(
   cfg: BuildConfig,
   mainConfig: Record<string, unknown>,
 ): Promise<void> {
+  const into = stagedInto(cfg);
   const {
     out,
     dist,
@@ -714,11 +721,29 @@ export async function runBundle(
     }
   };
 
+  // A bundle of another shape in dist/ waits in its own slot, and this
+  // target's comes back — a fleet mixing shapes reuses both.
+  {
+    const s = await readBundleStamps(out);
+    await parkOtherShape(
+      root,
+      dist,
+      s && { target: s.target, ui: s.ui ?? UI_ENTRY },
+      {
+        target: standalone ? "android" : "browser",
+        ui: cfg.uiEntry ?? UI_ENTRY,
+      },
+    );
+  }
   const bundleFresh = await isBundleFresh(cfg);
 
   if (bundleFresh) {
     const s = await Deno.stat(out);
-    staged("dist/app.js", `cached, ${bytes(s.size)} — --force rebuilds it`);
+    staged(
+      "dist/app.js",
+      `cached, ${bytes(s.size)} — --force rebuilds it`,
+      into,
+    );
     const rec = await readBundleInputs(root, out, appDir);
     await workerWarnings(
       (rec?.inputs ?? []).map((p) => relative(root, p).replaceAll("\\", "/")),
@@ -822,6 +847,7 @@ export async function runBundle(
           `dist/${BUNDLE_MAP}`,
           `${bytes(bundle.map.length)} — forwarded client errors name your ` +
             `source, not app.js:1:… (never served: dot-prefixed)`,
+          into,
         );
       }
     }
@@ -954,6 +980,7 @@ export async function runBundle(
       staged(
         `dist/${w.name}`,
         `${bytes(w.code.length)} — the worker ${w.entryKey}`,
+        into,
       );
     }
 
@@ -970,7 +997,7 @@ export async function runBundle(
     );
 
     const stat = await Deno.stat(out);
-    staged("dist/app.js", bytes(stat.size));
+    staged("dist/app.js", bytes(stat.size), into);
 
     // `--analyze`: where those bytes went. Two reports asked for a treemap;
     // the answerable version of that question is "which twenty things are most
@@ -1025,7 +1052,7 @@ export async function runBundle(
   } catch { /* no style.css at the app dir; legacy src/ checked below */ }
   if (hasStyle) {
     await Deno.copyFile(styleSrc, join(dist, APP_STYLE));
-    staged("dist/style.css");
+    staged("dist/style.css", undefined, into);
   } else if (appDir !== join(root, "src")) {
     // The legacy trap, made loud: a style.css at src/ that the app-dir rule
     // does NOT cover was never served in dev; silently shipping it would make
@@ -1062,7 +1089,7 @@ export async function runBundle(
   if (iconSrc) {
     await Deno.copyFile(iconSrc, join(dist, APP_ICON));
     await Deno.remove(join(dist, "icon.svg")).catch(() => {});
-    staged("dist/icon.png");
+    staged("dist/icon.png", undefined, into);
   } else {
     // An icon.svg is not the icon (APP_ICON_SVG) — say so, as dev does.
     const svg = join(appDir, APP_ICON_SVG);
@@ -1092,6 +1119,6 @@ export async function runBundle(
       join(dist, "icon.svg"),
       appIconSvg(label, 512, id),
     );
-    staged("dist/icon.png", `generated monogram "${label}"`);
+    staged("dist/icon.png", `generated monogram "${label}"`, into);
   }
 }

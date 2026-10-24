@@ -12,7 +12,11 @@ import { isCompiled } from "../server/paths.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { renameOver } from "../diagnostics/rename-over.ts";
 import { capDelay } from "../state/timer-ceiling.ts";
-import { looksLikeWrite, statementVerb } from "./sql-shape.ts";
+import {
+  controlsTransaction,
+  looksLikeWrite,
+  statementVerb,
+} from "./sql-shape.ts";
 import { syncDir, syncFile } from "./durable.ts";
 import { basename, dirname, join, resolve } from "@std/path";
 
@@ -244,7 +248,13 @@ export function multiStatementRejection(
   method = "db.execute()",
 ): string | null {
   const n = countSqlStatements(sql);
-  if (n <= 1) return null;
+  // SQLite answers an empty prepare with the words "not an error" — as the
+  // ERROR message. Say what happened instead.
+  if (n === 0) {
+    return `${method} was given no statement — the SQL is empty, or only ` +
+      `comments/semicolons. Nothing was run.`;
+  }
+  if (n === 1) return null;
   return `${method} runs exactly ONE statement — this SQL has ${n}. ` +
     `SQLite prepares the FIRST and discards the rest, so a pasted ` +
     `multi-statement migration applied partially, returned changes: 0, and ` +
@@ -253,6 +263,43 @@ export function multiStatementRejection(
     `or call execute() once per statement. (One statement per call is also ` +
     `what keeps the \`am sql\` route from being a multi-statement injection ` +
     `surface, so it is enforced, not relaxed.)`;
+}
+
+/** Why `params` cannot be bound as the caller meant it, or null.
+ *
+ *  `node:sqlite` reads an OBJECT in the first position as a bag of NAMED
+ *  parameters (`[{ v: 1 }]` for `:v`) — and one with no own keys binds
+ *  nothing, so every `?` in the statement became NULL without an error:
+ *  `execute("INSERT INTO ev (at) VALUES (?)", [new Date()])` stored NULL and
+ *  reported `changes: 1`. A Map, Set, ArrayBuffer or nested array lands in the
+ *  same branch. Only a plain object can be a named-parameter bag. And a
+ *  non-array `params` (`query(sql, 5)`, `query(sql, "abc")`) was spread by
+ *  the worker — a string into its characters. */
+export function paramsRefusal(params: unknown, sql: string): string | null {
+  if (params === undefined || params === null) return null;
+  const at = ` (sql: ${sql.trim().slice(0, 80)})`;
+  if (!Array.isArray(params)) {
+    return `db: params must be an ARRAY of values — got ${typeof params}` +
+      `${at}. Wrap a single value: [value].`;
+  }
+  const first = params[0];
+  if (
+    typeof first === "object" && first !== null && !ArrayBuffer.isView(first) &&
+    Object.prototype.toString.call(first) !== "[object Object]"
+  ) {
+    const kind = Object.prototype.toString.call(first).slice(8, -1);
+    return `db: parameter 1 is a ${kind} — SQLite cannot store it, and in ` +
+      `the first position it is read as a bag of NAMED parameters, so every ` +
+      `\`?\` would silently bind NULL${at}. Convert it first ` +
+      `(${
+        kind === "Date"
+          ? "date.toISOString() or date.getTime()"
+          : kind === "ArrayBuffer"
+          ? "new Uint8Array(buffer)"
+          : "JSON.stringify(value)"
+      }).`;
+  }
+  return null;
 }
 
 /** Multi-statement `db.transaction()` entries already warned about — once per
@@ -325,6 +372,74 @@ export function mergePragmas(
   ];
 }
 
+/** How the read-back of a pragma spells each value a setter may name. */
+const PRAGMA_VALUES: Record<string, Record<string, string>> = {
+  synchronous: { off: "0", normal: "1", full: "2", extra: "3" },
+  foreign_keys: { off: "0", false: "0", no: "0", on: "1", true: "1", yes: "1" },
+  temp_store: { default: "0", file: "1", memory: "2" },
+  journal_mode: {},
+};
+
+/** Each of `pragmas` that did not take on `db`, as a sentence — or `[]`.
+ *
+ *  SQLite answers a pragma it does not know with SILENCE, and a value it does
+ *  not know with its default: measured on this driver, `PRAGMA synchronus =
+ *  FULL` (typo) and `PRAGMA synchronous = FUL` both left `synchronous` at
+ *  NORMAL — the power-cut durability the app asked for, not there — and
+ *  `PRAGMA journal_mode = WALL` replaced the default WAL and opened the file
+ *  in rollback-journal mode. A name is checked against `pragma_pragma_list`;
+ *  a value is read back for the settings above, whose spellings are known. */
+export async function pragmaRefusals(
+  db: Pick<DB, "query">,
+  pragmas: readonly string[],
+): Promise<string[]> {
+  const known = new Set(
+    (await db.query<{ name: string }>("SELECT name FROM pragma_pragma_list"))
+      .rows.map((r) => r.name),
+  );
+  const out: string[] = [];
+  for (const stmt of pragmas) {
+    const m = /^\s*PRAGMA\s+(?:\w+\s*\.\s*)?(\w+)\s*(?:=\s*([^;]*?))?\s*;?\s*$/i
+      .exec(stmt);
+    if (!m) continue;
+    const name = m[1]!.toLowerCase();
+    if (known.size > 0 && !known.has(name)) {
+      out.push(
+        `"${stmt}": SQLite has no pragma "${name}" — it ignores the statement ` +
+          `without an error, so this setting is NOT in effect`,
+      );
+      continue;
+    }
+    const spell = PRAGMA_VALUES[name];
+    if (m[2] === undefined || !spell) continue;
+    const asked = m[2].replace(/^['"]|['"]$/g, "").toLowerCase();
+    const row = (await db.query(`PRAGMA ${name}`)).rows[0];
+    const got = String(row ? Object.values(row)[0] : "").toLowerCase();
+    // An in-memory database has no journal file to put in another mode.
+    if (name === "journal_mode" && got === "memory") continue;
+    if ((spell[asked] ?? asked) !== got) {
+      out.push(
+        `"${stmt}": SQLite reads back ${name} = ${got} — the value was not ` +
+          `taken (a value SQLite does not know falls back without an error)`,
+      );
+    }
+  }
+  return out;
+}
+
+/** @internal The write feed a `createDB` handle exposes under this symbol:
+ *  `db[WRITE_FEED](fn)` calls `fn(sqls)` after every write through THAT
+ *  handle commits — `execute`, a writing `query`, both `transaction` forms —
+ *  awaited before the write's own promise resolves, and returns an
+ *  unsubscribe. `reactiveDB` listens here, so a live query also sees writes
+ *  it did not issue itself: the framework's bound-table persistence, or the
+ *  app's own `app.db.execute()` beside the wrapper. Not on the `DB` type: a
+ *  custom `DB` without it keeps the wrapper-only change feed. */
+export const WRITE_FEED: unique symbol = Symbol.for("aio.db.writeFeed");
+/** @internal What a {@linkcode WRITE_FEED} listener receives: the committed
+ *  write statements, in order. */
+export type WriteListener = (sqls: readonly string[]) => Promise<void>;
+
 /** Options for createDB — readonly mode, custom pragmas, read replicas */
 export type DBOpts = {
   readonly?: boolean;
@@ -356,6 +471,19 @@ type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
  *  Generous on purpose — it exists to convert a HANG into an error, not to
  *  police slow queries. */
 export const DB_REQUEST_TIMEOUT_MS = 120_000;
+
+/** `tx.execute("COMMIT")` (or ROLLBACK/END/BEGIN) inside the callback ended
+ *  the transaction `db.transaction()` owns: every later `tx` statement then
+ *  ran in autocommit, and a throw after it was NOT rolled back — the
+ *  documented "rolled back on throw" was false. The callback's outcome is
+ *  the only commit/rollback. */
+function _txControlRejection(sql: string, method: string): string | null {
+  if (!controlsTransaction(sql)) return null;
+  return `${method}: "${statementVerb(sql)}" is refused inside a ` +
+    `db.transaction() callback — the callback owns the transaction: return ` +
+    `to COMMIT, throw to ROLLBACK. (SAVEPOINT / RELEASE / ROLLBACK TO nest ` +
+    `inside it and are allowed.) Nothing was run.`;
+}
 
 /** A `tx` used after its `db.transaction()` callback settled would run in
  *  autocommit — or inside ANOTHER callback's open transaction, and be rolled
@@ -495,6 +623,17 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     DB_REQUEST_TIMEOUT_MS,
   );
   function sendTo<T>(w: Worker, msg: WorkerMsg): Promise<T> {
+    // Every statement door (query, execute, both transaction forms, tx.*)
+    // reaches the worker here, before the structured clone.
+    const unbindable = msg.type === "query" || msg.type === "execute"
+      ? paramsRefusal(msg.params, msg.sql)
+      : msg.type === "transaction"
+      ? msg.stmts.reduce<string | null>(
+        (bad, s) => bad ?? paramsRefusal(s.params, s.sql),
+        null,
+      )
+      : null;
+    if (unbindable) return Promise.reject(new Error(unbindable));
     const id = nextId++;
     return new Promise<T>((resolve, reject) => {
       // `close` runs its own bounded race in close() — a second ceiling here
@@ -633,7 +772,6 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         "db",
         `readers>0 ignored for an in-memory DB — each Worker gets its ` +
           `own :memory: DB; using writer-only.`,
-        { detail: String() },
       );
       numReaders = 0;
     }
@@ -846,6 +984,35 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       });
     });
   }
+  const _listeners = new Set<WriteListener>();
+  /** Has anything ever listened? Until then a write pays nothing. */
+  let _fed = false;
+  /** Tell the listeners `sqls` committed — AFTER the writer lock is released
+   *  (a listener re-runs queries, and may open its own read transaction),
+   *  BEFORE the caller's promise resolves (so `await db.execute(…)` means the
+   *  live queries are already fresh). A listener's throw is logged, never
+   *  returned: the write is committed and must not read as failed. */
+  function _announce<T>(
+    p: Promise<T>,
+    sqls: () => readonly string[],
+  ): Promise<T> {
+    if (!_fed) return p;
+    return p.then(async (r) => {
+      const written = sqls();
+      if (written.length === 0) return r;
+      for (const fn of [..._listeners]) {
+        try {
+          await fn(written);
+        } catch (e) {
+          log.error(
+            "db",
+            `a write listener threw — the write is COMMITTED: ${e}`,
+          );
+        }
+      }
+      return r;
+    });
+  }
   function withWriterLock<T>(fn: () => Promise<T>): Promise<T> {
     const result: Promise<T> = _writerLock.then(fn);
     _writerLock = result.then(
@@ -858,7 +1025,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     return result;
   }
 
-  return {
+  const handle: DB & { [WRITE_FEED](fn: WriteListener): () => void } = {
     // Reads route to replica pool (or writer if no replicas configured)
     query<T = Record<string, unknown>>(
       sql: string,
@@ -900,8 +1067,11 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         _warnLockInScope("db.query() with a writing statement");
         // To the WRITER: a reader worker opens the file read-only, so a write
         // routed there with `readers > 0` could only fail.
-        return withWriterLock(() =>
-          gate<QueryResult<T>>({ type: "query", sql, params }, true)
+        return _announce(
+          withWriterLock(() =>
+            gate<QueryResult<T>>({ type: "query", sql, params }, true)
+          ),
+          () => [sql],
         );
       }
       // A READ from outside an open callback transaction must not see that
@@ -939,8 +1109,11 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       const bad = multiStatementRejection(sql);
       if (bad) return Promise.reject(new Error(bad));
       _warnLockInScope("db.execute()");
-      return withWriterLock(() =>
-        gate<QueryResult>({ type: "execute", sql, params })
+      return _announce(
+        withWriterLock(() =>
+          gate<QueryResult>({ type: "execute", sql, params })
+        ),
+        () => [sql],
       );
     },
     transaction(
@@ -989,88 +1162,111 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
             );
           }
         }
-        return withWriterLock(() =>
-          gate<QueryResult[]>({ type: "transaction", stmts: stmts_or_fn })
+        const stmts = stmts_or_fn;
+        return _announce(
+          withWriterLock(() =>
+            gate<QueryResult[]>({ type: "transaction", stmts })
+          ),
+          () => stmts.map((s) => s.sql),
         );
       }
 
-      // Callback form: acquire write lock, BEGIN/COMMIT wrapping the async callback
-      return withWriterLock(async () => {
-        const scope = { open: true };
-        _callbackOpen = true;
-        // A refused BEGIN means a transaction is ALREADY open on the writer
-        // (an app's own `execute("BEGIN")`) — rolling back then undid THAT
-        // one, and its later statements landed alone in autocommit.
-        let begun = false;
-        // The transaction lives on the connection BEGIN ran on. A pool
-        // teardown (any worker dying) kills it — SQLite rolls the open
-        // transaction back — and `gate()` would carry every later tx
-        // statement to a FRESH writer in autocommit: `BEGIN; INSERT A` →
-        // teardown → `INSERT B; COMMIT` left B committed without A. Pinned to
-        // its writer, a tx statement after the teardown is refused by name.
-        let txWriter: Worker | null = null;
-        const txSend = <T>(msg: WorkerMsg): Promise<T> =>
-          closed
-            ? gate<T>(msg) // says CLOSED, loudly
-            : !txWriter || writerWorker !== txWriter
-            ? Promise.reject(new Error(_txLostWriter))
-            : sendTo<T>(txWriter, msg);
-        try {
-          await _txProgress(
-            gate<QueryResult>({ type: "execute", sql: "BEGIN" }, true, (w) => {
-              txWriter = w;
-            }),
-          );
-          begun = true;
-          const tx: Tx = {
-            // tx.query goes to writer — must see current transaction's own writes
-            query: <T>(sql: string, params?: unknown[]) => {
-              if (!scope.open) return Promise.reject(new Error(_staleTx));
-              const bad = multiStatementRejection(sql, "tx.query()");
-              if (bad) return Promise.reject(new Error(bad));
-              return _txProgress(
-                txSend<QueryResult<T>>({ type: "query", sql, params }),
-              );
-            },
-            execute: (sql: string, params?: unknown[]) => {
-              if (!scope.open) return Promise.reject(new Error(_staleTx));
-              const bad = multiStatementRejection(sql, "tx.execute()");
-              if (bad) return Promise.reject(new Error(bad));
-              return _txProgress(
-                txSend<QueryResult>({ type: "execute", sql, params }),
-              );
-            },
-          };
-          // The callback — and everything it awaits — runs inside the scope,
-          // so a `db.transaction()` reached from within it is the real
-          // nesting the check above refuses.
-          let result: unknown;
+      // Callback form: acquire write lock, BEGIN/COMMIT wrapping the async callback.
+      // What it wrote is collected as it is sent, so the write feed names
+      // exactly those statements (a read-only callback announces nothing).
+      const wrote: string[] = [];
+      return _announce(
+        withWriterLock(async () => {
+          const scope = { open: true };
+          _callbackOpen = true;
+          // A refused BEGIN means a transaction is ALREADY open on the writer
+          // (an app's own `execute("BEGIN")`) — rolling back then undid THAT
+          // one, and its later statements landed alone in autocommit.
+          let begun = false;
+          // The transaction lives on the connection BEGIN ran on. A pool
+          // teardown (any worker dying) kills it — SQLite rolls the open
+          // transaction back — and `gate()` would carry every later tx
+          // statement to a FRESH writer in autocommit: `BEGIN; INSERT A` →
+          // teardown → `INSERT B; COMMIT` left B committed without A. Pinned to
+          // its writer, a tx statement after the teardown is refused by name.
+          let txWriter: Worker | null = null;
+          const txSend = <T>(msg: WorkerMsg): Promise<T> =>
+            closed
+              ? gate<T>(msg) // says CLOSED, loudly
+              : !txWriter || writerWorker !== txWriter
+              ? Promise.reject(new Error(_txLostWriter))
+              : sendTo<T>(txWriter, msg);
           try {
-            result = await _txScope.run(scope, () => stmts_or_fn(tx));
-          } finally {
-            // Whatever the callback left running is no longer inside it.
-            scope.open = false;
-          }
-          await _txProgress(
-            txSend<QueryResult>({ type: "execute", sql: "COMMIT" }),
-          );
-          return result;
-        } catch (e) {
-          // Only ROLLBACK if BEGIN succeeded (we're actually in a transaction)
-          if (begun) {
+            await _txProgress(
+              gate<QueryResult>(
+                { type: "execute", sql: "BEGIN" },
+                true,
+                (w) => {
+                  txWriter = w;
+                },
+              ),
+            );
+            begun = true;
+            const tx: Tx = {
+              // tx.query goes to writer — must see current transaction's own writes
+              query: <T>(sql: string, params?: unknown[]) => {
+                if (!scope.open) return Promise.reject(new Error(_staleTx));
+                const bad = multiStatementRejection(sql, "tx.query()") ??
+                  _txControlRejection(sql, "tx.query()");
+                if (bad) return Promise.reject(new Error(bad));
+                if (looksLikeWrite(sql)) wrote.push(sql);
+                return _txProgress(
+                  txSend<QueryResult<T>>({ type: "query", sql, params }),
+                );
+              },
+              execute: (sql: string, params?: unknown[]) => {
+                if (!scope.open) return Promise.reject(new Error(_staleTx));
+                const bad = multiStatementRejection(sql, "tx.execute()") ??
+                  _txControlRejection(sql, "tx.execute()");
+                if (bad) return Promise.reject(new Error(bad));
+                wrote.push(sql);
+                return _txProgress(
+                  txSend<QueryResult>({ type: "execute", sql, params }),
+                );
+              },
+            };
+            // The callback — and everything it awaits — runs inside the scope,
+            // so a `db.transaction()` reached from within it is the real
+            // nesting the check above refuses.
+            let result: unknown;
             try {
-              await txSend<QueryResult>({ type: "execute", sql: "ROLLBACK" });
-            } catch {
-              // aio-ok: SQLite already rolled back (e.g. SQLITE_FULL) — no
-              // transaction is left open, and `e` is the error that matters.
+              result = await _txScope.run(scope, () => stmts_or_fn(tx));
+            } finally {
+              // Whatever the callback left running is no longer inside it.
+              scope.open = false;
             }
+            await _txProgress(
+              txSend<QueryResult>({ type: "execute", sql: "COMMIT" }),
+            );
+            return result;
+          } catch (e) {
+            // Only ROLLBACK if BEGIN succeeded (we're actually in a transaction)
+            if (begun) {
+              try {
+                await txSend<QueryResult>({ type: "execute", sql: "ROLLBACK" });
+              } catch {
+                // aio-ok: SQLite already rolled back (e.g. SQLITE_FULL) — no
+                // transaction is left open, and `e` is the error that matters.
+              }
+            }
+            throw e;
+          } finally {
+            scope.open = false;
+            _callbackOpen = false;
           }
-          throw e;
-        } finally {
-          scope.open = false;
-          _callbackOpen = false;
-        }
-      });
+        }),
+        () => wrote,
+      );
+    },
+    [WRITE_FEED](fn: WriteListener): () => void {
+      _listeners.add(fn);
+      _fed = true;
+      return () => _listeners.delete(fn);
     },
     lastWriterError(): Error | null {
       return _lastWriterError;
@@ -1283,4 +1479,5 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
       pending.clear(); // drop settled/stale entries so a respawn starts clean
     },
   };
+  return handle;
 }

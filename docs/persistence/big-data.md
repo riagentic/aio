@@ -54,8 +54,11 @@ Rows belong in SQLite. Two ways in, one file (`state.db`):
   not millions): the array stays in state, so it still rides every connect frame
   and counts against the full-state frame line (not the persist lines — SQLite
   writes it row by row, outside the snapshot). Write it through state, never by
-  SQL: with `journal: true` a direct write to a bound table reads as a foreign
-  save, and the next boot sets the journal aside.
+  SQL: state is the source of truth, so a row written through `app.db` is not in
+  state — with no pk the next save rewrites the table and the row is gone; with
+  a pk it reaches state only at the next restart. `app.db` warns once per table
+  when that happens. With `journal: true` a direct write to a bound table also
+  reads as a foreign save, and the next boot sets the journal aside.
 - **SQL-only table** — declare a table no state array binds to. It is created
   and yours via `app.db`, and its rows never enter state, never serialize on a
   flush, never ride a broadcast. This is the bulk tier.
@@ -142,6 +145,9 @@ What the design buys:
 - **Content-addressed** — the id is the sha256 of the bytes, so identical
   content is stored once (dedup by construction) and `blobs.url(id)` is served
   with `Cache-Control: immutable`: a browser never re-downloads a blob it has.
+  The flip side: two records that stored the same bytes hold the **same id**,
+  and `delete(id)` removes the bytes for both. Delete a blob only when no record
+  of yours still names its id (count the references in your own metadata first).
 - **Streamed, never buffered** — `put()` accepts a `ReadableStream` and hashes
   chunks while spooling them to a temp file, then renames onto the hash. A
   multi-GB upload costs one chunk of memory, and a crash mid-put leaves no

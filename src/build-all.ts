@@ -36,6 +36,7 @@ import {
   SEPARATOR,
 } from "@std/path";
 import { moveArtifact, slugify } from "./build/build-helpers.ts";
+import { minifyDeclared } from "./build/minify-server.ts";
 import {
   emptyDir,
   foreignDistRefusal,
@@ -43,10 +44,13 @@ import {
   keepInDistStaging,
   moveDirContents,
   previousReleaseNote,
+  restoreBundle,
+  stashBundle,
 } from "./build/dist-staging.ts";
 import {
   applicationIdChangeNotes,
   readBuildManifest,
+  shipOutputEntries,
   strayOutEntries,
   versionRegressionNote,
 } from "./build/build-manifest.ts";
@@ -112,6 +116,18 @@ interface TargetSpec {
  *  Exact set equality, not a subset: `--compile --cli` is `cli` and
  *  `--compile --cli --remote` is `cli-client`, and a subset match would call
  *  the second one the first. Pure. */
+/** Does a target with these build flags run the bundle step? The mirror of
+ *  build.ts's `skipsBundle`. Pure. @internal */
+export function targetBundles(flags: readonly string[]): boolean {
+  const has = (f: string) => flags.includes(f);
+  return !has("--cli") && !has("--headless") && !has("--client") &&
+    !has("--ios") && !(has("--android") && has("--remote"));
+}
+
+/** The one TARGETS entry these CLI flags name (`--compile --cli` → its
+ *  target; `--cli` alone too, it implies `--compile`), or null when they name
+ *  none exactly. Flags that only qualify a build (`--name=`, `--release`…)
+ *  take no part. Pure. */
 export function targetForFlags(flags: readonly string[]): string | null {
   // Only the flags that BUILD something take part. `--name=`, `--platform=`,
   // `--entry=`, `--release` and friends qualify a build; they do not choose a
@@ -924,7 +940,7 @@ export async function buildAll(): Promise<number> {
     printTargets();
     return 1;
   }
-  const unknown = targetList.filter((t) => !(t.kind in TARGETS));
+  const unknown = targetList.filter((t) => !Object.hasOwn(TARGETS, t.kind));
   if (unknown.length > 0) {
     console.error(
       `${C.red}✗ unknown target(s): ${
@@ -959,6 +975,16 @@ export async function buildAll(): Promise<number> {
   } catch (e) {
     console.error(`${C.red}✗ ${(e as Error).message}${C.r}\n`);
     return 1;
+  }
+  // `build.minify` is read by every target that bundles or compiles; a value
+  // that is not a boolean was refused mid-target, as an uncaught stack trace.
+  if (targetList.some((t) => TARGETS[t.kind]?.role !== "client")) {
+    try {
+      await minifyDeclared(root);
+    } catch (e) {
+      console.error(`${C.red}${(e as Error).message}${C.r}\n`);
+      return 1;
+    }
   }
   // A fleet of clients with nothing to connect to is a config that BUILDS
   // fine and ships broken: `*-client` artifacts dial a server, and a fleet
@@ -1015,13 +1041,36 @@ export async function buildAll(): Promise<number> {
   // typo you find minutes later in a deno compile error — check it here, where
   // the target it belongs to can be named.
   const missingEntries: string[] = [];
+  const missingUi: string[] = [];
   for (const t of targetList) {
+    // …and its `ui`, which reached the build as `--ui=` and was refused there
+    // as "from --ui=", a flag nobody typed.
+    if (t.ui) {
+      const appDir = resolveAppDir(
+        root,
+        resolveEntryPath(denoJson, t.entry ?? flag("entry")),
+      );
+      try {
+        await Deno.stat(join(appDir, t.ui));
+      } catch {
+        missingUi.push(`${t.name} → ${join(appDir, t.ui)}`);
+      }
+    }
     if (!t.entry) continue;
     try {
       await Deno.stat(join(root, t.entry));
     } catch {
       missingEntries.push(`${t.name} → ${t.entry}`);
     }
+  }
+  if (missingUi.length > 0) {
+    console.error(
+      `${C.red}✗ build.targets ui not found:${C.r}\n${
+        missingUi.map((m) => `  ${m}`).join("\n")
+      }\n  ${C.dim}a target's "ui" is relative to its app dir — the ` +
+        `directory of its entry module${C.r}`,
+    );
+    return 1;
   }
   if (missingEntries.length > 0) {
     console.error(
@@ -1331,6 +1380,8 @@ export async function buildAll(): Promise<number> {
   );
 
   const results: TargetResult[] = [];
+  /** A target that bundles has run (and the cache was restored for it). */
+  let bundled = false;
   const rel = (p: string) => p.replace(root + SEPARATOR, "");
   /** Install steps for each placed systemd unit, printed with the summary. */
   const serviceInstalls: { target: string; lines: string[] }[] = [];
@@ -1384,6 +1435,15 @@ export async function buildAll(): Promise<number> {
             t.entry ? ` (${t.entry})` : ""
           }${C.r}`,
         );
+        // `out` IS the staging: the release placement below empties it,
+        // bundle and all, so the last bundle waits in .aio/ (`stashBundle`)
+        // and comes back right before the FIRST target that bundles — never
+        // earlier: a headless target embeds whatever bundle dist/ holds, and
+        // the cache may make a build faster, never different.
+        if (outIsStaging && !bundled && targetBundles(spec.flags)) {
+          bundled = true;
+          await restoreBundle(root, outDir);
+        }
         const before = await snapshot(targetBin);
         const args = [
           "run",
@@ -1518,6 +1578,9 @@ export async function buildAll(): Promise<number> {
       // Put the previous release back exactly as it was. The per-target builds
       // have been scribbling in `out` (that is why it was moved aside), so the
       // directory standing there now is intermediate rubbish, not a release.
+      // Only a run that bundled has a bundle to keep; any other leaves the
+      // cache as it was.
+      if (outIsStaging && bundled) await stashBundle(root, outDir);
       if (preserved) {
         await emptyDir(outDir, ["manifest.json"]);
         await moveDirContents(preservedOut, outDir);
@@ -1557,6 +1620,9 @@ export async function buildAll(): Promise<number> {
     const previousTargets = preserved
       ? await manifestTargetNames(join(preservedOut, "manifest.json"))
       : [];
+    // Only a run that bundled has a bundle to keep; any other leaves the
+    // cache as it was.
+    if (outIsStaging && bundled) await stashBundle(root, outDir);
     await emptyDir(outDir, ["manifest.json"]);
     await Deno.mkdir(outDir, { recursive: true });
     // Same rule the build itself used for `targetBin` — a per-target `name`,
@@ -1742,6 +1808,17 @@ export async function buildAll(): Promise<number> {
       const names: string[] = [];
       for await (const e of Deno.readDir(preservedOut)) names.push(e.name);
       const stray = strayOutEntries(prevManifest, names, keepInDistStaging);
+      const shipped = shipOutputEntries(prevManifest, names);
+      if (shipped.length > 0) {
+        // aio's own files, gone with the release they describe: a manifest
+        // naming the old binary's digest would refuse the new one anyway.
+        console.log(
+          `\n  ${C.yellow}note:${C.r} ${relOut}/ held the previous release's ` +
+            `update manifests (${shipped.join(", ")}) — removed with it: ` +
+            `they name the old artifacts' digests.\n  ${C.dim}\`aio ship\` ` +
+            `the new artifact to write its own.${C.r}`,
+        );
+      }
       if (stray.length > 0) {
         summaryNotes.push(
           `${relOut}/ is rebuilt clean on every build — it removed ` +

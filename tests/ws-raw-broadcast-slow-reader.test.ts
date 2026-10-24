@@ -177,13 +177,16 @@ Deno.test("ws backlog: a peer that reads nothing is still closed 1013 within a b
   const t0 = Date.now();
   try {
     await sleep(7_000); // reads nothing
-    const got = await readFor(conn, 1e12, 4_000); // then read it all back
+    // …then read it all back, up to the close. 4 s missed it with five
+    // suites on the machine: the backlog in front of the close is megabytes.
+    // The read ends AT the close, so a longer window costs a fast box nothing.
+    const got = await readFor(conn, 1e12, 15_000);
     assertEquals(
       got.close,
       1013,
       `a peer that never reads must be closed (got ${got.close})`,
     );
-    assert(Date.now() - t0 < 12_000);
+    assert(Date.now() - t0 < 25_000, `closed after ${Date.now() - t0}ms`);
   } finally {
     stop();
     try {

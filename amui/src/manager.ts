@@ -454,6 +454,12 @@ interface ScanTarget {
   mem: unknown;
   aioVersion: string | null;
   controlError: string | null;
+  detailState: unknown;
+  detailFields: CellFieldFlags | null;
+  detailStatePath: string | null;
+  detailStateSize: number;
+  detailStateTruncated: boolean;
+  detailStateError: string | null;
 }
 
 /** Drop every reading that belongs to a specific PROCESS.
@@ -465,7 +471,7 @@ interface ScanTarget {
  *  Shared by the manual stop() and the discover path, which is where an
  *  EXTERNAL death (Ctrl-C, crash, OOM) is noticed: without it, Overview kept
  *  painting every cell of a dead process green, permanently. */
-function clearLiveDiagnostics(s: ScanTarget): void {
+export function clearLiveDiagnostics(s: ScanTarget): void {
   s.cpuHistory = [];
   s.memHistory = [];
   s.heapHistory = [];
@@ -480,6 +486,16 @@ function clearLiveDiagnostics(s: ScanTarget): void {
   // The dead process's control-plane refusal: a stopped app kept a red
   // "the panels below are the LAST reading" banner over emptied panels.
   s.controlError = null;
+  // The State tab's snapshot too. A restart keeps the entry id (path#appId#
+  // home), so the tab saw "already loaded" and kept showing the OLD process's
+  // state — or the "not running on port <old>" error from a load that landed
+  // mid-restart — as the live state of the new one.
+  s.detailState = null;
+  s.detailFields = null;
+  s.detailStatePath = null;
+  s.detailStateSize = 0;
+  s.detailStateTruncated = false;
+  s.detailStateError = null;
 }
 
 /** Fold a fresh scan into state: replace the list + reconcile the selection
@@ -933,8 +949,9 @@ export const manager = cell("manager", {
         trojanGet(port, "state", appId, undefined, pid),
         trojanGet(port, "fields", appId, undefined, pid),
       ]);
-      // Supersede guard.
-      if (s.selectedId !== id) {
+      // Supersede guard — another selection, or the same entry restarted
+      // while this read was in flight (it describes the old process).
+      if (s.selectedId !== id || s.detail?.pid !== pid) {
         s.detailStateLoading = false;
         return;
       }

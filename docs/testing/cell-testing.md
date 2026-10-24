@@ -148,16 +148,21 @@ testCell(disk, "cancel aborts a running scan", async (t) => {
 
 Two things behave the way they do in production, and both matter here:
 
-- A method's **state writes are batched** and commit on a microtask, so a sync
-  action dispatched in the same tick commits _first_ and can then be overwritten
-  by the async method's prefix. Don't build cancellation on a state flag you set
-  before the first `await` — use
-  [`cancelOn`](../state/methods.md#cancellation--cancelon--ssignal) and
+- A method's **state writes are batched**, but never reordered: whatever the
+  method wrote before the next action is issued — or before another call reads
+  state — commits first, so a sync action dispatched in the same tick lands on
+  top of the async method's prefix, and two calls' `s.n++` both count. Still,
+  don't build cancellation on a state flag the method re-reads after its `await`
+  — use [`cancelOn`](../state/methods.md#cancellation--cancelon--ssignal) and
   `s.$signal`, which abort at dispatch time.
 - Anything the method does that is **not** state — spawning a subprocess,
   opening a socket — has already happened when the call returns.
 
-Leave no call running at the end of a test: `await` it, or `await t.settle()`.
+Leave no call running at the end of a test: `await` it, or `await t.settle()`. A
+`t.expect.state` that fails while a call is still running names it
+(`still running: loader:load`). A `t.settle()` or `t.expect.rejects(…)` left
+un-awaited is awaited after the body and, if it fails, fails this test, naming
+the missing `await`.
 
 Each effect runs at most once across `await send` / `settle()` calls — mixing
 them never double-executes a method.
@@ -322,16 +327,19 @@ testCell(inventory, "reserve: updates reserved list", async (t) => {
 });
 ```
 
-For testing `call()` with timeout/retry in isolation — call it in a Deno.test
-after binding the app:
+For testing `call()` with timeout/retry in isolation — boot the cell with
+`bootCells`, which binds its methods to a real runtime and resets it at scope
+end. (Not `aio.run()`: from a test file it looks for `App.tsx` beside the test,
+refuses to boot without one, and a server it did start would outlive the test.)
 
 ```ts
 import { assertEquals } from "@std/assert";
-import { aio, call } from "aio";
+import { call } from "aio";
+import { bootCells } from "aio/testing";
 import { inventory } from "./cell/inventory/index.ts";
 
 Deno.test("call resolves with return value", async () => {
-  await aio.run({ appId: "my-app", cells: [inventory] });
+  using _app = await bootCells([inventory]);
 
   // Direct call — typed, no strings
   const stock = await inventory.checkStock("widget");

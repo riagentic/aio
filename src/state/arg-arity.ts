@@ -35,6 +35,10 @@ function paramList(src: string): string | null {
 export function declaredArgCount(
   fn: (...a: never[]) => unknown,
 ): number | null {
+  // Called before cell() validates its methods: a non-function (a typo'd
+  // import, a `{ deps, fn }` object) must reach that check, which names it —
+  // `Function.prototype.toString` on it threw a sentence naming nothing.
+  if (typeof fn !== "function") return null;
   const list = paramList(Function.prototype.toString.call(fn));
   if (list === null) return null;
   let depth = 0;

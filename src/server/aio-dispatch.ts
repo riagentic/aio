@@ -23,6 +23,7 @@ import type { ScheduleEffect } from "../state/schedule.ts";
 import type { OwnEffect } from "../state/own.ts";
 import { routeEffect } from "../state/route-effect.ts";
 import { type NotifyEffect, notifyPayload } from "../state/notify.ts";
+import { type AppIconEffect, appIconPayload } from "../state/app-icon.ts";
 import { enc } from "../protocol/envelope.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { runWithUser } from "./auth-context.ts";
@@ -65,6 +66,26 @@ export function showNotifyEffect(
     warn(
       `notify: no UI client is connected — "${e.title}" was not ` +
         `shown (a server-only or CLI-only run has nowhere to show it)`,
+    );
+  }
+  return reached;
+}
+
+/** Apply an `appIcon()` effect: the icon belongs to the WINDOW, so — like a
+ *  notification — it is handed to every connected UI client, and kept for a
+ *  window that connects later (icon-replay.ts); the server says so when none
+ *  is connected now.
+ *  Shared by the dispatch loop and the worker pool, as `showNotifyEffect` is. */
+export function showAppIconEffect(
+  e: AppIconEffect,
+  broadcastUi: ((raw: string) => number) | undefined,
+  warn: (msg: string) => void,
+): number {
+  const reached = broadcastUi?.(enc("icon", appIconPayload(e))) ?? 0;
+  if (reached === 0) {
+    warn(
+      "appIcon: no UI client is connected — the icon change is kept and " +
+        "applied by the next window that connects",
     );
   }
   return reached;
@@ -469,6 +490,8 @@ export function setupDispatch<S, A, E, App = any>(
             showNotifyEffect(e, getServer().broadcastUi, log.warn),
             _currentActionUser,
           ),
+        appIcon: (e) =>
+          void showAppIconEffect(e, getServer().broadcastUi, log.warn),
         app: (e) => hookedExecute(getApp(), e),
       }),
     getState,

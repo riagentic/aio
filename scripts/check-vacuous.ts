@@ -802,7 +802,6 @@ export const LEDGER: readonly string[] = [
   "empty-loop|tests/sync/sync-replay-versions.test.ts|schema: an older database gains the columns with UNKNOWN (-1), and a fresh one already has them",
   "no-assertions|tests/testui-absent-and-t.test.tsx|absent(): composes with waitFor",
   "no-assertions|tests/testui-revealed-controls.test.tsx|testUI: the same reveal, three actions deep",
-  "empty-loop|tests/transport-chaos-fuzz.test.ts|chaos: one intent, one outcome — under drop / kill / reconnect",
   "no-assertions|tests/uds-accept-resilience.test.ts|uds: an unserializable state does not throw out of broadcastState",
   "empty-loop|tests/ui-kit-semantic.test.tsx|fuzz: every interactive element is reachable and drivable by name",
   "empty-loop|tests/ui-kit-semantic.test.tsx|fuzz: every interactive element is reachable and drivable by name",

@@ -15,8 +15,10 @@
  * `deno task doctor` (which checks it). The check resolves that list against a
  * COPY of the lock in a temp dir and diffs: the app's lock is never written.
  */
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 import { resolveEntryPath } from "./paths.ts";
+import { gitOwnRepoEnv } from "./git-noninteractive.ts";
+import { neutralCwd } from "./no-console.ts";
 
 /** A framework module spec: this app's `dep/aio/…` source, or the published
  *  package. Anchored to a path segment — `vendor-dep/aio-core` is not aio. */
@@ -180,6 +182,48 @@ export async function checkLockCoverage(
   } finally {
     await Deno.remove(tmp, { recursive: true }).catch(() => {});
   }
+}
+
+/** Graph entries the COMMITTED lock (`git show HEAD:<rel>`) has and the one
+ *  on disk lacks — or null when there is no committed lock to compare with
+ *  (not a git repo, the lock untracked, no git). A run that cannot load
+ *  `dep/aio` (the link missing) PRUNES the lock of everything aio's tools
+ *  need; the next run re-resolves those ranges, possibly at newer versions,
+ *  and the coverage check above then reads "complete" against a lock that
+ *  silently moved. */
+export async function lockLostVsHead(
+  dir: string,
+  rel: string,
+): Promise<string[] | null> {
+  let r: Deno.CommandOutput;
+  try {
+    r = await new Deno.Command("git", {
+      // Absolute: on Windows the cwd is neutral, so a relative dir would miss.
+      args: ["-C", resolve(dir), "show", `HEAD:./${rel}`],
+      ...gitOwnRepoEnv(),
+      cwd: neutralCwd(),
+      stdin: "null",
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return null; // no git on PATH
+    throw e;
+  }
+  if (!r.success) return null;
+  let head: Record<string, unknown>;
+  let now: Record<string, unknown>;
+  try {
+    head = JSON.parse(new TextDecoder().decode(r.stdout));
+    now = JSON.parse(await Deno.readTextFile(join(dir, rel)));
+  } catch (e) {
+    // aio-ok: an unparsable lock is the coverage check's to report
+    if (e instanceof SyntaxError || e instanceof Deno.errors.NotFound) {
+      return null;
+    }
+    throw e;
+  }
+  return missingLockEntries(now, head);
 }
 
 function isMissingFile(p: string): boolean {

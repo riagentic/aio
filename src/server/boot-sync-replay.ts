@@ -37,7 +37,7 @@ import {
 } from "../sync/server-store.ts";
 import { takeRejectionFor } from "../state/rejection-tracker.ts";
 import { opKey } from "./op-placement.ts";
-import { count } from "../diagnostics/fmt.ts";
+import { count, thrownText } from "../diagnostics/fmt.ts";
 import { _isObj } from "./boot-db-bindings.ts";
 
 /** What the boot replay needs to know about the app beyond the reducer —
@@ -478,7 +478,7 @@ export async function replaySyncOps<S>(
         log.info(`sync: migrated cell "${cell}" v${from} → v${declared}`);
         ctx.report?.push({ cell, from, to: declared, outcome: "migrated" });
       } catch (e) {
-        failures.push(`onMigrate(v${from}) threw: ${e}`);
+        failures.push(`onMigrate(v${from}) threw: ${thrownText(e)}`);
       }
     };
 
@@ -644,7 +644,9 @@ export async function replaySyncOps<S>(
           }
           threw++;
           lastThrew = op.id === lastId;
-          failures.push(`op ${op.id} (${op.cell}:${op.action}) threw: ${e}`);
+          failures.push(
+            `op ${op.id} (${op.cell}:${op.action}) threw: ${thrownText(e)}`,
+          );
         }
       }
       if (first) failures.unshift(first);

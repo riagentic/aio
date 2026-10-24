@@ -85,7 +85,7 @@ export const CHUNK_MAX_BYTES = 1024 * 1024;
 export function chunkFrame(cid: string, value: unknown, type: string): string {
   const frame = enc("chunk", {
     cid,
-    value: serializeReturn(value, type).value,
+    value: serializeReturn(value, type, "chunk").value,
   });
   if (overUtf8(frame, CHUNK_MAX_BYTES)) {
     throw new RangeError(

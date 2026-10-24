@@ -36,13 +36,14 @@ The long way, one artifact at a time:
 
 ```sh
 deno task compile
-deno task ship dist/wallet --channel=prod   # --key defaults to ~/.aio/keys/<app>-release-key.json (what `ship keygen` wrote)
+deno task ship dist/wallet-1.4.7 --channel=prod   # the versioned artifact in dist/; --key defaults to ~/.aio/keys/<app>-release-key.json (what `ship keygen` wrote)
 ```
 
 That writes the manifest twice next to the artifact: `<binary>.ship.json` (the
 name a human recognises) and `<os>-<arch>.json` (the name the client literally
 requests). Copy the artifact and the second file into
-`<release-base>/<channel>/`.
+`<release-base>/<channel>/` before the next build — it rebuilds `dist/` clean
+and removes both manifests.
 
 `deno task ship github --channel=prod` writes a GitHub Actions workflow that
 does all of it on three platforms and publishes to GitHub Pages.
@@ -61,8 +62,9 @@ console.log(keyFingerprint(publicKey)); // e.g. "9f2c1a4b7de0"
 | `generateSigningKey()`            | `Promise<{ publicKey: JsonWebKey; privateKey: JsonWebKey }>` |
 | `keyFingerprint(jwk: JsonWebKey)` | `string` — 12 lowercase hex characters                       |
 
-Ed25519, exported as JWKs. `deno task ship keygen` prints exactly the JSON
-`generateSigningKey()` returns, which is also the shape `--key=` reads.
+Ed25519, exported as JWKs. The key file `deno task ship keygen` writes (and what
+`keygen --stdout` prints) is exactly the JSON `generateSigningKey()` returns,
+which is also the shape `--key=` reads.
 
 Keep the **private** JWK out of the repository — a key file with restrictive
 permissions, a secret manager, or the CI secret `AIO_SIGNING_KEY`. The public

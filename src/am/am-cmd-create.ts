@@ -394,7 +394,13 @@ export function standardTasks(
     // the starter test still imports `counter`, so `deno check src/` passed
     // and the break waited for `deno task test` — not the gate an agent runs
     // first (report 9b §7).
-    check: `deno check src/ tests/ && deno run -A ${fw.am} check`,
+    //
+    // The cli template writes no UI entry, so `am check` there only printed
+    // "NOTHING CHECKED" on every run of a fresh scaffold — a warning the
+    // author can do nothing about trains them to ignore the real ones.
+    check: template === "cli"
+      ? "deno check src/ tests/"
+      : `deno check src/ tests/ && deno run -A ${fw.am} check`,
     fmt: "deno fmt",
     // BOTH linters, in one task. `aiol` knows the aio rules and NOTHING about
     // the language: a scaffolded app whose `lint` ran aiol alone was never
@@ -1614,8 +1620,25 @@ export async function cmdCreate(
     stderr: "null",
   }).output().catch(() => {});
 
+  // Complete the seeded deno.lock (aio's JSR side only) with the app's npm
+  // graph — exactly what the first `deno task` would write (measured: the
+  // same bytes as after a first `deno task build`). Then the lock can be in
+  // the first commit: a seed committed by the developer before any task ran
+  // made the app's first build "-dirty". Offline with a cold cache this
+  // fails, and the seed stays untracked, as before.
+  const lockComplete = (await new Deno.Command(Deno.execPath(), {
+    args: ["install", "--quiet", "--entrypoint", "./src/app.ts"],
+    cwd: dir,
+    stdout: "null",
+    stderr: "null",
+    stdin: "null",
+  }).output().catch(() => {
+    // aio-ok: deno would not start — the seed stays untracked, as before
+    return null;
+  }))?.success === true;
+
   // Make it a real project from second one — best-effort, never fatal.
-  const git = await tryGitInit(dir);
+  const git = await tryGitInit(dir, lockComplete);
 
   // Data an earlier app with this appId left behind — said, never silently
   // reused (report 9b §2). The scaffold declares its identity as `title` in
@@ -1796,7 +1819,10 @@ export function gitSentence(git: GitInit): string {
 /** `git init` + first commit so the new project has history from minute one.
  *  Best-effort: no git, or an existing repo, is fine — never fails the create,
  *  but the REASON is always reported (a `"git": false` said nothing). */
-async function tryGitInit(dir: string): Promise<GitInit> {
+async function tryGitInit(
+  dir: string,
+  lockComplete = false,
+): Promise<GitInit> {
   try {
     // Already inside a repo? Don't nest one — and name it.
     const inside = await new Deno.Command("git", {
@@ -1826,12 +1852,17 @@ async function tryGitInit(dir: string): Promise<GitInit> {
       })
         .output();
     if (!(await run(["init"])).success) return "skipped: git init failed";
-    // Everything but the seeded deno.lock. It holds aio's JSR side only; the
-    // first build adds the npm graph (esbuild, immer, happy-dom) and the
-    // workspace section, so a COMMITTED seed made that first build "-dirty".
-    // Untracked, it is the toolchain's file (projectVersion's rule) and still
-    // pins what it names; the developer's first commit takes the full lock.
-    await run(["add", "-A", "--", ".", ":(exclude)deno.lock"]);
+    // Everything — but a seeded deno.lock that is still only aio's JSR side
+    // (`lockComplete` false: the npm graph could not be resolved). The first
+    // build adds the npm graph (esbuild, immer, happy-dom) and the workspace
+    // section, so a COMMITTED seed made that first build "-dirty". Untracked,
+    // it is the toolchain's file (projectVersion's rule) and still pins what
+    // it names; the developer's first commit takes the full lock.
+    await run(
+      lockComplete
+        ? ["add", "-A", "--", "."]
+        : ["add", "-A", "--", ".", ":(exclude)deno.lock"],
+    );
     // An identity of its own: a machine with no git user (a container, CI, a
     // fresh laptop) used to fail this commit silently, leaving every file
     // untracked — and every build of the scaffold "-dirty". The app's first

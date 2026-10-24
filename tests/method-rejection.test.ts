@@ -118,3 +118,55 @@ Deno.test("a method that says no prints one info line; a bug prints an error —
     "async bug went quiet",
   );
 });
+
+// An `args` rule saying no to a caller's input is the textbook refusal — a
+// form value, an `am dispatch`, an agent's call — but aio raises it with its
+// own `[cell:method]` prefix, which read as aio's own error: every mistyped
+// age printed the `[REDUCE_ERROR] … check action payload shape` box.
+Deno.test("an `args` refusal is one info line, not the error box — sync and async", async () => {
+  const user = cell("rejargs", {
+    state: { age: 0 },
+    args: {
+      setAge: [
+        (v: unknown) => (typeof v === "number" && v >= 0) || "must be >= 0",
+      ],
+      setAgeLater: [(v: unknown) => typeof v === "number" || "a number"],
+    },
+    methods: {
+      setAge(s, a: number) {
+        s.age = a;
+      },
+      async setAgeLater(s, a: number) {
+        await Promise.resolve();
+        s.age = a;
+      },
+    },
+  });
+  const out: { level: string; text: string }[] = [];
+  const orig = { ...console };
+  for (const level of ["error", "warn", "info", "log"] as const) {
+    console[level] = (...a: unknown[]) =>
+      void out.push({ level, text: a.map(String).join(" ") });
+  }
+  const rejected: string[] = [];
+  try {
+    await using _b = await bootCells([user], {
+      perfBudget: { reduce: 10_000, effect: 10_000 },
+    });
+    await user.setAge(-1).catch((e: Error) => rejected.push(e.message));
+    await (user.setAgeLater as (a: unknown) => Promise<void>)("x").catch((
+      e: Error,
+    ) => rejected.push(e.message));
+  } finally {
+    Object.assign(console, orig);
+  }
+  assertEquals(rejected.length, 2, "the caller still learns both");
+  const loud = out.filter((o) => o.level === "error" || o.level === "warn");
+  assertEquals(loud, [], "an args refusal was loud");
+  for (const m of ["setAge", "setAgeLater"]) {
+    assert(
+      out.some((o) => o.text.includes(`rejargs:${m} rejected:`)),
+      `${m}: ${JSON.stringify(out)}`,
+    );
+  }
+});

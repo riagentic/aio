@@ -67,7 +67,10 @@ const app = await aio.run({
   appDir: Deno.env.get("PROBE_DIR"),
 });
 await w.watch();
-await new Promise((r) => setTimeout(r, 200));
+// Five ticks, not 200 ms: a loaded Windows laptop ticked fewer in that time.
+for (let i = 0; i < 250 && w.ticks < 5; i++) {
+  await new Promise((r) => setTimeout(r, 20));
+}
 w.hold();
 await new Promise((r) => setTimeout(r, 100));
 console.log("CLOSE_START " + Date.now());

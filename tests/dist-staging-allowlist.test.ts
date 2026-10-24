@@ -26,6 +26,7 @@ Deno.test("everything the binary needs survives the staging clean", () => {
       APP_ICON,
       ELECTRON_VERSION_FILE,
       BUNDLE_MAP,
+      "icon.svg", // the generated monogram, beside icon.png
     ]
   ) {
     assert(

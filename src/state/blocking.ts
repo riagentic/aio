@@ -1,5 +1,7 @@
 import { log } from "../diagnostics/logger-api.ts";
 import { blockingServerOnly } from "./blocking-reason.ts";
+import { callSignal } from "./call-signal.ts";
+import { abortedByShutdown } from "./method-cancel.ts";
 
 // blocking.ts — schedule.blocking(): a named, cancellable, backpressured worker
 // pool for FFI/CPU/sync work. A wedged USB ioctl or a
@@ -127,6 +129,16 @@ export function blockingWorkerMissingHint(message: string): string | null {
     `aio's own build does this; a hand-rolled compile script gets the exact ` +
     `flags from \`import { dbWorkerInclude } from "aio/build"\`. This is NOT a ` +
     `permissions problem and NOT a bug in your function.`;
+}
+
+/** The rejection of a task whose calling method the app's shutdown aborted. */
+function shutdownError(id: string): Error {
+  const e = new Error(
+    `blocking task '${id}' stopped: the method that started it was aborted ` +
+      `by the app's shutdown (s.$signal)`,
+  );
+  e.name = "AbortError";
+  return e;
 }
 
 export function createBlockingPool(opts?: { size?: number }): BlockingPool {
@@ -293,6 +305,47 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
     }
   }
 
+  /** Drop every queued task `match` picks and stop every running one —
+   *  rejected with `err`. Returns whether any matched. */
+  function cancelWhere(match: (t: Task) => boolean, err: Error): boolean {
+    let cancelled = false;
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (!match(queue[i]!)) continue;
+      const [t] = queue.splice(i, 1);
+      t!.reject(err);
+      cancelled = true;
+    }
+    // Running task → terminate its worker (can't interrupt a busy thread) and
+    // spawn a fresh one to keep capacity, then re-feed the queue.
+    for (const [w, t] of [...active]) {
+      if (match(t)) {
+        // Deno's terminate() does not interrupt running synchronous code
+        // (Deno 2.9.7, measured): a cancelled CPU loop kept its core until
+        // it returned, outside the pool's size — three cancels on a size-1
+        // pool left three cores busy. The caller is released either way;
+        // the thread's survival is said, not hidden.
+        if (Atomics.load(busyFlag.get(w)!, 0) === 1) {
+          log.warn(
+            "blocking",
+            `blocking task '${t.id}' was cancelled inside synchronous code ` +
+              `(a CPU loop, a *Sync or FFI call). Its caller is released, ` +
+              `but Deno cannot interrupt synchronous code: the thread keeps ` +
+              `running — and a CPU core busy — until that call returns, ` +
+              `outside the pool's limit of ${size}. To make a long task ` +
+              `stoppable, yield between chunks of work ` +
+              `(\`await new Promise((r) => setTimeout(r))\`) — a cancel ` +
+              `stops it at the next yield.`,
+          );
+        }
+        t.reject(err);
+        retire(w);
+        cancelled = true;
+      }
+    }
+    if (cancelled) pump();
+    return cancelled;
+  }
+
   return {
     size,
     run<T>(
@@ -340,7 +393,17 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
             `(dev only, once per id)`,
         );
       }
-      return new Promise<T>((resolve, reject) => {
+      // Started from a method body: the app's SHUTDOWN aborting that call
+      // ends its task too. The method's caller is released at the drain
+      // deadline either way; the task kept its worker thread — and in
+      // libraryMode / `testServer()` the process — alive after the app had
+      // closed. (A cancelOn abort is left alone: the body may still want the
+      // result it is awaiting.)
+      const sig = callSignal();
+      if (sig && abortedByShutdown(sig)) {
+        return Promise.reject(shutdownError(id));
+      }
+      const p = new Promise<T>((resolve, reject) => {
         queue.push({
           id,
           n: ++seq,
@@ -364,6 +427,18 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
         });
         pump();
       });
+      if (sig) {
+        const n = seq;
+        const onAbort = () => {
+          if (abortedByShutdown(sig)) {
+            cancelWhere((t) => t.n === n, shutdownError(id));
+          }
+        };
+        sig.addEventListener("abort", onAbort, { once: true });
+        const off = () => sig.removeEventListener("abort", onAbort);
+        p.then(off, off);
+      }
+      return p;
     },
     cancel(id: string): boolean {
       // EVERY task under this id — queued and running alike.
@@ -374,42 +449,10 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
       // true with the other copy still burning a thread, and a caller who
       // cancelled precisely to stop the work had no way to know. "Cancel by id"
       // means the id, not one arbitrary holder of it.
-      let cancelled = false;
-      for (let i = queue.length - 1; i >= 0; i--) {
-        if (queue[i]!.id !== id) continue;
-        const [t] = queue.splice(i, 1);
-        t!.reject(new Error(`blocking task '${id}' cancelled`));
-        cancelled = true;
-      }
-      // Running task → terminate its worker (can't interrupt a busy thread) and
-      // spawn a fresh one to keep capacity, then re-feed the queue.
-      for (const [w, t] of [...active]) {
-        if (t.id === id) {
-          // Deno's terminate() does not interrupt running synchronous code
-          // (Deno 2.9.7, measured): a cancelled CPU loop kept its core until
-          // it returned, outside the pool's size — three cancels on a size-1
-          // pool left three cores busy. The caller is released either way;
-          // the thread's survival is said, not hidden.
-          if (Atomics.load(busyFlag.get(w)!, 0) === 1) {
-            log.warn(
-              "blocking",
-              `blocking task '${id}' was cancelled inside synchronous code ` +
-                `(a CPU loop, a *Sync or FFI call). Its caller is released, ` +
-                `but Deno cannot interrupt synchronous code: the thread keeps ` +
-                `running — and a CPU core busy — until that call returns, ` +
-                `outside the pool's limit of ${size}. To make a long task ` +
-                `stoppable, yield between chunks of work ` +
-                `(\`await new Promise((r) => setTimeout(r))\`) — a cancel ` +
-                `stops it at the next yield.`,
-            );
-          }
-          t.reject(new Error(`blocking task '${id}' cancelled`));
-          retire(w);
-          cancelled = true;
-        }
-      }
-      if (cancelled) pump();
-      return cancelled;
+      return cancelWhere(
+        (t) => t.id === id,
+        new Error(`blocking task '${id}' cancelled`),
+      );
     },
     inFlight(): string[] {
       return [

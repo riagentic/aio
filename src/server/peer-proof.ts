@@ -20,6 +20,7 @@ import { readControlKey } from "./app-key.ts";
 import { _timingSafeEqual } from "./server-auth.ts";
 import { instances } from "./single-instance-lock.ts";
 import type { BlobStore } from "./blobs.ts";
+import type { AioUser } from "./aio-types.ts";
 
 /** The request header carrying the proof. */
 export const PEER_HEADER = "x-aio-peer";
@@ -102,6 +103,26 @@ export async function verifyPeer(
   return _timingSafeEqual(mac, await tag(k.key, app, pid, self, selfPid))
     ? { ok: true, peer: { app, pid } }
     : { ok: false, why: "peer proof does not verify" };
+}
+
+/** THE peer decider, for every door that takes a proof (the HTTP/WS
+ *  handshake header, the local socket's identity hello): verify `header` for
+ *  THIS boot of `self`, then ask the app's `resolvePeer` who that peer is. A
+ *  proof that does not verify is refused — never quietly anonymous; `user:
+ *  null` is "proven, but this app admits no identity for it". */
+export async function provePeer(
+  header: string,
+  self: string,
+  resolve: (p: PeerIdentity) => AioUser | null | Promise<AioUser | null>,
+): Promise<
+  { ok: true; peer: PeerIdentity; user: AioUser | null } | {
+    ok: false;
+    why: string;
+  }
+> {
+  const v = await verifyPeer(header, self);
+  if (!v.ok) return v;
+  return { ok: true, peer: v.peer, user: (await resolve(v.peer)) ?? null };
 }
 
 /** Where a proven peer uploads bytes (`peer().upload`): POST, the body is the

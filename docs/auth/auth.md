@@ -89,6 +89,55 @@ count against the same per-address failed-auth budget as wrong keys. (For
 headless/scripted setups, `am profile` exports a `.aioapp` file you import
 instead — see [the client](../clients/electron.md).)
 
+**Pairing by PAKE (`pairing: { pake: true }`, opt-in)** — the plain exchange
+above sends the code, over a certificate nothing has checked yet: whoever sits
+in the middle at the FIRST pairing reads the code, pairs with the real app, and
+hands the client a certificate of its own (trust on first use; `strictPin` only
+guards the later pairings). With
+
+```ts
+aio.run({ cells, pairing: { pake: true } });
+```
+
+the app prints an **8-digit** code, and pairing runs
+[CPace](https://datatracker.ietf.org/doc/draft-irtf-cfrg-cpace/)
+(draft-irtf-cfrg-cpace-21, suite CPACE-X25519-SHA512) instead:
+
+- **The code never crosses the wire.** Both sides prove they know it; a recorded
+  exchange gives nothing to guess it against offline — each attempt is one
+  online guess, on the same budgets as above (8 per address, 20 in total burn
+  the code, the failed-auth budget's 429).
+- **The exchange is bound to the certificate the client SEES.** The SHA-256 of
+  that leaf is in CPace's channel identifier on the client, and the leaf the app
+  serves on the app's side. A relay presenting its own certificate gets keys
+  that do not match: no app key, no certificate pin, and the code is not
+  consumed. The client says so: "the certificate this client sees is not the one
+  the app serves".
+- **No fallback.** An 8-digit code IS the signal: the aio client (desktop) and
+  the Android client APK pair by PAKE for it and never send it. The length is
+  carried by a person from the app's screen, so nothing on the network can
+  downgrade it (a server-sent "I speak PAKE" could be forged by the relay it
+  guards against).
+- The profile (key + certificate) comes back sealed with AES-256-GCM under a key
+  derived from the exchange (HKDF-SHA256), and the client still requires the
+  certificate it names to cover the one it met.
+
+It needs TLS: an exposed app with `pairing: { pake: true }` and `tls: false` /
+`--no-tls` is refused at boot (there is no certificate to bind to, and the key
+would cross plain http right after). On an app that is not exposed it does
+nothing (no remote client pairs with it), and boot says so.
+
+What it costs: clients older than the release that added it cannot pair with
+such an app. Such a client sends the code in the clear, so the app BURNS the
+code when it receives it (a relay that read it could otherwise pair by PAKE),
+logs it, and answers a 400 that says to update the client and run `am pair`
+again. A TLS-terminating proxy in front of the app is, to PAKE, a relay: pair on
+the app's own address. Default off: the 6-digit exchange above, unchanged. The
+three implementations (server, the desktop client's embedded copy of the same
+source, the Android client's Kotlin port — X25519 written out, since Android has
+no platform X25519 below API 33 and the floor is API 29) are held to the draft's
+test vectors.
+
 ```
 [12:00:00][INFO] tls: self-signed cert at ~/.<appId>/data/tls/tls-cert.pem
 [12:00:00][WARNING] tls: self-signed — browsers show a security warning, and non-browser clients (curl, deno/node fetch, the aio CLI client) REFUSE the connection outright unless they trust this exact cert. Hand it out with `am profile --app=<appId>`, point a client at it with DENO_CERT=<certPath> (curl: --cacert), or pass --tls-cert=/path.pem --tls-key=/path.pem for a CA-signed one
@@ -326,7 +375,13 @@ await aio.run({
 ```
 
 The `user` parameter is `undefined` for server-side dispatches (effects,
-schedules, etc.).
+schedules, etc.). An async method's writes arrive as their own
+`cell:__setMethod` commit, and that commit carries the user whose call made it —
+exactly as a sync method's writes do — so a guard like the one above lets an
+admin's async writes through too. A server-side dispatch on that cell (a
+schedule, the cell's own `__init`) has no user and IS dropped by it; the
+declarative `access` rule below gates only network calls and has no such blind
+spot.
 
 ### Declarative cell access (`access`)
 
@@ -612,6 +667,20 @@ app.sessions!.revokeUser("alice"); // kick every session (breach response)
 Session tokens resolve ahead of `users`/`resolveUser` and compose with both.
 `sessions: { ttlMs: 3_600_000 }` overrides the default TTL.
 
+**A session link can sign a browser into someone else's account.** The browser
+client opens its socket with the page's `?token=`, so a link carrying a session
+token signs in whoever opens it as that session's user (login CSRF: the tab's
+writes land in the link owner's account). A signed-in browser keeps its own
+identity — its session cookie wins over a URL session. Without a cookie the link
+still works (it is the documented channel), and aio says so: the first such
+browser socket logs one warning per app, in dev and prod, and every such socket
+is sent a `ws-session-link` diagnostic, `signed in via a link as <id>`, shown by
+the dev overlay or the browser console. Sign in normally (the login flow sets
+the cookie) rather than sharing session links. This applies only where a login
+flow exists (`auth: true`, OIDC): a `sessions: true`-only app, which connects
+with `?token=` by design, and a static `users:`/`resolveUser` share link stay
+silent.
+
 **A ceiling per account — `auth: { maxSessions: 10 }`.** A correct password is
 never rate-limited (see the budget rule below), so by default one account can
 hold any number of live sessions. With `maxSessions`, a login past the ceiling
@@ -889,6 +958,11 @@ await aio.run({
 // Point a "Continue with …" button at /__aio/auth/oidc/start — done.
 ```
 
+The `redirect_uri` sent to the provider is
+`<scheme>://<host>/__aio/auth/oidc/callback` for the request's host — or
+`oidc.redirectUri`, verbatim, when set (see
+[behind a proxy](#intended-deployment-model)).
+
 The callback verifies the ID token (issuer, audience, `azp`, expiry, signature
 via the provider's JWKS), issues a session cookie, and redirects to `/` — or to
 the same-origin path passed as `/__aio/auth/oidc/start?redirect=/orders/7`. That
@@ -967,8 +1041,10 @@ be paired with unlimited code guesses from rotating addresses.
 
 ### Operator console (`am auth`)
 
-Direct auth.db access — no running server needed. This is how you seed the first
-admin, or get back in when you're locked out:
+Direct auth.db access — no running server needed, though the app must have
+booted once with `auth: true` (that boot creates `data/auth.db`; before it every
+command answers `no auth.db for app …`). This is how you seed the first admin,
+or get back in when you're locked out:
 
 ```sh
 am auth users                      # list accounts (role, email, 2FA, locked)
@@ -1061,16 +1137,17 @@ A summary of aio's security posture and known limitations:
 
 ### What aio protects
 
-| Threat                                           | Protection                                                                                                                                           |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Unauthorized WebSocket/HTTP access               | Token auth (`--expose`, `users`, or `resolveUser`) — timing-safe comparison for static tokens                                                        |
-| Cross-origin browser requests (localhost)        | `Origin` header validation — only same-origin allowed when not exposed                                                                               |
-| State leakage per user                           | Cell-level `ui: { include, forUser }` — server-side filtering per client                                                                             |
-| Trojan API abuse from web                        | `/__aio/trojan/*` bound to `127.0.0.1` HTTP-only — unreachable from browser even with TLS                                                            |
-| Reducer/effect crashes taking down server        | All errors caught and logged, dispatch loop continues                                                                                                |
-| XSS in error overlay                             | `escHtml()` sanitizes filenames, paths, and error text                                                                                               |
-| Clickjacking, `<base>` hijack, form exfiltration | Security headers on every response — see [Response security headers](#response-security-headers)                                                     |
-| Another local app reading a desktop app's state  | Production Electron apps serve their local socket only to their own window — see [Local-peer lockdown](#local-peer-lockdown-production-desktop-apps) |
+| Threat                                           | Protection                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unauthorized WebSocket/HTTP access               | Token auth (`--expose`, `users`, or `resolveUser`) — timing-safe comparison for static tokens                                                                                                                                                                                 |
+| Cross-origin browser requests (localhost)        | `Origin` header validation — only same-origin allowed when not exposed                                                                                                                                                                                                        |
+| State leakage per user                           | Cell-level `ui: { include, forUser }` — server-side filtering per client                                                                                                                                                                                                      |
+| Production probe reading more than a client gets | `GET /__aio/view` (`am state --prod`) is read-only and answers `getUIState(user)` — the WebSocket's own view for that credential, behind the same gate (key / user token / `auth` session) and the same Origin rule; an exposed `key: false` app answers its own machine only |
+| Trojan API abuse from web                        | `/__aio/trojan/*` bound to `127.0.0.1` HTTP-only — unreachable from browser even with TLS                                                                                                                                                                                     |
+| Reducer/effect crashes taking down server        | All errors caught and logged, dispatch loop continues                                                                                                                                                                                                                         |
+| XSS in error overlay                             | `escHtml()` sanitizes filenames, paths, and error text                                                                                                                                                                                                                        |
+| Clickjacking, `<base>` hijack, form exfiltration | Security headers on every response — see [Response security headers](#response-security-headers)                                                                                                                                                                              |
+| Another local app reading a desktop app's state  | Production Electron apps serve their local socket only to their own window — see [Local-peer lockdown](#local-peer-lockdown-production-desktop-apps)                                                                                                                          |
 
 ### Response security headers
 
@@ -1308,14 +1385,16 @@ boolean `true` opens it: any other value (`"true"`, `"yes"`, `1`) is read as
 
 ### Known limitations
 
-| Limitation                                   | Mitigation                                                                                                                                                                                                                                                                                                       |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Self-signed cert warning in browsers         | One-time "trust" click; or use `--cert`/`--key` with a CA-signed cert                                                                                                                                                                                                                                            |
-| Token appears in URL (`?token=`)             | Use `Authorization: Bearer <token>` header instead; avoid sharing URLs in logs                                                                                                                                                                                                                                   |
-| Token regenerates on restart                 | Compile targets pin the token via env or config; `am` tooling doesn't capture it                                                                                                                                                                                                                                 |
-| `users:` tokens are static secrets in source | Use environment variables: `'alice-token': Deno.env.get('ALICE_TOKEN')!`                                                                                                                                                                                                                                         |
-| `--expose` origin policy                     | Origin is always validated (exposed or not) on the WebSocket upgrade, and on a state-changing HTTP request that carries a cookie or reaches an unexposed/open app from this machine: see [Cross-origin requests](#cross-origin-requests); `strictOrigin: true` additionally requires the header on the WebSocket |
-| DNS rebinding                                | The `Host` header is validated on every request: loopback names, IP literals, the bound host, this machine's hostname, the DNS names in the served TLS certificate and `allowedOrigins` pass; any other domain is 403                                                                                            |
+| Limitation                                                 | Mitigation                                                                                                                                                                                                                                                                                                       |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Self-signed cert warning in browsers                       | One-time "trust" click; or use `--cert`/`--key` with a CA-signed cert                                                                                                                                                                                                                                            |
+| Token appears in URL (`?token=`)                           | Use `Authorization: Bearer <token>` header instead; avoid sharing URLs in logs                                                                                                                                                                                                                                   |
+| Token regenerates on restart                               | Compile targets pin the token via env or config; `am` tooling doesn't capture it                                                                                                                                                                                                                                 |
+| First PIN pairing trusts the certificate it meets          | `pairing: { pake: true }`: CPace binds the exchange to the certificate the client sees — see [Pairing by PAKE](#remote-access---expose)                                                                                                                                                                          |
+| An old client sends a PAKE app's 8-digit code in the clear | The app burns that code on receipt and says so (400 + a logged ⚠); pair again with an updated client after `am pair`                                                                                                                                                                                             |
+| `users:` tokens are static secrets in source               | Use environment variables: `'alice-token': Deno.env.get('ALICE_TOKEN')!`                                                                                                                                                                                                                                         |
+| `--expose` origin policy                                   | Origin is always validated (exposed or not) on the WebSocket upgrade, and on a state-changing HTTP request that carries a cookie or reaches an unexposed/open app from this machine: see [Cross-origin requests](#cross-origin-requests); `strictOrigin: true` additionally requires the header on the WebSocket |
+| DNS rebinding                                              | The `Host` header is validated on every request: loopback names, IP literals, the bound host, this machine's hostname, the DNS names in the served TLS certificate and `allowedOrigins` pass; any other domain is 403                                                                                            |
 
 ### Intended deployment model
 
@@ -1344,6 +1423,9 @@ location / {
   # Pass the real Host through — aio validates it (DNS-rebinding defense), and
   # the domain must also be named in `allowedOrigins` below.
   proxy_set_header Host $host;
+  # With trustProxyHeader set, aio reads this to know the browser is on https:
+  # session cookies get `Secure` and the OIDC redirect_uri is built as https.
+  proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
 
@@ -1362,7 +1444,7 @@ deliberate: an app on loopback that answers to any `Host` is reachable from a
 page on any domain whose DNS points at 127.0.0.1.
 
 Caddy is simpler — `reverse_proxy localhost:8000` with automatic HTTPS (it sets
-`X-Forwarded-For` itself).
+`X-Forwarded-For` and `X-Forwarded-Proto` itself).
 
 Then tell the app to trust it, or every client shares one abuse bucket and one
 attacker throttles all of them:
@@ -1374,6 +1456,20 @@ await aio.run({
   trustProxyHeader: "x-forwarded-for",
 });
 ```
+
+With `trustProxyHeader` set, the proxy's `X-Forwarded-Proto: https` also tells
+the auth flows the browser is on https: the session and OIDC cookies are marked
+`Secure`, and the OIDC `redirect_uri` is `https://…` (providers refuse an http
+one). Without the setting the scheme is the socket's own — http behind the
+proxy. The first `/__aio/auth/oidc/start` logs the exact `redirect_uri` it sends
+— register that one with the provider. To keep a URI the provider already has
+(say, the `http://` one this setup sent up to 1.0.24-beta), or when the proxy
+rewrites the path, set it explicitly:
+`auth: { oidc: { …, redirectUri:
+"https://app.example.com/__aio/auth/oidc/callback" } }`
+is sent verbatim and the proxy's scheme is ignored. It must be an absolute
+http(s) URL that reaches `/__aio/auth/oidc/callback`; anything else refuses to
+boot.
 
 ### Cross-origin requests
 

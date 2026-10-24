@@ -98,6 +98,10 @@ export type { AioErrorCode } from "./src/diagnostics/error.ts";
  *  }
  *  ``` */
 export { errorCode } from "./src/protocol/envelope.ts";
+/** One line for a failure: its code and the first sentence of its message
+ *  (`"DEAD_BOOT: notes:add refused — this boot is dead"`) — for logs, CI and
+ *  agents. Read-only: the message is unchanged. Branch with `errorCode`. */
+export { errorSummary } from "./src/protocol/envelope.ts";
 /** Memory monitor configuration and heap usage report types */
 export type { MemoryConfig } from "./src/diagnostics/memory-monitor.ts";
 /** Diagnostics configuration and checkpoint recovery types */
@@ -332,6 +336,14 @@ export { own } from "./src/state/own.ts";
 /** `s.$do(notify({ title, body }))` — a desktop notification, from a method. */
 export { notify } from "./src/state/notify.ts";
 export type { NotifyEffect, NotifyOptions } from "./src/state/notify.ts";
+/** `s.$do(appIcon({ tray: frames, fps: 8 }))` — the app's tray icon, window
+ *  icon and tray tooltip, from a method (Electron; once-said no-op elsewhere). */
+export { appIcon } from "./src/state/app-icon.ts";
+export type {
+  AppIconEffect,
+  AppIconImage,
+  AppIconOptions,
+} from "./src/state/app-icon.ts";
 /** Own effect type for keyed resource slots */
 export type {
   OwnDisposer,

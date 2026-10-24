@@ -12,9 +12,12 @@
 // Env: WIN_DIR (deno.exe/node.exe, default /home/aio/win), FIXTURES (this
 // directory as the container sees it), WINEPREFIX (writable).
 
-import { fromFileUrl } from "@std/path";
+// No imports: this file runs from a bare copy of src/ + fixtures with no
+// deno.json, so a mapped specifier (`@std/path`, added in 1.0.19) failed
+// "not a dependency" before the first test and the wine rig proved nothing
+// since. It runs under the LINUX deno only, where a URL's pathname is a path.
 const FIX = Deno.env.get("FIXTURES") ??
-  fromFileUrl(new URL(".", import.meta.url)).replace(/[\\/]$/, "");
+  new URL(".", import.meta.url).pathname.replace(/\/$/, "");
 const WIN = Deno.env.get("WIN_DIR") ?? "/home/aio/win";
 const HOME = Deno.env.get("HOME") ?? "/home/aio";
 

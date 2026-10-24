@@ -18,6 +18,9 @@ export type CliIO = {
   err(text: string): void;
   /** Interactive: stdin AND stdout are terminals. */
   tty: boolean;
+  /** stderr is a terminal — decides whether progress/spinner (on stderr)
+   *  redraw in place. Absent: {@link CliIO.tty} decides, as before. */
+  errTty?: boolean;
   /** ANSI escapes allowed — the framework's decider (`NO_COLOR`, `FORCE_COLOR`, TTY). */
   color: boolean;
   /** Raw mode (no echo, no line buffering) — for `password()`. */
@@ -42,17 +45,37 @@ let _default: CliIO | undefined;
 export function defaultIO(): CliIO {
   return _default ??= {
     read: (buf) => Deno.stdin.read(buf),
-    out: (t) => {
-      Deno.stdout.writeSync(enc.encode(t));
-    },
-    err: (t) => {
-      Deno.stderr.writeSync(enc.encode(t));
-    },
+    out: (t) => writeAll(Deno.stdout, t),
+    err: (t) => writeAll(Deno.stderr, t),
     tty: isTerm(Deno.stdin) && isTerm(Deno.stdout),
+    errTty: isTerm(Deno.stderr),
     color: colorEnabled,
     setRaw: (on) => Deno.stdin.setRaw(on),
     exit: (code) => Deno.exit(code),
   };
+}
+
+/** Exit code when the reader of our output went away — 128 + SIGPIPE, what
+ *  a C tool killed by the signal reports (`yes | head -1` → 141). */
+export const EXIT_BROKEN_PIPE = 141;
+
+/** Write ALL of `text` (`writeSync` may write fewer bytes than asked on a
+ *  pipe). A reader that closed (`tool --watch | head -1`) ends the process
+ *  quietly with {@link EXIT_BROKEN_PIPE}, the way every unix tool does — it
+ *  used to crash with "Uncaught BrokenPipe" and a stack trace on stderr.
+ *  @internal exported for the test */
+export function writeAll(
+  w: { writeSync(p: Uint8Array): number },
+  text: string,
+  exit: (code: number) => never = Deno.exit,
+): void {
+  let buf = enc.encode(text);
+  try {
+    while (buf.length > 0) buf = buf.subarray(w.writeSync(buf));
+  } catch (e) {
+    if (e instanceof Deno.errors.BrokenPipe) exit(EXIT_BROKEN_PIPE);
+    throw e;
+  }
 }
 
 function isTerm(s: { isTerminal?: () => boolean }): boolean {
@@ -77,7 +100,8 @@ export type TestIO = CliIO & {
 
 /** Build a `TestIO`. `input` is what stdin will yield (one chunk per element,
  *  so a test can prove chunk boundaries do not matter); `tty` defaults to true
- *  so prompts run, `color` to false so assertions read plain text. */
+ *  so prompts run, `color` to false so assertions read plain text; no `errTty`,
+ *  so `tty` decides progress redraw (set `io.errTty` to split them). */
 export function testIO(
   opts: { input?: string | string[]; tty?: boolean; color?: boolean } = {},
 ): TestIO {

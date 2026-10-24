@@ -24,6 +24,7 @@ import { PROBE_FLOOD } from "./local-peer.ts";
 import { isServerOnlyMarker, SERVER_FILE_RE } from "../entries.ts";
 import type { CallTimeouts } from "../protocol/protocol-types.ts";
 import {
+  basename,
   dirname,
   extname,
   fromFileUrl,
@@ -652,6 +653,9 @@ export const AIO_ROUTE_METHODS: Readonly<
   "/__aio/metrics": { methods: ["GET", "HEAD"] },
   "/__aio/vitals": { methods: ["GET", "HEAD"] },
   "/__aio/icon": { methods: ["GET", "HEAD"] },
+  // The read-only client view (`am state --prod`) — served in dev and prod
+  // alike, by server.ts after the credential check (see VIEW_PATH).
+  "/__aio/view": { methods: ["GET", "HEAD"] },
   // devOnly since the state-leak fix — see the mount in `serveStatic`.
   "/__aio/snapshot": { methods: ["GET", "HEAD", "POST"], devOnly: true },
   "/__aio/error": { methods: ["GET", "HEAD"], devOnly: true },
@@ -754,8 +758,9 @@ export function snapshotCellsError(
     `the WHOLE state, so this looks like a file from a different app. This ` +
     `app declares: ${
       declaredCells.length ? declaredCells.join(", ") : "(no cells)"
-    }. Pass --force (am snapshot load <file> --force) if replacing the whole ` +
-    `state is what you meant.`;
+    }. If replacing the whole state is what you meant, force it: ` +
+    `\`am snapshot load <file> --force\`, or over HTTP ` +
+    `\`POST /__aio/snapshot?force=1\`.`;
 }
 
 /** Resolve a `/__aio/<rel>` request to a framework source file, or null.
@@ -873,6 +878,13 @@ export interface StaticDeps {
   syncCells?: string[];
   callTimeouts?: CallTimeouts;
   uiEntry?: string; // AIO-8.1
+  /** Dev, no UI entry (a UI-less app): `true` answers every page the 503 a
+   *  prod build answers — what the dev server a human runs does. Default
+   *  (programmatic servers: libraryMode, `testServer`, direct
+   *  `createServer`) keeps the 1.0.24 answer, the shell with 200, and warns
+   *  ONCE that prod answers 503 there: tests read the shell's server-side
+   *  contract from folders that are not apps, and that must not turn red. */
+  headless503?: boolean;
   viewport?: string | false; // AIO-423: ui.viewport override (false = opt out)
   headExtra?: string; // AIO-423: ui.head — verbatim <head> content
   /** ui.lang — the document language every shell carries. */
@@ -888,8 +900,9 @@ export interface StaticDeps {
   /** Identity the theme's accent hue is derived from — the appId, so the UI
    *  and the icon are the same colour. */
   themeName?: string;
-  /** deno.json `hue` — the hue chosen instead of hashed from `themeName`. */
-  hue?: number;
+  /** deno.json `hue` — the hue chosen instead of hashed from `themeName`
+   *  (with deno.json `neutral` on it). */
+  hue?: import("../build/app-icon.ts").HueKey;
   /** The app's identity, injected into the page's `window.__aioConfig` — the
    *  browser's offline sync queue scopes its per-origin `localStorage` key by
    *  it. */
@@ -965,6 +978,65 @@ export interface ServeStaticOptions {
    *  only from that directory or when it is the built shell's own
    *  (`_isBuiltShellPath`) — no longer by extension. */
   publicDir?: string;
+}
+
+/** The answer to the production stop (`POST /__aio/trojan/shutdown`): the ONE
+ *  control request a release build serves, presented with the per-boot,
+ *  owner-only control credential (`armLocalControl`). One decider for both
+ *  doors — the HTTP handler, and the socket of a packaged desktop app that
+ *  has no HTTP server at all (`skipHttp` in aio-server.ts). `null`: no stop
+ *  to call here, the caller answers as it would for any other path. */
+export async function prodStopAnswer(
+  req: Request,
+  stop: ((by: "am stop" | "takeover") => Promise<void> | void) | undefined,
+  refusedStop: (presented: boolean) => void,
+): Promise<Response | null> {
+  if (!localControlAuthorized(req)) {
+    const presented = req.headers.has(LOCAL_CONTROL_HEADER);
+    refusedStop(presented);
+    // The caller may end this process the moment it reads the answer —
+    // `am stop`'s fallback, which on Windows is TerminateProcess — and a
+    // buffered line dies with it: the line reaches app.log FIRST.
+    await getLogger()?.flush();
+    return Response.json({
+      error: `${STOP_REFUSED}: ` +
+        (presented
+          ? "wrong control credential — not this boot's control.key"
+          : "no control credential"),
+    }, { status: 404 });
+  }
+  if (!stop) return null;
+  const by = stopRequester(req);
+  queueMicrotask(() => void stop(by));
+  return Response.json({ ok: true, msg: "shutting down" });
+}
+
+/** The control plane of a packaged desktop app that has NO HTTP server
+ *  (`skipHttp` in aio-server.ts — prod, zero TCP ports, the page read off
+ *  disk): the production stop, and nothing else. Without it `am stop`, `am
+ *  kill` and a takeover reached a socket that answered every request "no
+ *  control plane", and fell back to a signal — on Windows TerminateProcess:
+ *  no `onStop`, no final flush (measured on Windows 11, 2026-10-24: `am stop`
+ *  said `"how": "killed"` for every packaged Electron app). */
+export function skipHttpControl(
+  stop: (by: "am stop" | "takeover") => Promise<void> | void,
+  refusedStop: (presented: boolean) => void = _stopRefusalLog((m) =>
+    log.info(m)
+  ),
+): (req: Request) => Promise<Response> {
+  return async (req) => {
+    if (
+      req.method === "POST" &&
+      new URL(req.url).pathname === `${TROJAN_PREFIX}shutdown`
+    ) {
+      const answer = await prodStopAnswer(req, stop, refusedStop);
+      if (answer) return answer;
+    }
+    return Response.json({
+      error: "this app has no control plane (no HTTP handler built) — a " +
+        "packaged desktop app answers only the stop (`am stop`) here",
+    }, { status: 503 });
+  };
 }
 
 /** A refused production stop, said — never silently a 404 alone: `am stop`
@@ -1148,7 +1220,9 @@ export function createStaticHandler(deps: StaticDeps): {
   // A `--headless` build skips it, but the server still serves the UI shell —
   // which then 404s on /app.js and shows a broken page. We detect that and
   // serve a clear diagnostic at `/` instead.
-  let _uiBundlePresent: boolean | undefined;
+  let _uiBundlePresent = false;
+  /** The libraryMode no-UI-entry warning is said once per server. */
+  let _headlessWarned = false;
 
   // `serveDirs` roots are ABSOLUTE from here on — resolved ONCE, exactly the
   // way `baseDir` is (`resolve()` against the process cwd, server.ts). Without
@@ -1323,6 +1397,31 @@ export function createStaticHandler(deps: StaticDeps): {
     ];
   }
 
+  const _exists = (p: string) =>
+    Deno.stat(p).then((st) => st.isFile, () => false);
+
+  /** Prod: is the browser bundle missing from `dist`? Returns the missing
+   *  path. Only PRESENCE is memoized: `/app.js` itself is re-read whenever it
+   *  changes (`readDistCached`), so a bundle written after boot (`--prod`
+   *  from source, then a bundle step) was served at `/app.js` while every
+   *  page kept answering the boot-time 503 until a restart. */
+  async function _noUiBundle(dist: string): Promise<string | null> {
+    if (!_uiBundlePresent) {
+      _uiBundlePresent = await _exists(join(dist, BUNDLE_JS));
+    }
+    return _uiBundlePresent ? null : join(dist, BUNDLE_JS);
+  }
+
+  /** Dev: the UI entry the shell imports, when NO app root holds it (the
+   *  entry as configured, for the message); null when one does. */
+  async function _noUiEntry(): Promise<string | null> {
+    const entry = deps.uiEntry ?? UI_ENTRY;
+    for (const root of _appRoots) {
+      if (await _exists(resolve(root, entry))) return null;
+    }
+    return entry;
+  }
+
   /** THE app shell — served at `/` and by the SPA deep-link fallback. Two
    *  hand-maintained generateHTML() calls already diverged once (the fallback
    *  missed `syncCells`, so a reloaded deep link silently lost local-first);
@@ -1342,43 +1441,66 @@ export function createStaticHandler(deps: StaticDeps): {
         { headers: { "Content-Type": "text/html", ...noCache } },
       );
     }
-    // Headless-build footgun: prod is serving the UI shell but the
-    // browser bundle was never built (a `--headless` build), so /app.js will
-    // 404 and the page breaks blank. Say so plainly instead.
-    if (prod && absDistDir) {
-      if (_uiBundlePresent === undefined) {
-        try {
-          await Deno.stat(join(absDistDir, BUNDLE_JS));
-          _uiBundlePresent = true;
-        } catch {
-          _uiBundlePresent = false;
-        }
-      }
-      if (!_uiBundlePresent) {
-        deps.debug(
-          "headless build has no browser bundle (dist/app.js) — the UI is " +
-            "unavailable; serve a UI target or use the app headlessly (API/CLI)",
+    // Headless-build footgun: the UI shell is asked for but there is no UI to
+    // put on it — prod: the browser bundle was never built (a `--headless`
+    // build), so /app.js 404s; dev: the UI entry does not exist (a
+    // `client: "server-only"` app, every `testServer` folder), so the shell's
+    // import of it 404s. Both break blank; both say so with the SAME 503 —
+    // dev answering 200 where prod answers 503 was dev MORE lenient than
+    // prod. Only the explanation differs (observe-only). Dev re-checks per
+    // request: creating the entry while the dev server runs must just work.
+    let missing = prod
+      ? (absDistDir ? await _noUiBundle(absDistDir) : null)
+      : await _noUiEntry();
+    if (missing && !prod && !deps.headless503) {
+      // A programmatic dev server keeps the 1.0.24 answer (compat) — loudly.
+      if (!_headlessWarned) {
+        _headlessWarned = true;
+        log.warn(
+          `prod answers 503 'Headless build' for this path: this app has no ` +
+            `UI entry (${missing}) — this programmatic (libraryMode) server ` +
+            `serves the shell anyway; \`aio dev\` / \`am start\` answer 503.`,
         );
-        const body =
-          // Escaped and `lang`-tagged like every other shell: the title is
-          // the app's own text (`Q&A`), not markup.
-          `<!doctype html>${
-            htmlOpen(deps.lang, deps.dir)
-          }<meta charset=utf-8>` +
-          `<title>${escHtml(title)} — headless` +
-          `</title><body style="font:15px/1.6 system-ui;max-width:38rem;` +
-          `margin:12vh auto;padding:0 1.25rem;color:#ddd;background:#0d1117">` +
-          `<h1 style="font-size:1.15rem">Headless build — no browser UI</h1>` +
-          `<p>This server was built <code>--headless</code>, so no web UI ` +
-          `bundle (<code>/app.js</code>) exists. The server, cells, API ` +
-          `routes and serverFns all work — only the page here is unavailable.` +
-          `</p><p style="color:#8b949e">Build a UI target (browser / electron` +
-          ` / android) to serve a page, or use the app headlessly.</p>`;
-        return new Response(body, {
-          status: 503,
-          headers: { "Content-Type": "text/html", ...noCache },
-        });
       }
+      missing = null;
+    }
+    if (missing) {
+      deps.debug(
+        prod
+          ? "headless build has no browser bundle (dist/app.js) — the UI is " +
+            "unavailable; serve a UI target or use the app headlessly (API/CLI)"
+          : `no UI entry (${missing}) — the page answers 503 as a headless ` +
+            `prod build does; create it to serve a UI`,
+      );
+      const body =
+        // Escaped and `lang`-tagged like every other shell: the title is
+        // the app's own text (`Q&A`), not markup.
+        `<!doctype html>${htmlOpen(deps.lang, deps.dir)}<meta charset=utf-8>` +
+        `<title>${escHtml(title)} — headless` +
+        `</title><body style="font:15px/1.6 system-ui;max-width:38rem;` +
+        `margin:12vh auto;padding:0 1.25rem;color:#ddd;background:#0d1117">` +
+        (prod
+          ? `<h1 style="font-size:1.15rem">Headless build — no browser UI</h1>` +
+            `<p>This server was built <code>--headless</code>, so no web UI ` +
+            `bundle (<code>/app.js</code>) exists. The server, cells, API ` +
+            `routes and serverFns all work — only the page here is ` +
+            `unavailable.</p><p style="color:#8b949e">Build a UI target ` +
+            `(browser / electron / android) to serve a page, or use the app ` +
+            `headlessly.</p>`
+          : `<h1 style="font-size:1.15rem">No UI — headless app</h1>` +
+            `<p>Dev server: there is no UI entry (<code>${
+              escHtml(missing)
+            }</code>), so there is no page to serve — a production build of ` +
+            `this app answers this same 503. The server, cells, API routes ` +
+            `and serverFns all work.</p><p style="color:#8b949e">Create ` +
+            `<code>${
+              escHtml(missing)
+            }</code> (<code>export default function App() { … }</code>) ` +
+            `to serve a page; it is picked up without a restart.</p>`);
+      return new Response(body, {
+        status: 503,
+        headers: { "Content-Type": "text/html", ...noCache },
+      });
     }
     // A NONCE, fresh for this response, when the app asked for one. It has to
     // be minted here rather than once at boot: a nonce reused across responses
@@ -1635,29 +1757,11 @@ export function createStaticHandler(deps: StaticDeps): {
       prod && req && pathname === `${TROJAN_PREFIX}shutdown` &&
       req.method === "POST"
     ) {
-      if (!localControlAuthorized(req)) {
-        const presented = req.headers.has(LOCAL_CONTROL_HEADER);
-        refusedStop(presented);
-        // The caller may end this process the moment it reads the answer —
-        // `am stop`'s fallback, which on Windows is TerminateProcess — and a
-        // buffered line dies with it: the line reaches app.log FIRST.
-        await getLogger()?.flush();
-        return Response.json({
-          error: `${STOP_REFUSED}: ` +
-            (presented
-              ? "wrong control credential — not this boot's control.key"
-              : "no control credential"),
-        }, { status: 404 });
-      } else {
-        const stop = (deps.getTrojanDeps() as {
-          trojan?: { shutdown?: (by: "am stop" | "takeover") => Promise<void> };
-        }).trojan?.shutdown;
-        if (stop) {
-          const by = stopRequester(req);
-          queueMicrotask(() => void stop(by));
-          return Response.json({ ok: true, msg: "shutting down" });
-        }
-      }
+      const stop = (deps.getTrojanDeps() as {
+        trojan?: { shutdown?: (by: "am stop" | "takeover") => Promise<void> };
+      }).trojan?.shutdown;
+      const answer = await prodStopAnswer(req, stop, refusedStop);
+      if (answer) return answer;
     }
 
     // ── Trojan: control REST API — DEV-ONLY, never mounted in prod ──
@@ -2331,8 +2435,10 @@ export function createStaticHandler(deps: StaticDeps): {
     }
     const filepath = resolve(root, rel);
     // Path traversal protection
+    // A mount's own root (`/files/` → rel "") IS the root, a directory like
+    // any inside it — it answers as `/files/sub/` does, not 403.
     const basePfx = root.endsWith(SEPARATOR) ? root : root + SEPARATOR;
-    if (!filepath.startsWith(basePfx)) {
+    if (filepath !== resolve(root) && !filepath.startsWith(basePfx)) {
       return new Response("Forbidden", { status: 403 });
     }
     // The source tree is not an HTTP root: only what a served module imported.
@@ -2359,8 +2465,18 @@ export function createStaticHandler(deps: StaticDeps): {
     }
     // Symlinks inside the root must not escape it either
     try {
-      if (!(await realPathInside(root, filepath))) {
+      const real = await Deno.realPath(filepath);
+      if (!_within(await Deno.realPath(root), real)) {
         return new Response("Forbidden", { status: 403 });
+      }
+      // …and the deny list judges the file that OPENS, not only the name
+      // asked for. Windows opens `secrets.server.ts` for `secrets.server.ts.`,
+      // `secrets.server.ts%20`, `secrets.server.ts::$DATA` and its 8.3 name
+      // `SECRET~1.TS` — none of which the rule above matches, so the source
+      // went out raw. The real path is the file's own name on every OS (a
+      // link `public.js -> secrets.server.ts` included).
+      if (isProtectedPath(`/${basename(real)}`, prod)) {
+        return new Response("Not found", { status: 404 });
       }
     } catch { /* file doesn't exist — later handlers 404 */ }
     const ext = fileExt(filepath);

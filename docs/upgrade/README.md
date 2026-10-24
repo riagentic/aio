@@ -24,8 +24,9 @@ app, that is a bug in aio, not a step you missed.
 ## Tests that can go red on an upgrade (1.0.9 → 1.0.20)
 
 The app keeps running; the harness got stricter (tests are the strictest
-environment by design). These shapes pass on 1.0.9 and fail later — grep for
-them before the first run:
+environment by design). These shapes pass on 1.0.9 and fail later —
+`am migrate --tests` greps the app for them (and for each later guide's "Tests
+that can go red") and lists them in the order they would fail:
 
 - **A call made after its boot was disposed is refused** (1.0.11). Typical
   source: `setTimeout(() => cell.method(), 0)` in `onInit` — the timer fires
@@ -71,6 +72,10 @@ them before the first run:
   three) in `old/` beside the install, `updates.keepOld` for more.
   `build.splash` adds a splash screen on every target; nothing to change by
   hand.
+- [1.0.24-beta → **1.0.25-beta**](from-1.0.24-beta-to-1.0.25-beta.md) — nothing
+  to change in an app; desktop windows open 64 px inside the screen edge (a
+  window as big as the screen opens maximized), a few misread inputs are refused
+  by name, and `pairing: { pake: true }` is a new opt-in.
 - [1.0.23-beta → **1.0.24-beta**](from-1.0.23-beta-to-1.0.24-beta.md) — nothing
   to change in an app; a few tests that passed for the wrong reason can go red
   (`ui.advance`, async predicates, `testComponent`).

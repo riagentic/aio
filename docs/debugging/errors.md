@@ -148,6 +148,13 @@ exhaustively over the union.
 `undefined` means the failure carries no framework classification -- an error
 the app's own code threw and the framework only relayed.
 
+For a log line, a CI gate or an agent scanning many failures,
+`errorSummary(err)` from `aio` gives ONE line: the code (when there is one) and
+the first sentence of the message, capped at 160 characters —
+`DEAD_BOOT: "notes:add" refused: this boot is dead`. It only reads: the message
+keeps its prose and its first line. Branch with `errorCode`, never on the
+summary.
+
 ### Test-harness refusals
 
 What `testUI`, `testCell`, `bootCells` and `testServer` refuse carries a stable

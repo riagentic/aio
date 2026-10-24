@@ -8,8 +8,11 @@ import {
   tmplAppMenu,
   tmplBounds,
   tmplBoundsTracking,
+  tmplCertificateGuard,
+  tmplChromiumSwitches,
   tmplCrashGuard,
   tmplGuestPreloads,
+  tmplIconFit,
   tmplIpcGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
@@ -22,6 +25,7 @@ import {
   tmplTray,
   tmplWebGuard,
   tmplWillNavigate,
+  tmplWindowClass,
   tmplWindowShape,
   udsPreloadDiagnostics,
 } from "./electron-shared.ts";
@@ -44,13 +48,13 @@ export function electronMainScript(url: string, meta?: AioMeta): string {
         const u = new URL(url);
         u.pathname = "/__aio/icon";
         return u.href;
-      })())}); if (!r.ok) return null; ` +
+      })())}); if (!r.ok) throw new Error('GET /__aio/icon answered HTTP ' + r.status); ` +
     `return nativeImage.createFromBuffer(Buffer.from(await r.arrayBuffer())); })()`;
   return `
 const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
-${tmplAppMenu(meta?.title)}
+${tmplChromiumSwitches()}${tmplWindowClass(meta)}${tmplAppMenu(meta?.title)}
 // The shell bridge (focus, tray clicks, the window verbs) and the mount
 // signal ("ui mounted N element(s)") — the ONLY preload this window has;
 // it must not carry __aioIPC, whose presence would select the IPC transport.
@@ -83,24 +87,22 @@ ${tmplWindowShape(meta, { preload: "preloadFile" })}
 ${tmplShowWhenPainted(meta?.showWhenPainted)}
 ${tmplBoundsTracking()}
 ${tmplRendererDiagnostics(true)}
-${tmplTray(meta, trayIcon, meta?.title)}
+  // The window's own icon — the same one, fetched once. An X11 panel reads
+  // it from the window: a dev window's class names no installed launcher,
+  // so without it every aio app shows Electron's default icon.
+${tmplIconFit()}
+  const __aioIcon = Promise.resolve(${trayIcon}).then((i) => i && !i.isEmpty() ? __aioIconFit(i) : i);
+  // Nothing said "this window has no icon" before: the default gear just
+  // showed, and finding why meant reading this script. Said once, with why.
+  const __aioNoIcon = (why) => console.warn("⚠ this window has no icon of its own — Electron's default shows: " + why);
+  __aioIcon.then((i) => {
+    if (!i || i.isEmpty()) return __aioNoIcon('/__aio/icon is not an image Electron can read');
+    if (!win.isDestroyed()) win.setIcon(i);
+  }, (e) => __aioNoIcon((e && e.message) || String(e)));
+${tmplTray(meta, "__aioIcon", meta?.title)}
   win.loadURL(${JSON.stringify(url)});
 ${tmplWillNavigate("_appOrigin")}
-  // Accept the self-signed cert aio --expose generates for THIS app's own
-  // origin — and nothing else. The check must read the URL that FAILED (arg 3);
-  // re-parsing the app's own URL made the condition a constant true for every
-  // local launch, so any cert error from any host (an intercepting proxy on a
-  // hostile network answering the page's fetch to a third-party API) was
-  // silently trusted.
-  app.on('certificate-error', (event, _wc, failedUrl, _err, _cert, cb) => {
-    let sameOrigin = false;
-    try { sameOrigin = new URL(failedUrl).origin === new URL(${
-    JSON.stringify(url)
-  }).origin; } catch { sameOrigin = false; }
-    if (sameOrigin) { event.preventDefault(); cb(true); }
-    else cb(false);
-  });
-${tmplKeyboardShortcuts(meta?.shortcuts)}
+${tmplCertificateGuard(url)}${tmplKeyboardShortcuts(meta?.shortcuts)}
 });
 app.on('window-all-closed', () => { ${tmplPreloadCleanup()} process.exit(0); });
 `.trim();

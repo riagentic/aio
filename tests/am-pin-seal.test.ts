@@ -389,6 +389,11 @@ Deno.test("am fix seals a local-checkout link with a path: pin, and the pin deci
       "aiol must not warn about the pin am fix just wrote",
     );
 
+    // The note names where a path pin LIVES — the git-ignored
+    // `.aio/pin.local`, never deno.json (which holds no aioVersion here).
+    assertStringIncludes(pin.note, ".aio/pin.local");
+    assert(!pin.note.includes("aioVersion"), pin.note);
+
     // Idempotent: a second fix reports, never re-seals.
     const second = await amFix(s);
     assertEquals(pinResult(second)?.outcome, "ok");

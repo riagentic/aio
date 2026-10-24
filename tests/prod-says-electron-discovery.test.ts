@@ -11,6 +11,7 @@
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { createRequire } from "node:module";
 import { electronClientScript } from "../src/electron/electron-client-script.ts";
+import { NO_USER_DATA } from "./no-user-data.ts";
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -57,7 +58,8 @@ function boot(dgram: unknown, platform = "linux") {
     app: {
       name: "",
       on: (n: string, f: () => void) => void (handlers[n] = f),
-      getPath: () => "/nonexistent-aio-client-test",
+      getPath: () => NO_USER_DATA,
+      setDesktopName: () => {}, // its window class (electron-shell-parity.test.ts)
       quit() {},
       whenReady: () => new Promise(() => {}),
     },

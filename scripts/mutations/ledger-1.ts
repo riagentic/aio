@@ -287,10 +287,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "the pairing PIN is one slot for the whole process \u2014 app B's code pairs app A and hands out A's key, and A's printed code is dead",
     file: "src/server/pairing.ts",
-    find:
-      "  _states.set(scope, { pin, createdAt: now, attempts: new Map(), wrong: 0 });",
-    replace:
-      "  _states.clear(); _states.set(scope, { pin, createdAt: now, attempts: new Map(), wrong: 0 });",
+    find: "  _states.set(scope, {",
+    replace: "  _states.clear(); _states.set(scope, {",
     test: "tests/pairing-per-app.test.ts",
     filter:
       "pairing: two apps in one process each pair with their OWN code only",
@@ -4755,7 +4753,7 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "aio.run assets mounts resolve against the cwd only so a compiled binary launched elsewhere 404s its embedded media",
     file: "src/server/server.ts",
-    find: "assetFallbacks: _assetFallbacks(config.assets),",
+    find: "assetFallbacks: _assetFallbacks(runAssets),",
     replace: "assetFallbacks: undefined,",
     test: "tests/compiled-embedded-config-and-assets.test.ts",
     filter:
@@ -5560,8 +5558,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "an async method that writes then throws is logged as no state changed while its earlier writes committed",
     file: "src/state/cell-methods-internals.ts",
-    find: "const committed = !transactional && batcher.wrote();",
-    replace: "const committed = false;",
+    find: 'const committed: boolean | "tx" = batcher.wrote() &&',
+    replace: 'const committed: boolean | "tx" = false &&',
     test: "tests/async-rejection-line-truthful.test.ts",
     filter:
       "async throw after writing: the rejection line says the writes stayed",
@@ -7368,7 +7366,7 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       'assets: the server hands deno.json\'s mounts to the static handler as claiming ones — `"/": "./public"` answers every path and the dev page loads none of its modules',
     file: "src/server/server.ts",
-    find: "    assetsFill: _mountsDenoJsonOnly(config.assets, _served),",
+    find: "    assetsFill: _mountsDenoJsonOnly(runAssets, _served),",
     replace: "",
     test: "tests/assets-denojson-mount-order.test.ts",
     filter:
@@ -7713,10 +7711,10 @@ export const LEDGER_1: readonly Mutation[] = [
   },
   {
     what:
-      'am create commits its seeded deno.lock — the first build fills the lock and is "-dirty" on a scaffold nobody touched',
+      'am create leaves its deno.lock out of the first commit although it completed it — committed before the first build, a seed made that build "-dirty"',
     file: "src/am/am-cmd-create.ts",
-    find: '    await run(["add", "-A", "--", ".", ":(exclude)deno.lock"]);',
-    replace: '    await run(["add", "-A"]);',
+    find: "  const git = await tryGitInit(dir, lockComplete);",
+    replace: "  const git = await tryGitInit(dir, false);",
     test: "tests/am-create-journey.test.ts",
     filter:
       "am create --json: absolute dir, and git as a reason — never a bare false",
@@ -7759,5 +7757,26 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/updates-progress-of.test.ts",
     filter:
       "updates progressOf: 'app' before the app download, 'runtime' before the Electron one with its size, null before the swap",
+  },
+  {
+    what:
+      "a worker crash that is not respawned rejects the tick in flight with an unmarked error — the schedule logs 'dispatch failed' before 'stopped', two errors for one death",
+    file: "src/server/cell-worker.ts",
+    find: "  if (!respawn) Object.assign(err, { [PERMANENT_REFUSAL]: true });",
+    replace: "",
+    test: "tests/worker-crash-permanent.test.ts",
+    filter:
+      "worker crash: no respawn marks the error permanent; a respawn does not",
+  },
+  {
+    what:
+      "a dev child that `am stop` ended with exit code 1 (Windows' TerminateProcess) is read as a broken save — the session waits for a fix and `am restart` fails on it",
+    file: "src/server/dev-restart.ts",
+    find:
+      "  return status.signal !== null || status.code === 0 || stopAsked ||",
+    replace: "  return status.signal !== null || status.code === 0 ||",
+    test: "tests/dev-restart-stop-exit-code.test.ts",
+    filter:
+      "dev restart: a child ended by `am stop` ends the session even with exit code 1 — Windows' TerminateProcess",
   },
 ];

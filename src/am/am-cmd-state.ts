@@ -26,12 +26,19 @@ import {
   overwriteRefusal,
   parseNumArg,
   parsePayload,
+  PATH_SYNTAX,
   resolveAmAppId,
   resolvePath,
   resolvePort,
   runTrojanGet,
 } from "./am-utils.ts";
-import { FETCH_TIMEOUT, httpGet, trojanGet, trojanPost } from "./am-http.ts";
+import {
+  FETCH_TIMEOUT,
+  httpGet,
+  trojanGet,
+  trojanPost,
+  viewGet,
+} from "./am-http.ts";
 import { appDirs } from "../server/app-dirs.ts";
 import { readStoredState } from "../server/stored-state.ts";
 import { clientScopedNote } from "../server/server-trojan.ts";
@@ -115,7 +122,10 @@ export function compareValue(
   }
   switch (op) {
     case "exists":
-      return { ok: found, reason: found ? "present" : "path not found" };
+      return {
+        ok: found,
+        reason: found ? "present" : `path not found — ${PATH_SYNTAX}`,
+      };
     case "absent":
       return {
         ok: !found,
@@ -361,11 +371,12 @@ export function _braceHint(paths: readonly string[]): string | null {
  *  Stops at a wildcard or a brace pick (their own misses are about the
  *  elements, not one key). Pure. @internal */
 export function _missHint(data: unknown, path: string): string {
-  const segs = path.replace(/\[(\d+|\*)\]/g, ".$1").split(".");
+  const segs = path.replace(/\[\?[^\]]*\]/g, ".?")
+    .replace(/\[(\d+|\*)\]/g, ".$1").split(".");
   let node = data;
   const walked: string[] = [];
   for (const seg of segs) {
-    if (seg.includes("*") || seg.includes("{")) break;
+    if (seg.includes("*") || seg.includes("{") || seg === "?") break;
     if (node === null || typeof node !== "object") break;
     const rec = node as Record<string, unknown>;
     if (!Object.hasOwn(rec, seg)) break;
@@ -399,7 +410,26 @@ export async function cmdState(
   // answered. (`--ui` too: its argument is a single user.)
   const extra = _extraPathError(args);
   if (extra) fail(extra, detectMode(flags));
-  if (args.includes("--offline")) return offlineState(args, flags);
+  if (args.includes("--offline")) {
+    if (args.includes("--prod")) {
+      fail(
+        "--offline reads the store, --prod asks the running app — pick one",
+        detectMode(flags),
+      );
+    }
+    return offlineState(args, flags);
+  }
+  // `--prod`: the read-only CLIENT view (`/__aio/view`) — what a WebSocket
+  // with this credential receives — which a production app serves and the
+  // dev-only trojan's raw state does not exist there.
+  const prod = args.includes("--prod");
+  if (prod && flags.ui) {
+    fail(
+      "--prod already reads the client view — of the user AIO_TOKEN names " +
+        "(drop --ui; `--ui <user>` is the dev-only projection for any user)",
+      detectMode(flags),
+    );
+  }
   // `--ui`: the filtered UI-state projection (optionally per user) instead of
   // raw state — the command that used to be spelled `am ui`.
   if (flags.ui) return uiProjection(args, flags);
@@ -415,20 +445,26 @@ export async function cmdState(
    *  dispatch` is refused by. Otherwise: the keys where the path stopped. */
   const stateMiss = async (data: unknown, path: string): Promise<string> => {
     const head = path.split(/[.[]/)[0]!;
-    if (data && typeof data === "object" && !Object.hasOwn(data, head)) {
+    if (
+      !prod && data && typeof data === "object" && !Object.hasOwn(data, head)
+    ) {
       const cc = await trojanGet(port, "client-cells", appId);
       if (cc.ok && Array.isArray(cc.data) && cc.data.includes(head)) {
         return clientScopedNote(head, "read") +
           " Read it through the UI: `am surface` shows its live text and values.";
       }
     }
-    return `path "${path}" not found in state${_missHint(data, path)}`;
+    return `path "${path}" not found in ${prod ? "the client view" : "state"}${
+      _missHint(data, path)
+    } — ${PATH_SYNTAX}`;
   };
 
   const fetchAndResolve = async (
     silent = false,
   ): Promise<{ ok: true; data: unknown } | { ok: false }> => {
-    const result = await trojanGet(port, "state", appId);
+    const result = prod
+      ? await viewGet(port, appId)
+      : await trojanGet(port, "state", appId);
     if (!result.ok) {
       if (!silent) outError(result.error, mode);
       return { ok: false };
@@ -555,7 +591,9 @@ async function offlineState(args: string[], flags: GlobalFlags): Promise<void> {
   const r = resolvePath(state, path);
   if (!r.found) {
     fail(
-      `path "${path}" not found in stored state${_missHint(state, path)}`,
+      `path "${path}" not found in stored state${
+        _missHint(state, path)
+      } — ${PATH_SYNTAX}`,
       mode,
     );
   }

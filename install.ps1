@@ -95,6 +95,64 @@ function Test-VersionAtLeast([string]$have, [string]$want) {
   return $true
 }
 
+# The newest RELEASE tag by semver - the rule `am upgrade` / `am create` use
+# (latestTag in src/am/am-versions.ts; the order is compareVersions in
+# src/server/updates-core.ts, ported here and in install.sh's newest_version):
+# final > prerelease, prerelease compared piecewise (alpha9 < alpha62), build
+# metadata ignored, tags it cannot order skipped. Ordinal string compares: -lt
+# on strings is case-insensitive and culture-aware, JS's < is neither.
+function Get-VersionPieces([string]$pre) {
+  $out = @()
+  foreach ($id in ($pre -split '\.')) {
+    if ($id) { $out += [regex]::Matches($id, '[0-9]+|[^0-9]+') | ForEach-Object { $_.Value } }
+  }
+  return ,$out
+}
+function Compare-Version([string]$a, [string]$b) {
+  $parse = {
+    param($v)
+    $v = ($v.Trim() -replace '^v', '') -replace '\+.*$', ''
+    $d = $v.IndexOf('-')
+    $core = if ($d -lt 0) { $v } else { $v.Substring(0, $d) }
+    $pre = if ($d -lt 0) { '' } else { $v.Substring($d + 1) }
+    $n = @($core -split '\.' | ForEach-Object { [double]$_ })
+    while ($n.Count -lt 3) { $n += 0 }
+    @{ nums = $n; pre = $pre }
+  }
+  $pa = & $parse $a; $pb = & $parse $b
+  for ($i = 0; $i -lt 3; $i++) {
+    if ($pa.nums[$i] -ne $pb.nums[$i]) { if ($pa.nums[$i] -lt $pb.nums[$i]) { return -1 } else { return 1 } }
+  }
+  if (-not $pa.pre -and -not $pb.pre) { return 0 }
+  if (-not $pa.pre) { return 1 }
+  if (-not $pb.pre) { return -1 }
+  $xa = Get-VersionPieces $pa.pre; $xb = Get-VersionPieces $pb.pre
+  for ($i = 0; $i -lt [Math]::Max($xa.Count, $xb.Count); $i++) {
+    if ($i -ge $xa.Count) { return -1 }
+    if ($i -ge $xb.Count) { return 1 }
+    $an = $xa[$i] -cmatch '^[0-9]+$'; $bn = $xb[$i] -cmatch '^[0-9]+$'
+    if ($an -and $bn) {
+      $da = [double]$xa[$i]; $db = [double]$xb[$i]
+      if ($da -ne $db) { if ($da -lt $db) { return -1 } else { return 1 } }
+    } elseif ($an -ne $bn) {
+      if ($an) { return -1 } else { return 1 }
+    } else {
+      $c = [string]::CompareOrdinal($xa[$i], $xb[$i])
+      if ($c -ne 0) { if ($c -lt 0) { return -1 } else { return 1 } }
+    }
+  }
+  return 0
+}
+function Get-NewestVersion([string[]]$tags) {
+  $best = ''
+  foreach ($t in $tags) {
+    $t = "$t".Trim()
+    if ($t -cnotmatch '^v?[0-9]+(?:\.[0-9]+){0,2}(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z][0-9A-Za-z.-]*)?$') { continue }
+    if (-not $best -or (Compare-Version $t $best) -gt 0) { $best = $t }
+  }
+  return $best
+}
+
 function Get-DenoVersion() {
   if (-not (Have 'deno')) { return '' }
   $line = (deno --version | Select-Object -First 1)
@@ -128,12 +186,15 @@ function Get-AioUserHome() {
 # and updated - or a user with HOME set would get a second clone and an "am"
 # that no longer follows the first. Only a machine with none gets the rule
 # above.
+# The last line is a string join, not Join-Path: Join-Path refuses a drive
+# that is not mounted (HOME on a USB or network drive that is not there right
+# now) with "Cannot find drive" before anything says which folder was meant.
 function Get-AioDefaultHome() {
   if ($env:USERPROFILE) {
     $old = Join-Path $env:USERPROFILE '.local\lib\aio'
     if (Test-Path -LiteralPath (Join-Path $old '.git')) { return $old }
   }
-  return Join-Path (Get-AioUserHome) '.local\lib\aio'
+  return [System.IO.Path]::Combine((Get-AioUserHome), '.local\lib\aio')
 }
 
 # One line saying where things will live - and a second when the two "home"
@@ -181,8 +242,12 @@ function Invoke-AioInstall {
     if ($LASTEXITCODE -ne 0) { throw "AIO_REF=$($env:AIO_REF) is not a ref in $AioRepo" }
     Ok "aio $($env:AIO_REF) (pinned via AIO_REF)"
   } else {
-    $AioTag = (Quiet { git -C $AioHome describe --tags --abbrev=0 "origin/$AioBranch" 2>$null })
-    if (-not $AioTag) { $AioTag = (git -C $AioHome tag -l 'v*' --sort=-creatordate | Select-Object -First 1) }
+    # Newest v* release merged into the branch, by semver (Get-NewestVersion) -
+    # never the NEAREST tag by ancestry, which downgraded past a later-merged
+    # maintenance tag and picked non-release tags like proof-ci.
+    $tags = @(Quiet { git -C $AioHome tag -l 'v*' --merged "origin/$AioBranch" 2>$null })
+    if ($LASTEXITCODE -ne 0) { $tags = @(git -C $AioHome tag -l 'v*') }
+    $AioTag = Get-NewestVersion $tags
     if ($AioTag) { git -C $AioHome checkout -q --force $AioTag; Ok "aio $AioTag" }
     else { git -C $AioHome checkout -q --force $AioBranch; Ok "aio $AioBranch (no tags yet)" }
   }

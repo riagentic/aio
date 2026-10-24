@@ -48,7 +48,7 @@ async function install(sw: string, fail: Set<string> = new Set()) {
   }
   new Function("self", "caches", "Request", sw)(
     self,
-    { open: () => Promise.resolve(cache) },
+    { open: () => Promise.resolve(cache), keys: () => Promise.resolve([]) },
     Request,
   );
   let done: Promise<unknown> = Promise.resolve();

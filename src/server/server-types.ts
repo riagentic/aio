@@ -51,6 +51,9 @@ export interface ServerConfig {
   host?: string; // explicit bind address — overrides the expose-derived default
   token?: string; // access token required when expose=true (no users)
   cert?: string; // PEM cert string — enables HTTPS when set (auto-generated when --expose)
+  /** `aio.run({ pairing: { pake: true } })`: `/__aio/pair` speaks only the
+   *  CPace exchange (cpace.ts) and refuses a `{ pin }` body. */
+  pairingPake?: boolean;
   key?: string; // PEM key string — required when cert is set
   users?: Record<string, AioUser>; // per-user token map (overrides token)
   resolveUser?: (token: string) => AioUser | null | Promise<AioUser | null>; // dynamic user resolution (AIO-171)
@@ -78,6 +81,9 @@ export interface ServerConfig {
   onIdentityChange?: (fn: () => void) => () => void;
   showStatus?: boolean; // show reconnection indicator (default: true)
   uiEntry?: string; // AIO-8.1: UI entry file relative to baseDir (default: App.tsx)
+  /** Dev, no UI entry: answer pages 503 as prod does (true), or serve the
+   *  shell and warn once (default — see `StaticDeps.headless503`). */
+  headless503?: boolean;
   viewport?: string | false; // AIO-423: <meta viewport> override (false = omit)
   headExtra?: string; // AIO-423: verbatim extra <head> content
   lang?: string; // ui.lang — <html lang>, default "en"
@@ -87,7 +93,7 @@ export interface ServerConfig {
   theme?: UiTheme; // ui.theme — how much of the default look is emitted
   layout?: boolean; // ui.layout — false drops the page-layout defaults
   themeName?: string; // identity the theme accent is derived from (appId)
-  hue?: number; // deno.json `hue` — overrides the hash of themeName
+  hue?: import("../build/app-icon.ts").HueKey; // deno.json `hue` (+ `neutral`) — overrides the hash of themeName
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
   wire?: { omitTrailingUndefined?: boolean }; // sent to browser: it encodes
   /** Extra read-only DEV-server roots by URL prefix — see CellsConfig.serveDirs. */
@@ -109,6 +115,8 @@ export interface ServerConfig {
   /** How many clients are on the UDS socket — the cost meter counts both
    *  transports, and a desktop app has all of its clients here. */
   udsClientCount?: () => number;
+  /** The app's icon replay, shared with the desktop socket (icon-replay.ts). */
+  iconReplay?: import("./icon-replay.ts").IconReplay;
   fullStateThreshold?: number; // 0-1: byte ratio — patch JSON > this × full-state JSON → full broadcast (default: 0.5)
   maxConnections?: number; // max concurrent WebSocket clients (default: 100)
   wsLimits?: import("./aio-types.ts").WsLimits; // per-client WS rate/size limits (W6.6)
@@ -217,6 +225,9 @@ export interface ServerHandle {
   broadcastTT: () => void;
   /** A raw frame to every UI client, WS and UDS; how many received it. */
   broadcastUi?: (raw: string) => number;
+  /** The icon frames a UI client that connects now must be sent (`appIcon`
+   *  set before it connected), oldest first. */
+  iconReplay?: () => readonly string[];
   shutdown: () => Promise<void>;
   clientCount: () => number;
   trojanPort?: number; // set when TLS is active — HTTP-only trojan endpoint on 127.0.0.1

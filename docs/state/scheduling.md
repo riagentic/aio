@@ -424,7 +424,10 @@ compile` cannot follow a URL: import it once from the app
 (`import "./job.ts";`), or pass `--include job.ts` if you run `deno compile`
 yourself. A module that is missing is refused with that hint.
 `blocking.cancel(id)`, the pool and the result contract are the same for both
-forms. Full contract and the "which tool for which work" table:
+forms. A task started from a method body ends with the app: when shutdown aborts
+that method (`s.$signal`), the task is stopped and its promise rejects with an
+`AbortError` (a `cancelOn` abort leaves it running). Full contract and the
+"which tool for which work" table:
 [performance → move it off-thread](../debugging/performance.md#move-it-off-thread).
 
 ---

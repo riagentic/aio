@@ -11,6 +11,7 @@
 import { deepMerge, MAX_DEPTH as DEEP_MERGE_MAX_DEPTH } from "./deep-merge.ts";
 import { createAioError } from "../diagnostics/error.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 const _isObj = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
@@ -317,7 +318,7 @@ export function runCellRestore(
       ? deepMerge(shaped.declared, out)
       : out;
   } catch (e) {
-    log.error(`hook onRestore(${id}): ${e}`);
+    log.error(`hook onRestore(${id}): ${thrownText(e)}`);
     return slice;
   }
 }
@@ -586,7 +587,7 @@ export function applyCellMigrations(
             "PERSIST_SCHEMA",
             new Error(
               `migrate: ${cellId} onMigrate (v${persisted} → v${info.version}) ` +
-                `threw — refusing to boot: ${e}\n` +
+                `threw — refusing to boot: ${thrownText(e)}\n` +
                 `NOTHING was written: the stored v${persisted} data is intact ` +
                 `on disk, and a build with a fixed onMigrate will migrate it. ` +
                 `(Booting on defaults would have persisted an empty ` +

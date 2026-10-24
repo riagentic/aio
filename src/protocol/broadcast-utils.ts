@@ -27,9 +27,6 @@ import { log } from "../diagnostics/logger-api.ts";
 export const MAX_SUBS = 1024;
 export const MAX_SUB_LEN = 256;
 
-/** Minimal client interface for subscription-aware filtering */
-export type SubClient = { subscriptions: Set<string> | null };
-
 /** Patch entry — cell name + Immer ops */
 export type PatchEntry = {
   cell: string;

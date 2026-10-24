@@ -87,7 +87,7 @@ import {
   type QueuedEntry,
 } from "../state/offline-queue.ts";
 import { encodeAction, wireAction } from "../state/action-encode.ts";
-import { resetTT } from "../air/time-travel-panel.ts";
+import { resetTT, setSendFn } from "../air/time-travel-panel.ts";
 import { authUser } from "./browser-auth-ui.ts";
 import { SIGNED_IN_EVENT, SIGNED_OUT_EVENT } from "./auth-client.ts";
 import {
@@ -99,6 +99,7 @@ import {
 } from "./browser-vitals.ts";
 import { _takeOfflineQueue as _coreTakeOfflineQueue } from "../state/state-transport.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { _withdrawWithheld } from "../state/state-signals.ts";
 
 let _ws: WebSocket | null = null;
 let _closed = false;
@@ -228,6 +229,7 @@ function _pacerFor(ws: WebSocket): SendPacer<OutFrame> {
     },
     onRefused: (entries, err) => _takeBackRefused(entries, err),
     rate: () => peerHello()?.rate,
+    bytesRate: () => peerHello()?.bytesPerSec,
   });
 }
 
@@ -500,6 +502,14 @@ _registerSyncTransport(
 );
 // serverFn client (B3): raw sends for sfn calls.
 _registerSfnTransport((raw) => _sendRaw(raw));
+// Time travel (dev): the panel's undo/redo/goto/lock and `useTimeTravel()`'s
+// controls send `tt-cmd` through here. Nothing ever called `setSendFn`, so
+// every one of them was a silent no-op.
+setSendFn((raw) => {
+  if (!_sendRaw(raw)) {
+    console.warn("[aio] time-travel command not sent — the client is offline");
+  }
+});
 let _syncOnline: ((v: boolean) => void) | null = null;
 /** What the transport last told (or would have told) the sync engine: up from
  *  an open (WS `onopen`, IPC `onOpen`) until the next close or teardown. */
@@ -593,6 +603,13 @@ function _sendRaw(msg: string): boolean {
   return false;
 }
 
+/** What a call already WRITTEN to a connection that then closed is rejected
+ *  with: message exactly "connection lost" (documented, compared by apps),
+ *  `code: "CONNECTION_LOST"` — its fate is UNKNOWN, the server may have run
+ *  it and lost only the ack, so re-check state before retrying. */
+const connectionLost = (): Error =>
+  Object.assign(new Error("connection lost"), { code: "CONNECTION_LOST" });
+
 /** One demux for both AIR transports (WS + IPC): decode once, route. */
 function _route(line: string): void {
   const f = dec(line);
@@ -651,9 +668,17 @@ function _route(line: string): void {
         _sendRaw(enc("client-state", { error: String(err) }));
       }
       return;
-    case "state":
+    case "state": {
       _handleState(f.d as Record<string, unknown>);
+      // The cells this frame covers (server `encState`): one it covers and
+      // does not carry was withheld — withdrawn, not kept until a reconnect.
+      const covers = (f as { s?: unknown }).s;
+      if (
+        f.d && typeof f.d === "object" &&
+        (covers === null || Array.isArray(covers))
+      ) _withdrawWithheld(f.d as Record<string, unknown>, covers);
       return;
+    }
     case "patches":
       _handleState({ $patches: f.d });
       return;
@@ -1377,7 +1402,7 @@ function _connectIPC() {
     // failed and then sent it anyway — one user intent, one rejection AND one
     // application. A queued call has not been written; nothing can have
     // applied it; its promise waits for the flush.
-    _rejectInFlight(new Error("connection lost"));
+    _rejectInFlight(connectionLost());
     _setDegradedRelay(null);
     _coreSetTransport(null);
     _coreSetConnected(false);
@@ -1553,7 +1578,7 @@ function _connect() {
     _pauseClientVitals();
     // In-flight only — the queue survives and flushes on reconnect (see the
     // IPC close above for the full reasoning).
-    _rejectInFlight(new Error("connection lost"));
+    _rejectInFlight(connectionLost());
     _setDegradedRelay(null);
     _coreSetTransport(null);
     _coreSetConnected(false);

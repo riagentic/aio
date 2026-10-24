@@ -15,7 +15,8 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { cell } from "../mod.ts";
 import { testServer } from "../src/testing/server-test.ts";
-import { dec } from "../src/protocol/envelope.ts";
+import { dec, enc } from "../src/protocol/envelope.ts";
+import { protoHello } from "../src/protocol/protocol-version.ts";
 
 const probe = cell("ws-limits-probe", {
   state: { n: 0 },
@@ -90,6 +91,46 @@ Deno.test("ws: an over-size frame is refused where the SENDER can read it", asyn
       .n,
     0,
   );
+});
+
+// The legacy bare-JSON refusal (`{error:"message_too_large"}`) is for peers
+// that never said they speak the envelope. aio's own client sends a `proto`
+// hello first — it read that line as an "undecodable frame — dropped"
+// warning, once per oversize frame, beside the diag that already said why.
+Deno.test("ws: an over-size frame from a peer that sent a proto hello gets only the envelope refusal", async () => {
+  await using server = await testServer({
+    cells: [probe],
+    wsLimits: { maxMessageBytes: 2_000 },
+  });
+  const oversize = JSON.stringify({
+    v: 2,
+    t: "action",
+    d: { type: "ws-limits-probe:bump", payload: "x".repeat(5_000) },
+  });
+  const url = server.url.replace("http", "ws") + "/ws";
+  const legacy = (frames: string[]) =>
+    frames.filter((f) => f.includes("message_too_large")).length;
+
+  const hello = await collect(url, (ws) => {
+    ws.send(enc("proto", protoHello()));
+    ws.send(oversize);
+  });
+  assertEquals(legacy(hello), 0, "no bare-JSON line for an envelope peer");
+  assert(
+    diags(hello).some((d) => d.type === "ws-too-large"),
+    "the envelope refusal still arrives",
+  );
+  assertEquals(
+    hello.filter((f) => dec(f) === null).length,
+    0,
+    `every frame to it decodes: ${
+      hello.map((f) => f.slice(0, 60)).join(" | ")
+    }`,
+  );
+
+  // A peer that never sent a hello still gets the line it can read.
+  const bare = await collect(url, (ws) => ws.send(oversize));
+  assertEquals(legacy(bare), 1);
 });
 
 Deno.test("ws: a within-limits frame draws no refusal at all", async () => {

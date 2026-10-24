@@ -50,8 +50,9 @@ function silentHost() {
 const descendants = async () => descendantsIn(await processParents(), Deno.pid);
 
 // The deadline under test. Windows has no /proc: one look at its process
-// table takes seconds, and the clone must still be running when it is taken.
-const STALL_MS = Deno.build.os === "windows" ? 12_000 : 1500;
+// table takes seconds — over 12 s on a loaded machine — and the clone must
+// still be running when it is taken.
+const STALL_MS = Deno.build.os === "windows" ? 30_000 : 1500;
 
 /** For a git that is expected to FAIL at once (a stand-in `ssh` exits 255):
  *  long enough that the deadline is never what ended it. */
@@ -95,8 +96,10 @@ Deno.test({
       // host has a connection.
       await host.connected;
       const spawned = (await descendants()).filter((p) => !before.has(p));
-      assert(spawned.length >= 2, `saw only ${spawned.length} process(es)`);
+      // Settled before any assert: a throw here left the clone running into
+      // the next test (its leak check failed for this one's git).
       const r = await pending;
+      assert(spawned.length >= 2, `saw only ${spawned.length} process(es)`);
       assert(!r.ok, "a stalled clone must not succeed");
       assertMatch(
         r.error,

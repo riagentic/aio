@@ -37,6 +37,7 @@ import { _resetEventWarnings, _warnUnknownEvent } from "./dev-events.ts";
 import { _checkKeys } from "./dev-keys.ts";
 import { _assertRegionAlignment } from "./dev-align.ts";
 import { _depFired, _renderAsked, _renderBurst } from "./dev-burst.ts";
+import { _resetTTPanel, _showTT } from "./time-travel-dom.ts";
 
 /** The slots this layer fills. `dev-hooks.ts` spreads it into `devHooks`. */
 export const airDevHooks = {
@@ -53,4 +54,6 @@ export const airDevHooks = {
   renderAsked: _renderAsked,
   depFired: _depFired,
   renderBurst: _renderBurst,
+  showTT: _showTT,
+  resetTTPanel: _resetTTPanel,
 };

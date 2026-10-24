@@ -203,17 +203,27 @@ async function launch(pkg: string, clear = false): Promise<void> {
 
 /** Bring `pkg` to the front WITHOUT stopping it — a tap on its launcher icon. */
 async function reopen(pkg: string): Promise<void> {
-  await clearSystemDialogs();
-  const r = await adb(
-    "shell",
-    "monkey",
-    "-p",
-    pkg,
-    "-c",
-    "android.intent.category.LAUNCHER",
-    "1",
-  );
-  assert(r.ok, `reopen ${pkg}: ${r.out}`);
+  // Seen once (API 35, right after a display-size reset): monkey answered ok
+  // and the process never started — the launch is asked again, once, and
+  // said; a second miss fails where the caller waits for the app.
+  for (let tryNo = 1; tryNo <= 2; tryNo++) {
+    await clearSystemDialogs();
+    const r = await adb(
+      "shell",
+      "monkey",
+      "-p",
+      pkg,
+      "-c",
+      "android.intent.category.LAUNCHER",
+      "1",
+    );
+    assert(r.ok, `reopen ${pkg}: ${r.out}`);
+    for (let i = 0; i < 20; i++) {
+      if ((await adb("shell", "pidof", pkg)).out.trim()) return;
+      await sleep(500);
+    }
+    console.warn(`[aio] android e2e: ${pkg} did not start after a launch`);
+  }
 }
 
 /** What is on screen, read by the OS's own accessibility dump — the way into
@@ -238,11 +248,12 @@ function startServer(
   /** The server's data root, under `dir` — another one is another identity
    *  (its own key, its own certificate root). */
   home = ".home",
+  env: Record<string, string> = {},
 ): { proc: Deno.ChildProcess; log: () => string; stop: () => Promise<void> } {
   const proc = new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", "src/app.ts", "--client=server-only", ...args],
     cwd: dir,
-    env: { AIO_APPS_DIR: join(dir, home) },
+    env: { AIO_APPS_DIR: join(dir, home), ...env },
     stdin: "null",
     stdout: "piped",
     stderr: "piped",
@@ -431,6 +442,8 @@ await aio.run({
       }),
   },
   onStart() {},
+  // The PAKE pairing step turns it on for its own server.
+  ...(Deno.env.get("E2E_PAKE") ? { pairing: { pake: true } } : {}),
   ${opts.run ?? ""}
 });
 `,
@@ -760,6 +773,108 @@ Deno.test({
           } finally {
             await adb("shell", "wm", "user-rotation", "lock", "0");
           }
+        },
+      );
+
+      await step(
+        "standalone: a system font size or display size change does not reload the page, and the text follows the font size",
+        async () => {
+          // Measured on API 35 before `fontScale|density` were in the
+          // manifest's configChanges: each change recreated the activity and
+          // RELOADED the page. Handled, the WebView kept its creation-time
+          // text zoom (16px stayed 16px at 1.3) until MainActivity carried
+          // the new scale over.
+          const pkg = standalone;
+          const ev = (e: string) => onPage(pkg, e);
+          const size =
+            `parseFloat(getComputedStyle(document.querySelector("button")).fontSize)`;
+          const was =
+            (await adb("shell", "settings", "get", "system", "font_scale")).out
+              .trim();
+          const base = Number(await ev(size));
+          await ev("window.__aioE2eMarker = 9, 1");
+          try {
+            await adb(
+              "shell",
+              "settings",
+              "put",
+              "system",
+              "font_scale",
+              "1.3",
+            );
+            const grown = await until(
+              "the text to follow the font size",
+              async () => {
+                const v = Number(await ev(size));
+                return v > base * 1.2 ? v : null;
+              },
+            );
+            assert(grown > base, `font size ${base} → ${grown}`);
+            assertEquals(
+              await ev("window.__aioE2eMarker"),
+              9,
+              "a font size change reloaded the app",
+            );
+          } finally {
+            await adb(
+              "shell",
+              "settings",
+              "put",
+              "system",
+              "font_scale",
+              was === "null" ? "1.0" : was,
+            );
+          }
+          const phys = Number(
+            (await adb("shell", "wm", "density")).out.match(
+              /Physical density: (\d+)/,
+            )?.[1],
+          );
+          const dpr = Number(await ev("devicePixelRatio"));
+          try {
+            await adb(
+              "shell",
+              "wm",
+              "density",
+              String(Math.round(phys * 1.15)),
+            );
+            await until(
+              "the page to see the new density",
+              async () =>
+                Number(await ev("devicePixelRatio")) > dpr ? true : null,
+            );
+            assertEquals(
+              await ev("window.__aioE2eMarker"),
+              9,
+              "a display size change reloaded the app",
+            );
+          } finally {
+            await adb("shell", "wm", "density", "reset");
+          }
+        },
+      );
+
+      await step(
+        "standalone: getUserMedia for camera AND microphone is denied whole, and logcat says why",
+        async () => {
+          // The WebView grants a request whole or not at all: granting only
+          // the video of a { video, audio } request rejected the page's call
+          // (NotAllowedError) after a camera prompt it could never use.
+          const ev = (e: string) => onPage(standalone, e);
+          await adb("logcat", "-c");
+          assertStringIncludes(
+            String(
+              await ev(
+                `navigator.mediaDevices.getUserMedia({ video: true, audio: true })` +
+                  `.then(() => "granted", (e) => e.name)`,
+              ),
+            ),
+            "NotAllowedError",
+          );
+          assertStringIncludes(
+            (await adb("logcat", "-d", "-s", "aio:*")).out,
+            "refuses a request it cannot grant whole",
+          );
         },
       );
 
@@ -2026,6 +2141,53 @@ self.onmessage = () => { mid.postMessage(1); own.postMessage(1); };`,
           );
           await srv.stop();
           server = null;
+
+          // ── PAKE (`pairing: { pake: true }`): an 8-digit code ────────────
+          // Its own identity again. The code is never sent (Cpace.kt); a
+          // wrong one is refused as a wrong code; the right one pairs over
+          // TLS on the certificate this device saw, and pins it.
+          srv = server = startServer(
+            dir,
+            [`--port=${port}`, "--expose"],
+            ".home-pake",
+            { E2E_PAKE: "1" },
+          );
+          const pake = await printed(srv, /pair code: (\d{8})/);
+          const pakeKey = new URL(
+            await printed(srv, /share: (https:\/\/\S+)/),
+          ).searchParams.get("token");
+          assert(pakeKey, "the PAKE server has a key");
+          const p0 = Number(
+            await until(
+              "the PAKE server's count",
+              () => tlsCount(".home-pake", `?token=${pakeKey}`),
+            ),
+          );
+          // A fresh install: the baked http:// address, at a TLS port.
+          await launch(pkg, true);
+          await form("#unreachable");
+          await connect(at, pake === "00000000" ? "11111111" : "00000000");
+          await said("Invalid or expired pairing code");
+          await connect(at, pake);
+          await until(
+            "the PAKE server's page, by its 8-digit code",
+            async () =>
+              (await ev("location.protocol")) === "https:" &&
+                (await ev(COUNT)) === String(p0)
+                ? true
+                : null,
+          );
+          await ev(PLUS);
+          await until(
+            "the tap to reach the PAKE server",
+            async () =>
+              (await tlsCount(".home-pake", `?token=${pakeKey}`)) ===
+                  String(p0 + 1)
+                ? true
+                : null,
+          );
+          await srv.stop();
+          server = null;
         },
       );
 
@@ -2035,7 +2197,7 @@ self.onmessage = () => { mid.postMessage(1); own.postMessage(1); };`,
       const proved =
         `API ${api}: standalone (dispatch, durable native store — survives an instant kill and a background kill, rotation, light/dark live, android.colorScheme dark and light hold against the system, app.ts options baked — ui.theme/lang/dir reach the phone, persist: false a new install while an install holding state keeps it, a second app keeps its own storage, browser workers (module, classic+nested, three deep, assets mount), nativeFetch past an Origin-refusing API, a foreign iframe can neither read nor write the store, build.splash shown at launch and closed on load not before minMs) + signed release (keystore from the environment, APK + AAB, not debuggable, runs) + client (connect, server dispatch, ${
           isEmulator() ? "a call made offline delivered, " : ""
-        }Back, unreachable, keyed --expose server by pairing code and by share link over http and over self-signed TLS — certificate pinned; wrong code, unknown and changed certificate refused)`;
+        }Back, unreachable, keyed --expose server by pairing code and by share link over http and over self-signed TLS — certificate pinned; wrong code, unknown and changed certificate refused; PAKE pairing (pairing.pake, 8-digit code, Cpace.kt) over TLS)`;
       // Two literal rows (tests/proof-claims-have-gates.test.ts reads them).
       if (red) { /* the failed steps are the result — nothing is proved */ }
       else if (isEmulator()) await recordProof("android", "emulator", proved);
@@ -2044,7 +2206,9 @@ self.onmessage = () => { mid.postMessage(1); own.postMessage(1); };`,
       if (server) {
         await (server as ReturnType<typeof startServer>).stop();
       }
-      if (!isEmulator()) { for (const args of takeBack) await adb(...args); }
+      // An emulator keeps its userdata across boots too: what the run
+      // installed or left there is taken back on it as on a phone.
+      for (const args of takeBack) await adb(...args);
       if (emu.started) await adb("emu", "kill");
       await dropTempDir(dir);
     }

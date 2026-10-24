@@ -1,5 +1,6 @@
 import { log } from "../diagnostics/logger-api.ts";
 import { inServerOrigin } from "./call-origin.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 
 // own.ts — keyed disposer slots for cell-owned native resources (AIO-382)
 //
@@ -72,6 +73,7 @@ export function _setOwnClockForTests(fn: (() => number) | null): void {
  *  `pendingFactories` (because the own.set effect was created but never
  *  dispatched, e.g. a reducer threw before returning the effect) would
  *  otherwise leak for the process lifetime, capturing its closure scope. */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetPendingFactories(): void {
   pendingFactories.clear();
   parkedAt.clear();
@@ -79,6 +81,7 @@ export function _resetPendingFactories(): void {
 }
 
 /** How many factories are parked, unconsumed — test seam for the leak bound. */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _pendingFactoryCount(): number {
   return pendingFactories.size;
 }
@@ -341,7 +344,7 @@ export function createOwnManager(log: Log): {
         );
       }
     } catch (e) {
-      log.error(`own: disposer '${id}' threw: ${e}`);
+      log.error(`own: disposer '${id}' threw: ${thrownText(e)}`);
     }
   }
 
@@ -410,7 +413,7 @@ export function createOwnManager(log: Log): {
       if (disposer) disposers.set(effect.id, disposer);
       log.debug(`own: acquired '${effect.id}'`);
     } catch (e) {
-      log.error(`own: factory '${effect.id}' threw: ${e}`);
+      log.error(`own: factory '${effect.id}' threw: ${thrownText(e)}`);
     }
   }
 

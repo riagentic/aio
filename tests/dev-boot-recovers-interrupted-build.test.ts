@@ -115,7 +115,7 @@ Deno.test("dev boot: a real app started from source repairs its project before i
       for await (const c of s) out += dec.decode(c);
     });
     try {
-      await waitForHttp(`http://127.0.0.1:${port}/health`, 60_000);
+      await waitForHttp(`http://127.0.0.1:${port}/__aio/health`, 60_000);
     } catch (e) {
       throw new Error(`${e}\n${out.slice(-2000)}`);
     }

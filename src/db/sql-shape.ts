@@ -95,6 +95,16 @@ export function statementVerb(sql: string): string {
   return m ? m[1]!.toUpperCase() : "";
 }
 
+/** True for a statement that opens or ends the CONNECTION's transaction —
+ *  `BEGIN`, `COMMIT`, `END`, `ROLLBACK` (not `ROLLBACK TO <savepoint>`, which
+ *  stays inside it). Savepoints nest, so `SAVEPOINT`/`RELEASE` are not. */
+export function controlsTransaction(sql: string): boolean {
+  const m = mask(sql, true);
+  return /^\s*(?:BEGIN|COMMIT|END)\b/i.test(m) ||
+    (/^\s*ROLLBACK\b/i.test(m) &&
+      !/^\s*ROLLBACK\s+(?:TRANSACTION\s+)?TO\b/i.test(m));
+}
+
 /** Pragmas that CHANGE something when run bare — no `=`, no argument — so the
  *  bare form is not the "report the value" form it is for every other pragma. */
 const PRAGMA_BARE_WRITES = new Set([

@@ -140,11 +140,46 @@ self.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
     respond({
       id,
       ok: false,
-      error: `${err.message}${sqlContext(data)}`,
+      error: `${err.message}${valueHint(err.message, data)}${sqlContext(data)}`,
       stack: err.stack,
     });
   }
 };
+
+/** The fix for the two value errors `node:sqlite` states without one.
+ *
+ *  "Provided value cannot be bound to SQLite parameter 2" names a position,
+ *  not the value; "Value is too large to be represented as a JavaScript
+ *  number" names a number, not the way out. */
+function valueHint(message: string, data: WorkerRequest): string {
+  if (/too large to be represented as a JavaScript number/i.test(message)) {
+    return "\n  fix: an INTEGER beyond ±2^53 cannot be read as a JS number — " +
+      "read that column as CAST(col AS TEXT), or store it as TEXT";
+  }
+  const m = /cannot be bound to SQLite parameter (\d+)/i.exec(message);
+  const params = data.type === "query" || data.type === "execute"
+    ? data.params
+    : data.type === "transaction" && failedIndex >= 0
+    ? data.stmts[failedIndex]?.params
+    : undefined;
+  if (!m || !Array.isArray(params)) return "";
+  // A named-parameter bag: the index is not a position in this array.
+  const p0 = params[0];
+  if (typeof p0 === "object" && p0 !== null && !ArrayBuffer.isView(p0)) {
+    return "";
+  }
+  const v = params[Number(m[1]) - 1];
+  const fix = typeof v === "boolean"
+    ? "a boolean — SQLite has none: pass 1 or 0"
+    : v === undefined
+    ? "undefined — pass null for SQL NULL"
+    : v instanceof Date
+    ? "a Date — pass date.toISOString() or date.getTime()"
+    : typeof v === "object" && v !== null
+    ? "an object — pass JSON.stringify(value)"
+    : typeof v;
+  return `\n  parameter ${m[1]} is ${fix}`;
+}
 
 /** What was being run, appended to a worker error. One statement is quoted
  *  (truncated); a transaction names its size and the statement that failed is

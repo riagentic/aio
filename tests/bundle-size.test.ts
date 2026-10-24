@@ -202,8 +202,11 @@ const CEILING_GZ = {
   // `console-intercept.ts` (2.6 KB) forwards the page's console to the server
   // log in PRODUCTION too — `am logs` reads it; `component-profile.ts` (1.4)
   // keeps counts a live `am eval '__aioProfile()'` reads off a production app;
-  // `time-travel-panel.ts` (4.5) is reachable from the public
-  // `useTimeTravel()`; `untracked-read.ts` (1.5) is half prod render path;
+  // `time-travel-panel.ts` is reachable from the public `useTimeTravel()`
+  // (its STATE stays; the panel's DOM, 3.6 KB raw / ~1.5 KB gz, later left
+  // as the dev hook `time-travel-dom.ts` — only a non-prod server sends
+  // `tt-state`, which brought `air` back under 85 after the 1.0.24 hunt
+  // rounds); `untracked-read.ts` (1.5) is half prod render path;
   // `devtools-tree.ts` (0.6) is behind the public `connectReduxDevTools()`.
   // Each of those would make production LESS capable than dev, which is not
   // the allowed direction.
@@ -291,6 +294,20 @@ const CEILING_GZ = {
   // portal/boundary fixes (+300, incl. a since-reverted snap-back), the
   // review fixes (+161), the offline-boot queue display (+56), the rest
   // under 20 B each.
+  // Held at 85 through the fix-all wave of 2026-10-24 (HEAD 87,538 B; the
+  // wave's fixes took it to 88,162 — the orphan-queue warning, the `s` frame
+  // word, `rerunOnSelfWrite`, per-call pending numbers — every one a prod
+  // behaviour, kept). Paid back to 86,430 B (84 KB), −1,732 B gz, nothing
+  // dropped from production:
+  //   · the sync engine is a static import behind the same async hop
+  //     (browser-protocol.ts `_syncLoader`), −1,119 B: the one-file bundle
+  //     inlined the `import()` anyway, and the dynamic edge made esbuild
+  //     wrap all 62 modules it reaches in lazy-init closures;
+  //   · the page names one execution context (`SYNC_METHOD`), not the whole
+  //     contexts table, −385 B;
+  //   · the removal rows' source-scan patterns live in removals.ts (tooling),
+  //     −228 B. tests/sync-lazy-load.test.ts and bundle-dev-chunk.test.ts
+  //     keep all three from coming back.
   air: 85,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs.
    *  84 → 85 for the round after 1.0.12-beta: measured 85.3 (AIR 82.4). Every

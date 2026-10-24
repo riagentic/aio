@@ -44,7 +44,9 @@ Deno.test("android splash: absent, the activity bakes SPLASH = null and the buil
   assert(!_leftoverTokens(filled).includes("{{SPLASH}}"));
   // Every splash path is behind SPLASH != null.
   const marked = KOTLIN.split("\n").filter((l) => / \/\/ splash$/.test(l));
-  assertEquals(marked.length, 5, marked.join("\n"));
+  // (3: `onPageFinished` is no longer splash-only — it hands the page a
+  // deep link too — so only the splash line inside it is marked.)
+  assertEquals(marked.length, 3, marked.join("\n"));
   for (const line of marked) {
     assert(
       /SPLASH != null|splashByPage|^\s*} \/\/ splash$|onPageFinished/.test(

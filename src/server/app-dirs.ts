@@ -33,6 +33,7 @@ import {
 import { sweepStaleTmps, uuidTmpBefore } from "../diagnostics/tmp-sweep.ts";
 import { renameOverSync } from "../diagnostics/rename-over.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 import { appImageOwner, homedir } from "./paths.ts";
 
 /** Two ways to answer "where does this app live", and one rule each:
@@ -1080,7 +1081,7 @@ export function checkUnpackLocation(dirs: AppDirs): string | null {
   try {
     execPath = Deno.execPath();
   } catch { /* aio-ok: no read permission — ownership undecidable, no claim */ }
-  return unsafeUnpackWarning({
+  const warning = unsafeUnpackWarning({
     // A host AppImage's variables, inherited by a plain `deno run` from its
     // terminal, describe the HOST's unpack dir, not ours.
     appImage: appImageOwner(execPath, appImage, appDir) === "own"
@@ -1090,6 +1091,17 @@ export function checkUnpackLocation(dirs: AppDirs): string | null {
     expected: dirs.app,
     parentWorldWritable,
   });
+  if (!warning) return null;
+  // The advice is `TMPDIR=<home>/app <appimage>` — and the AppImage runtime
+  // cannot stage into a TMPDIR that does not exist. Nothing else creates it
+  // (run.sh does, but this launch did not come through run.sh), so make the
+  // advice runnable at the moment it is given.
+  try {
+    ensureAppPayloadDir(dirs);
+  } catch (e) {
+    return `${warning}\n  (could not create ${dirs.app}: ${thrownText(e)})`;
+  }
+  return warning;
 }
 
 /** What `meta.json` records: enough for `am restore` to refuse the wrong archive

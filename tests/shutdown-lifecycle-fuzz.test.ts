@@ -42,6 +42,10 @@ function rng(seed: number): () => number {
 
 type Doc = { applied: string[]; n: number };
 
+/** `deaf` bodies still running — the caller is rejected at the drain
+ *  deadline, but the body itself runs on. */
+let deafRunning = 0;
+
 async function boot(name: string, dir: string, defs: unknown[]) {
   const { aio } = await import("../mod.ts");
   return await aio.run({
@@ -84,9 +88,19 @@ async function defineCell(name: string) {
       },
       // Async, ignores its abort signal entirely — the shape that must be
       // BOUNDED by the drain budget rather than hold the window open.
+      // Bounded by the wall clock, not a count of sleeps: 400 × sleep(5) is
+      // 2 s on Linux but ~6 s on Windows' 15.6 ms timer, past the 3 s drain
+      // deadline. An abandoned body still runs, so `deafRunning` lets the
+      // round wait it out instead of leaking its timer into the next test.
       async deaf(s: Doc, id: string) {
-        for (let i = 0; i < 400; i++) await sleep(5);
-        s.applied = [...s.applied, id];
+        deafRunning++;
+        try {
+          const end = Date.now() + 2000;
+          while (Date.now() < end) await sleep(5);
+          s.applied = [...s.applied, id];
+        } finally {
+          deafRunning--;
+        }
       },
       // An async method that dispatches a follow-up: the re-entrant path.
       async chain(s: Doc & { $cell?: never }, id: string) {
@@ -190,6 +204,7 @@ async function round(seed: number): Promise<{ ops: number; resolved: number }> {
 
     for (const t of timers) clearTimeout(t);
     await Promise.allSettled(pending);
+    while (deafRunning > 0) await sleep(10);
 
     // Read the DISK, via a fresh boot — `app.getState()` on a closed app is
     // the released in-memory slice, not what the user gets back next launch.

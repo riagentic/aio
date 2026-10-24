@@ -36,6 +36,7 @@ import { VALID_ELECTRON_KEYS } from "../src/server/config.ts";
 import type { ElectronPermissions } from "../src/server/aio-types.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { NO_USER_DATA } from "./no-user-data.ts";
 
 // deno-lint-ignore no-explicit-any
 type Fn = (...a: any[]) => any;
@@ -876,7 +877,8 @@ Deno.test("web isolation: the connect-mode shell binds its window to the app it 
     app: {
       name: "",
       on: (n: string, f: Fn) => void (appOn[n] ??= []).push(f),
-      getPath: () => "/nonexistent-aio-client-test",
+      getPath: () => NO_USER_DATA,
+      setDesktopName: () => {}, // its window class (electron-shell-parity.test.ts)
       quit() {},
     },
     BrowserWindow,

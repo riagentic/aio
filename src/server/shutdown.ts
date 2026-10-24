@@ -10,6 +10,7 @@ import { _setUserStopHookActive } from "../state/dispatch.ts";
 import {
   abortAllInflight,
   endShutdownAbort,
+  failStuckCalls,
   settlePending,
 } from "../state/method-cancel.ts";
 import {
@@ -533,12 +534,15 @@ export function createShutdownOrchestrator(
       // Async cell methods first: a cell's `execute` runs the method and
       // returns nothing, so the dispatch loop has never known they exist and
       // `drain()` alone sails straight past a streaming reply.
-      const stuck = await settlePending(left(), ourCells, refs.getAppId());
-      if (stuck > 0) {
+      if (await settlePending(left(), ourCells, refs.getAppId()) > 0) {
+        const stuck = failStuckCalls(ourCells, refs.getAppId());
         log.warn(
-          `shutdown: ${count(stuck, "call")} still running at the ` +
-            `${DRAIN_TIMEOUT_MS}ms deadline (slow write, or an ignored ` +
-            `abort signal) — their remaining writes are lost`,
+          `shutdown: ${count(stuck.length, "call")} still running at the ` +
+            `${DRAIN_TIMEOUT_MS}ms deadline (${
+              [...new Set(stuck)].join(", ")
+            } — slow ` +
+            `write, or an ignored abort signal) — their callers are ` +
+            `rejected and their remaining writes are lost`,
         );
       }
       await refs.dispatch.drain(left());

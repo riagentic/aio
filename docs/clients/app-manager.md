@@ -662,6 +662,8 @@ deno task am state fleet[0].stats           # array index traversal
 deno task am state 'fleet[0].{name,active}' # pick specific fields (QUOTE it:
 deno task am state 'fleet[*].{pair,status}' # …the shell expands bare braces)
 deno task am state '{counter,page}'         # pick from root
+deno task am state 'pool.models[?loaded]'   # items whose `loaded` is truthy
+deno task am state 'pool.models[?kind="llm"].name' # filter by value, then map
 deno task am state counter --wait=5         # poll every 5s
 deno task am state --ui                     # UI state (cell-level ui filtered)
 deno task am state --ui alice               # UI state for specific user
@@ -675,11 +677,45 @@ comparison op needs exactly one value; `exists`/`absent` take none. Quote a
 value with spaces.
 
 Path syntax: `fleet[0].stats.pnl` for traversal, `{id,name}` for field picking,
-`[*]` for wildcard over arrays. **Quote a `{…}` pick** — bash expands bare
-braces, so `am state fleet[0].{name,active}` reaches `am` as two arguments; it
-takes one path and refuses the rest rather than answering the first. `am state`
-= raw server state. `am state --ui` = what the browser sees (it was spelled
-`am ui` before alpha52 — `am ui` now opens **amui**, the visual app manager).
+`[*]` for wildcard over arrays, `[?k]` / `[?k=v]` / `[?k!=v]` to keep only the
+items whose `k` is truthy / equals / differs from `v` (`v` compared as JSON when
+it parses — `[?n=3]`, `[?on=true]`, `[?s="up"]` — else as a string, so `[?s=up]`
+works too; a key on no item is a miss, not `[]`). A miss prints this syntax.
+**Quote a `{…}` pick** — bash expands bare braces, so
+`am state fleet[0].{name,active}` reaches `am` as two arguments; it takes one
+path and refuses the rest rather than answering the first. `am state` = raw
+server state. `am state --ui` = what the browser sees (it was spelled `am ui`
+before alpha52 — `am ui` now opens **amui**, the visual app manager).
+
+### A production app's client view (`am state --prod`)
+
+```sh
+deno task am state --prod --app=shop                       # the whole client view
+deno task am state --prod 'orders.items[?paid].id' --app=shop
+AIO_TOKEN=<alice's token> deno task am state --prod orders  # per-user app: alice's view
+```
+
+A production build has no trojan, so `am state` answers 404 there.
+`am state --prod` reads `GET /__aio/view` instead: **read-only** (no writes, no
+dispatch, no eval) and exactly what a WebSocket opened with the same credential
+receives — the `visible` projection and, on a per-user app, that user's
+`forUser` view. It never holds more than that socket would. It answers in dev
+too, the same way, so a smoke test reads the same thing against either.
+
+The credential is the one the aio client uses:
+
+| App                                         | What `am` presents                                                |
+| ------------------------------------------- | ----------------------------------------------------------------- |
+| loopback, no auth                           | nothing                                                           |
+| shared key (`key:` / `--expose`)            | the key from the app's data dir (`app.key`), after the app asks   |
+| per-user (`users` / `resolveUser` / `auth`) | `AIO_TOKEN` — that user's token (env, never argv); no token → 401 |
+| `--expose` with `key: false`                | nothing — but it answers the app's own machine only               |
+
+A refusal names the fix. A packaged desktop app in production gives a process
+that is not its own window no state at all
+([local-peer lockdown](../auth/auth.md#local-peer-lockdown-production-desktop-apps)),
+so there the answer is `am state --offline`. Same path syntax; `--watch` and
+`--wait` work; `--ui` and `--offline` do not combine with it.
 
 ### A stopped app's saved state (`am state --offline`)
 
@@ -1001,6 +1037,25 @@ tag is available as a **git worktree** under `~/.local/lib/aio-versions/<tag>/`
 — about 8 MB of source per version, with the git objects shared, not
 re-downloaded. Several apps on one machine can pin several versions at once.
 `AIO_VERSIONS_DIR` moves the store (containers, CI).
+
+**The store never shrinks on its own** — `am prune versions` is the verb:
+
+```sh
+am prune versions                  # REPORT: every version, and why it stays or goes
+am prune versions --yes            # remove exactly what that report named
+am prune versions --keep=v1.0.20-beta   # …never this one
+am prune versions --json           # the same plan as data
+```
+
+It keeps what an app in the current directory or any **running** app pins or
+links, the newest release, and the checkout am itself runs from. It also keeps
+any checkout git cannot vouch for: locked (being provisioned), with files that
+are not the release (an edit, an untracked or ignored file — `deno.lock`
+excepted, deno rewrites it), not inspectable, or whose tag is gone from the
+clone (it could never come back). The rest goes through `git worktree remove`,
+so the clone that registered it forgets it too. am does not know every app on
+the machine: one elsewhere pinned to a removed version gets it back on its next
+`am fix`.
 
 **Drift is a failure, not a note.** If `dep/aio` points somewhere other than the
 pin, `am pin` says so and exits non-zero (usable as a CI check), and
@@ -1490,6 +1545,24 @@ Detection is deliberately generous — a false positive costs a warning you can
 overrule, a miss costs an app that boots and then explodes — so it shows you the
 line and lets you judge.
 
+### The tests an upgrade turns red (`am migrate --tests`)
+
+```sh
+deno task am migrate --tests                  # shapes that fail after the pin
+deno task am migrate --tests --from=1.0.9-beta --json
+```
+
+What breaks a suite on an upgrade is rarely an API: the harness gets stricter
+(tests are the strictest environment by design). `--tests` greps the app for the
+shapes a later release turns red — a timer in `onInit` that calls a method, a
+`Date`/`Map` argument through `testUI`, an async `waitFor` predicate, a
+`click()` followed by `advance()`, a renumbered surface name — and lists them
+oldest release first, the order the suite would fail in, each with why and the
+fix. The index is `TEST_BREAKAGES` in `src/am/am-test-breakage.ts` (one row per
+shape, with the release it fails from); every guide's "Tests that can go red"
+adds its rows there. A match is a prediction, so it exits 0; `--json` gives
+`{ from, fromSource, tests: [{ id, since, file, line, … }] }`.
+
 ## The Electron runtime cache (`am prune`)
 
 ```sh
@@ -1833,7 +1906,9 @@ into "this cell grew".
 
 REST API at `/__aio/trojan/*` for inspection and control. **Dev only** — a prod
 build does not mount it and refuses it if reached (`am status`, which reads the
-lock file, still works against a prod app).
+lock file, still works against a prod app). The one state read a prod build
+serves is the client view, `GET /__aio/view` — see
+[`am state --prod`](#a-production-apps-client-view-am-state---prod).
 
 ### Which wire it answers on
 

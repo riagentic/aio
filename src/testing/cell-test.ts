@@ -19,7 +19,11 @@ import {
 import { _resetAioRuntime } from "../state/runtime-reset.ts";
 import { _resetHead } from "../air/head.ts";
 import { routeEffect } from "../state/route-effect.ts";
-import { selfCallSurvivedLine } from "../state/dispatch.ts";
+import {
+  _takeWriteSetLanded,
+  flushUnflushedWrites,
+  selfCallSurvivedLine,
+} from "../state/dispatch.ts";
 import {
   assertionFailure,
   formatCellState,
@@ -34,6 +38,7 @@ import {
   _abandonedCallsWarning,
   _armTestStrict,
   _DISPOSE_DRAIN_MS,
+  _observationLedger,
   _observedCall,
   _watchInitFailures,
   _watchUnobservedCalls,
@@ -491,6 +496,17 @@ export function testCell(
     // drains it, so a fire-and-forget send is still deterministic even though
     // its trigger already ran at call time (see the ordering note on `send`).
     const inFlight: Promise<unknown>[] = [];
+    // The METHOD of each call still running — named when an assertion fails
+    // while one is (the commonest cause: a send that was not awaited).
+    const running = new Map<Promise<unknown>, string>();
+    const runningNote = (): string => {
+      if (running.size === 0) return "";
+      const names = [...new Set(running.values())].join(", ");
+      return `\n  still running: ${names} — a call that was not awaited has ` +
+        `not landed yet. \`await\` the send, or \`await t.settle()\`, ` +
+        `before asserting.`;
+    };
+    const observations = _observationLedger("testCell");
     // Failures NOBODY LOOKED AT.
     //
     // `settle()` used to `allSettled` everything, so `t.send.boom(); await
@@ -533,6 +549,7 @@ export function testCell(
           fw = true;
         },
         notify: () => {}, // inert in a test: readable, never armed, never owed
+        appIcon: () => {}, // inert, like notify
         app: () => {},
       });
       return fw;
@@ -586,6 +603,7 @@ export function testCell(
           kind = "own";
         },
         notify: () => {},
+        appIcon: () => {},
         app: () => {},
       });
       if (kind !== null) {
@@ -697,6 +715,10 @@ export function testCell(
     };
 
     function dispatch(action: Msg): unknown {
+      // The production loop's order (dispatch.ts): an async method's pending
+      // writes commit before the next action is enqueued.
+      const landed = _takeWriteSetLanded();
+      flushUnflushedWrites();
       reducing++;
       const queuedBefore = queuedCalls.length;
       let result: ReturnType<typeof composed.reduce>;
@@ -720,11 +742,13 @@ export function testCell(
             ),
           );
         }
+        landed?.(); // refused: it reduced to the state as it was
         throw e;
       } finally {
         reducing--;
       }
       state = { ...result.state };
+      landed?.();
       lastEffects = result.effects;
       for (const e of result.effects) {
         if (isFrameworkEffect(e)) {
@@ -754,7 +778,20 @@ export function testCell(
       const done = registerCall(callId, method);
       done.catch(() => {}); // mark handled — fire-and-forget callers must not surface unhandled rejections
       inFlight.push(done);
-      composed.execute(app, eff as { type: string; payload: unknown });
+      running.set(done, method);
+      const finished = () => void running.delete(done);
+      done.then(finished, finished);
+      // The body's FIRST frame runs here, as it runs inside the production
+      // dispatch loop: a call it makes is queued behind the whole frame (and
+      // reads its writes), never run inline — `async a(s){ s.n += 1; c.inc();
+      // s.n += 100 }` gives `inc` 101 on the server and here.
+      reducing++;
+      try {
+        composed.execute(app, eff as { type: string; payload: unknown });
+      } finally {
+        reducing--;
+      }
+      if (sending === 0) drainQueuedCalls();
       // Nothing can await a trigger settle() ran on its own, so if it fails,
       // this is the only place that will ever know.
       if (!fromSend) done.catch((err) => unobserved.push({ err, seen: NEVER }));
@@ -959,7 +996,8 @@ export function testCell(
           const fs = state[f.__aio.id] as Record<string, unknown>;
           if (!predicateVerdict(check(fs), "testCell: t.expect.state")) {
             throw assertionFailure(
-              `${msg ?? "state assertion failed"}: ${formatCellState(fs)}`,
+              `${msg ?? "state assertion failed"}: ${formatCellState(fs)}` +
+                runningNote(),
             );
           }
         },
@@ -992,7 +1030,7 @@ export function testCell(
           const fs = state[f.__aio.id] as Record<string, unknown>;
           if (!predicateVerdict(check(fs), "testCell: t.expect.invariant")) {
             throw assertionFailure(
-              `invariant violation: ${formatCellState(fs)}`,
+              `invariant violation: ${formatCellState(fs)}` + runningNote(),
             );
           }
         },
@@ -1182,9 +1220,19 @@ export function testCell(
       },
     };
 
+    // The two observation points that return a promise, tracked: one never
+    // awaited is awaited after the body and fails THIS test.
+    const rawSettle = ctx.settle;
+    ctx.settle = (ms) => observations.track("t.settle()", rawSettle(ms));
+    const rawRejects = ctx.expect.rejects!;
+    ctx.expect.rejects = (fn, match, msg) =>
+      observations.track("t.expect.rejects(…)", rawRejects(fn, match, msg));
+
     try {
       try {
         await fn(ctx);
+        // An observation started and never awaited fails HERE, this test.
+        await observations.raise();
       } catch (e) {
         // A frozen-state write from OUTSIDE a method (`t.state.items.push(…)`,
         // a callback holding a value it read) surfaces as raw engine text —

@@ -160,6 +160,24 @@ const cellFile = (name: string, body: string) =>
 type Case = { name: string; files: Record<string, string>; expect: string };
 
 const VIOLATIONS: Case[] = [
+  // A `useLocal` tuple value read in a listener added from `onMount`: the
+  // closure keeps the first render's value, so the count stops at one.
+  // `tests/aiol-stale-local-tuple.test.ts` holds the quiet shapes.
+  {
+    name: "a useLocal tuple value read in an onMount listener",
+    files: app({
+      "src/Clicks.tsx": `import { onMount, useLocal } from "aio/air";
+export function Clicks() {
+  const [n, setN] = useLocal(0);
+  onMount(() => {
+    globalThis.addEventListener("click", () => setN(n + 1));
+  });
+  return <p>{n}</p>;
+}
+`,
+    }),
+    expect: "outlives it",
+  },
   // State hooks after an early `return`: a field report's component returned
   // before its hooks while a list was empty, and the render after that read
   // slots the first one never made. `tests/aiol-hook-order.test.ts` holds the
@@ -1558,6 +1576,16 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
       ),
     }),
     expect: 'state key "count" collides with method',
+  },
+  // `schedule.*` only builds an effect; a bare statement does nothing.
+  {
+    name: "a schedule effect built and thrown away",
+    files: app({
+      "src/cell.ts": `import { cell, schedule, self } from "aio";\n` +
+        `export const counter = cell("counter", { state: { count: 0 }, methods: { ` +
+        `later(s) { schedule.after("counter.t", 10, self("inc")); }, inc(s) { s.count++; } } });\n`,
+    }),
+    expect: "throws it away",
   },
 ];
 

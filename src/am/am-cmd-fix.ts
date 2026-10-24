@@ -16,7 +16,12 @@ import { parse as parseJsonc } from "@std/jsonc";
 import { refOfLink } from "../server/framework-pin.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import { aioToolEntries } from "../server/lock-coverage.ts";
-import { parseDenoJson, readDenoJson } from "../server/deno-json.ts";
+import {
+  LOCAL_PIN_FILE,
+  parseDenoJson,
+  readDenoJson,
+  readFrameworkPin,
+} from "../server/deno-json.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError, say } from "./am-output.ts";
 import {
@@ -36,7 +41,6 @@ import {
   offMainNote,
   parseVersion,
   pinnedFrameworkPath,
-  readPin,
   rewriteAllowScripts,
   sortVersions,
   writePin,
@@ -720,12 +724,17 @@ export async function cmdFix(
     // for. `--aio=<path>` overrides it (framework development).
     let root = install;
     let pin: string | null = null;
+    // Where the pin is RECORDED, for the report: a path pin lives in the
+    // git-ignored `.aio/pin.local`, not in deno.json (`writePin`).
+    let pinFile = "deno.json aioVersion";
     let sealed = false;
     // BOTH spellings of --aio (`aioFlagValue`): `--aio <path>` was not seen
     // here, so the pin overrode an explicit checkout without a word.
     const honorPin = install && aioFlagValue(args) === undefined;
     if (honorPin) {
-      pin = await readPin(dir);
+      const read = await readFrameworkPin(dir);
+      pin = read.pin;
+      if (read.source === "local") pinFile = LOCAL_PIN_FILE;
       if (pin && !dry) {
         const res = await ensureVersion(install, pin);
         if (res.ok) root = res.path;
@@ -774,17 +783,17 @@ export async function cmdFix(
             "aio version pin",
             "would-fix",
             `unpinned — dep/aio links a local checkout (${linkTarget}); ` +
-              `would record "aioVersion": "${ref}" (local-dev pin)`,
+              `would record "${ref}" in ${LOCAL_PIN_FILE} (local-dev pin)`,
           );
         } else {
-          await writePin(dir, ref);
+          const { file } = await writePin(dir, ref);
           root = linkTarget;
           pin = ref;
           sealed = true;
           add(
             "aio version pin",
             "fixed",
-            `was unpinned — recorded "aioVersion": "${ref}" (dep/aio links a ` +
+            `was unpinned — recorded "${ref}" in ${file} (dep/aio links a ` +
               `local checkout, so a version pin would contradict the link). ` +
               `Machine-specific by design — pin a release with ` +
               `\`am pin latest\` before sharing the app`,
@@ -823,7 +832,7 @@ export async function cmdFix(
       }
     }
     if (pin && !sealed) {
-      add("aio version pin", "ok", `${pin} (deno.json aioVersion)`);
+      add("aio version pin", "ok", `${pin} (${pinFile})`);
     }
     // How far behind the pin is — reported, never acted on. The app builds
     // exactly as pinned; staleness the author cannot SEE is the only part of

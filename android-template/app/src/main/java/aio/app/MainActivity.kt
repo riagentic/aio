@@ -47,6 +47,11 @@ private const val IS_CLIENT = {{IS_CLIENT}}
  *  missing permission would fail `getUserMedia` with nothing said, the refusal
  *  below names the exact key to add. */
 private const val CAMERA_DECLARED = {{CAMERA_DECLARED}}
+/** Filled at build time: true when deno.json `android.schemes` names a deep
+ *  link scheme — the manifest's VIEW filters, one decider
+ *  (`_deepLinkFilters` in build-android.ts). The link reaches the page as
+ *  `window.__aioOpenUrl` and an `aio:open-url` event (`deliverLink`). */
+private const val DEEP_LINKS = {{DEEP_LINKS}}
 /** The JS global the store below is injected as. The page names the same
  *  string as NATIVE_STORE_GLOBAL (src/browser/native-fetch.ts, read by
  *  `_pickPersistStore`) — the only two places it appears. */
@@ -634,7 +639,14 @@ private class AioConnect(private val pins: android.content.SharedPreferences) : 
 
     private class Answer(val status: Int, val json: org.json.JSONObject?, val der: ByteArray?)
 
-    private fun post(base: java.net.URL, path: String, body: org.json.JSONObject): Answer {
+    private fun post(base: java.net.URL, path: String, body: org.json.JSONObject): Answer =
+        post(base, path, body.toString().toByteArray(Charsets.UTF_8).size) { body.toString() }
+
+    /** One POST whose body is made AFTER the connection is up: `bodyFor` gets
+     *  the DER of the leaf THIS connection presented (null over http), which a
+     *  PAKE message must contain (Cpace.kt). `size` is the body's length,
+     *  known in advance (fixed-length streaming). */
+    private fun post(base: java.net.URL, path: String, size: Int, bodyFor: (ByteArray?) -> String): Answer {
         val conn = java.net.URL(base.protocol, base.host, base.port, path).openConnection() as java.net.HttpURLConnection
         var der: ByteArray? = null
         if (conn is javax.net.ssl.HttpsURLConnection) {
@@ -657,9 +669,11 @@ private class AioConnect(private val pins: android.content.SharedPreferences) : 
             conn.useCaches = false
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
-            val bytes = body.toString().toByteArray(Charsets.UTF_8)
             conn.doOutput = true
-            conn.setFixedLengthStreamingMode(bytes.size)
+            conn.setFixedLengthStreamingMode(size)
+            conn.connect() // the handshake: `der` is known from here on
+            val bytes = bodyFor(der).toByteArray(Charsets.UTF_8)
+            if (bytes.size != size) throw IOException("request body is ${bytes.size} bytes, not the $size announced")
             conn.outputStream.use { it.write(bytes) }
             val status = conn.responseCode
             val text = (if (status >= 400) conn.errorStream else conn.inputStream)?.use { s ->
@@ -684,7 +698,79 @@ private class AioConnect(private val pins: android.content.SharedPreferences) : 
         pins.edit().putString(authority(base.host, if (base.port > 0) base.port else base.defaultPort), cert).commit()
     }
 
+    /** A PAKE message as JSON text. Every value is base64 (no character
+     *  JSON escapes), so its length is known before the connection is up. */
+    private fun pakeBody(vararg kv: Pair<String, String>): String =
+        kv.joinToString(",", "{", "}") { "\"${it.first}\":\"${it.second}\"" }
+
+    /** PAKE pairing — an 8-digit code (`pairing: { pake: true }`): the code
+     *  is never sent and the exchange is bound to the certificate THIS
+     *  client sees (Cpace.kt; the desktop client's `pairPake` does the same).
+     *  Every refusal is final: no fallback to sending the code. */
+    private fun pairPake(base: java.net.URL, code: String, reply: org.json.JSONObject) {
+        val relay = "the certificate this client sees is not the one the app serves — a TLS proxy, " +
+            "or something answering in its place. Nothing was sent."
+        var st: Cpace.Start? = null
+        var der1: ByteArray? = null
+        val sid = Cpace.random(16)
+        val m1 = post(base, "/__aio/pair", pakeBody("cpace" to Cpace.SUITE, "sid" to "x".repeat(24), "Ya" to "x".repeat(44)).length) { der ->
+            der1 = der
+            st = Cpace.start(code, Cpace.fingerprint(der), sid = sid)
+            pakeBody("cpace" to Cpace.SUITE, "sid" to Cpace.b64(st!!.sid), "Ya" to Cpace.b64(st!!.ya))
+        }
+        reply.put("status", m1.status)
+        // From here the app has answered: a refusal is FINAL — the form must
+        // not go on to try the same code over another scheme.
+        fun fail(why: String) {
+            reply.put("final", true).put("error", why).remove("key")
+        }
+        if (m1.status != 200) {
+            m1.json?.optString("error")?.let { if (it.isNotEmpty()) reply.put("error", it) }
+            return
+        }
+        val j1 = m1.json ?: return fail("the app answered PAKE message 1 with no JSON")
+        val yb = Cpace.unb64(j1.optString("Yb"), 32)
+        val adb = Cpace.unb64(j1.optString("ADb"))
+        val id = j1.optString("id", "")
+        if (yb == null || adb == null || id.isEmpty() || id.length > 64) return fail("the app answered PAKE message 1 with something malformed")
+        // ADb is the app's own word for its certificate: a mismatch is said
+        // here, before a guess is spent.
+        if (!Cpace.same(adb, Cpace.fingerprint(der1))) return fail(relay)
+        val f = Cpace.finish(st!!, yb, adb) ?: return fail("the app's PAKE share is invalid — the exchange was aborted")
+        val m2Body = pakeBody("cpace" to Cpace.SUITE, "id" to id, "Ta" to Cpace.b64(f.ta))
+        val m2 = try {
+            post(base, "/__aio/pair", m2Body.length) { der ->
+                if (!java.util.Arrays.equals(der, der1)) throw IOException("the certificate changed between the two pairing requests — $relay")
+                m2Body
+            }
+        } catch (e: IOException) {
+            return fail(e.message ?: e.toString())
+        }
+        reply.put("status", m2.status)
+        if (m2.status != 200) {
+            m2.json?.let { j ->
+                val why = listOf(j.optString("error"), j.optString("hint")).filter { it.isNotEmpty() }.joinToString(" — ")
+                if (why.isNotEmpty()) reply.put("error", why)
+            }
+            return
+        }
+        val j2 = m2.json ?: return fail("the app answered PAKE message 2 with no JSON")
+        val tb = Cpace.unb64(j2.optString("Tb"), 64)
+        val box = Cpace.unb64(j2.optString("box"))
+        if (tb == null || box == null || !Cpace.same(tb, f.tb)) return fail("what answered could not prove it knows the code — it is not the app")
+        val pr = Cpace.open(f.isk, st!!.sid, box)?.let { org.json.JSONObject(it) } ?: return fail("the app's sealed profile did not open")
+        val key = pr.optString("key", "")
+        if (key.isEmpty()) return fail("the app's profile carries no key")
+        if (base.protocol == "https") {
+            val cert = pr.optString("cert", "")
+            if (cert.isEmpty() || der1 == null || !pinMatches(cert, der1!!)) return fail(relay)
+            pin(base, cert)
+        }
+        reply.put("key", key)
+    }
+
     private fun pair(base: java.net.URL, code: String, reply: org.json.JSONObject) {
+        if (Regex("^[0-9]{8}$").matches(code)) return pairPake(base, code, reply)
         val a = post(base, "/__aio/pair", org.json.JSONObject().put("pin", code))
         reply.put("status", a.status)
         val key = a.json?.optString("key", "") ?: ""
@@ -810,15 +896,20 @@ class MainActivity : AppCompatActivity() {
             }
             if (SPLASH != null) splashByPage = !AioSplash.listen(this, saveOrigins) { splash?.ready() } // splash
             webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) { // splash
+                override fun onPageFinished(view: WebView?, url: String?) {
                     if (splashByPage) splash?.ready() // splash
-                } // splash
+                    // A client's connect form is not the app: a link waits
+                    // for the server's page.
+                    pageReady = !(IS_CLIENT && Uri.parse(url ?: "").host == ASSET_HOST)
+                    deliverLink()
+                }
                 // The bridge belongs to the app's own bundle and to nothing
                 // else. A standalone APK cannot navigate away from it, so this
                 // should never fire — which is the point: an invariant that is
                 // checked cannot quietly stop being true.
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                     super.onPageStarted(view, url, favicon)
+                    pageReady = false
                     if (!TALKS_TO_SERVER && Uri.parse(url ?: "").host != ASSET_HOST) {
                         view?.removeJavascriptInterface(STORE_GLOBAL)
                         if (view != null && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
@@ -998,14 +1089,24 @@ class MainActivity : AppCompatActivity() {
                 // once the OS-level CAMERA permission is in hand (asking for it
                 // on demand when missing).
                 override fun onPermissionRequest(request: PermissionRequest) {
-                    if (!request.resources.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)) {
+                    // A request is granted WHOLE or not at all: the WebView
+                    // turns a grant of only some of its resources into a
+                    // denial (measured on API 35: getUserMedia({ video,
+                    // audio }) with video granted rejected NotAllowedError).
+                    // So anything besides the camera denies it here, before
+                    // a camera prompt the page could never use.
+                    val others = request.resources.filter { it != PermissionRequest.RESOURCE_VIDEO_CAPTURE }
+                    if (others.isNotEmpty()) {
                         // Denied, but never in silence: the page asked for
                         // something this shell does not hand out, and a dead
                         // microphone with no line in logcat is an evening lost.
                         android.util.Log.w("aio", "WebView permission request DENIED: " +
                             request.resources.joinToString(", ") +
-                            " \u2014 this APK grants camera (video capture) only. Anything " +
-                            "else needs native code: add it under <app>/android/ " +
+                            " \u2014 this APK grants camera (video capture) only" +
+                            (if (others.size < request.resources.size)
+                                ", and the WebView refuses a request it cannot grant whole: " +
+                                    "ask for { video: true } alone" else "") +
+                            ". Anything else needs native code: add it under <app>/android/ " +
                             "(docs/build/targets.md).")
                         request.deny()
                         return
@@ -1042,6 +1143,12 @@ class MainActivity : AppCompatActivity() {
         // the WebView itself: a WebView consumes insets for its own IME
         // handling, and a listener on it never ran.) This is the
         // forward-compatible fix — the opt-out flag is gone in Android 16.
+        // A cold start by a link: handed over once the page has loaded. (A
+        // renderer-loss `recreate()` carries a saved state and the same
+        // intent — the link was delivered already.)
+        if (savedInstanceState == null) pendingLink = linkOf(intent)
+        // The scale the WebView just took as its text zoom (onConfigurationChanged).
+        zoomedFontScale = resources.configuration.fontScale
         val root = FrameLayout(this)
         root.addView(webView)
         setContentView(root)
@@ -1056,6 +1163,57 @@ class MainActivity : AppCompatActivity() {
         ViewCompat.requestApplyInsets(root)
         // A cold start only: a renderer-loss `recreate()` carries a saved state.
         if (SPLASH != null && savedInstanceState == null) splash = AioSplash.show(this, SPLASH) // splash
+    }
+
+    /** A deep link not yet handed to the page — the one this activity was
+     *  started with, or one that arrived while the page was loading. */
+    private var pendingLink: String? = null
+    /** The app's page has loaded and can take a link. */
+    private var pageReady = false
+
+    private fun linkOf(i: Intent?): String? =
+        if (DEEP_LINKS && i?.action == Intent.ACTION_VIEW) i.dataString else null
+
+    /** Hand the pending link to the page: `window.__aioOpenUrl` (for code
+     *  that looks later) and an `aio:open-url` event. JSON-quoted — any app
+     *  can send this intent, so the link is data, never script. */
+    private fun deliverLink() {
+        val url = pendingLink ?: return
+        if (!pageReady) return
+        pendingLink = null
+        val q = org.json.JSONObject.quote(url)
+        webView.evaluateJavascript(
+            "window.__aioOpenUrl=$q;dispatchEvent(new CustomEvent('aio:open-url',{detail:{url:$q}}))",
+            null,
+        )
+    }
+
+    /** A link while the app runs: `singleTask` (the manifest, with schemes)
+     *  brings this activity forward instead of starting a second one. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingLink = linkOf(intent) ?: return
+        deliverLink()
+    }
+
+    /** The font scale the WebView's text zoom was last set from. */
+    private var zoomedFontScale = 0f
+
+    /** `fontScale` is in the manifest's configChanges (a system font-size
+     *  change recreated the activity and RELOADED the page), so this runs
+     *  instead — and the WebView takes the system font scale as its text zoom
+     *  only when it is CREATED (measured on API 35: 16px stayed 16px after
+     *  1.0 → 1.3; a fresh start showed 20.8px). So the new scale is carried
+     *  over — unless the app set a text zoom of its own. */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (!::webView.isInitialized) return
+        val was = Math.round(zoomedFontScale * 100)
+        if (newConfig.fontScale != zoomedFontScale && webView.settings.textZoom == was) {
+            webView.settings.textZoom = Math.round(newConfig.fontScale * 100)
+        }
+        zoomedFontScale = newConfig.fontScale
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {

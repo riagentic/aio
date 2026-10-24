@@ -3,7 +3,9 @@ import {
   copyDir,
   findJdk,
   formatMb,
+  gradleCandidates,
   gradlewPath,
+  jdkPlaces,
   resolveSdk,
   slugify,
   symlinkRefusal,
@@ -123,6 +125,21 @@ Deno.test("findJdk: never picks a too-new JDK (javac 25)", async () => {
   }
 });
 
+Deno.test("findJdk: never picks a too-old JDK (javac 11) — AGP 8.7 needs 17", async () => {
+  // It used to: JAVA_HOME=JDK 11 was honoured as the pick, and Gradle then
+  // failed with "Android Gradle plugin requires Java 17 to run" after aio had
+  // printed "✓ JDK … (Java 11)" against its own "version 17-23" rule.
+  const home = await stubJdk("11.0.2");
+  try {
+    await withJavaHome(
+      home,
+      () => assertEquals(findJdk().home === home, false),
+    );
+  } finally {
+    await dropTempDir(home);
+  }
+});
+
 Deno.test("findJdk: ignores a JAVA_HOME whose javac is missing", async () => {
   // A JRE-only JAVA_HOME (no bin/javac) must not be accepted as a JDK.
   const home = await tempDir("aio-buildhelp-"); // empty — no bin/javac
@@ -134,6 +151,36 @@ Deno.test("findJdk: ignores a JAVA_HOME whose javac is missing", async () => {
   } finally {
     await dropTempDir(home);
   }
+});
+
+Deno.test("jdkPlaces: Windows looks where Windows JDKs are — Android Studio's jbr first of all", () => {
+  const env: Record<string, string> = {
+    ProgramFiles: "C:\\Program Files",
+    ProgramW6432: "C:\\Program Files",
+    LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local",
+  };
+  const w = jdkPlaces("windows", "C:\\Users\\u", (k) => env[k]);
+  const has = (list: string[], re: RegExp) => list.some((p) => re.test(p));
+  assert(
+    has(w.homes, /^C:\\Program Files[\\/]Android[\\/]Android Studio[\\/]jbr$/),
+  );
+  assert(
+    has(w.homes, /AppData\\Local[\\/]Programs[\\/]Android Studio[\\/]jbr$/),
+  );
+  assert(has(w.roots, /^C:\\Program Files[\\/]Eclipse Adoptium$/));
+  assertEquals(
+    new Set(w.roots).size,
+    w.roots.length,
+    "ProgramFiles twice is one root",
+  );
+  assert(!has([...w.roots, ...w.homes], /^\/(usr|opt|Applications)\//));
+  const l = jdkPlaces("linux", "/home/u", () => undefined);
+  assert(l.roots.includes("/usr/lib/jvm"));
+});
+
+Deno.test("gradleCandidates: Windows also looks for gradle.bat on PATH", () => {
+  assert(gradleCandidates("windows", "C:\\Users\\u").includes("gradle.bat"));
+  assert(!gradleCandidates("linux", "/home/u").includes("gradle.bat"));
 });
 
 // ── slugify ──

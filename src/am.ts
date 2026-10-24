@@ -214,7 +214,9 @@ const COMMANDS: Record<string, CmdHandler> = {
   // The one command a model runs FIRST: the whole contract for working on
   // an aio app, printed, so it never has to decide to open a doc.
   agent: cmdAgent,
-  help: (args, flags) => cmdHelp(args, flags, Object.keys(COMMANDS)),
+  help: (args, flags) => {
+    if (cmdHelp(args, flags, Object.keys(COMMANDS)) === 1) Deno.exit(1);
+  },
 };
 
 /** What `am <verb>` says for a verb it does not have. A verb that USED to

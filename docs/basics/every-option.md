@@ -1,12 +1,12 @@
 # Every option, one page
 
 > Generated from the source by `deno task update:reference` — do not edit by
-> hand; `check:release` fails when it is stale. 196 entries: the signature, what
+> hand; `check:release` fails when it is stale. 198 entries: the signature, what
 > it does, an example when the source has one, and the file it lives in. The
 > guides explain; this page is for looking a name up.
 
 - [cell options](#cell-options) — 25
-- [aio.run options](#aiorun-options) — 84
+- [aio.run options](#aiorun-options) — 86
 - [aio/air](#aioair) — 87
 
 ## cell options
@@ -637,6 +637,21 @@ Electron only: keep the server running after the window closes (also
 `--keep-server`); with any other client, boot is refused.
 <sub>src/server/aio-types.ts</sub>
 
+### `localConnectHooks`
+
+```ts
+localConnectHooks?: boolean
+```
+
+`true`: `onConnect` / `onDisconnect` also run for a desktop window on the local
+socket (UDS, a named pipe on Windows), with no user (`undefined`).
+<sub>src/server/aio-types.ts</sub>
+
+```ts
+localConnectHooks: true, // presence counts the desktop window too
+onConnect: () => void presence.join(),
+```
+
 ### `transport`
 
 ```ts
@@ -692,6 +707,19 @@ generated once and persisted, `false` = no framework auth.
 
 ```ts
 key: true,   // generate and persist one shared key; the client pairs by PIN
+```
+
+### `pairing`
+
+```ts
+pairing?: { pake? }
+```
+
+PIN pairing by PAKE (CPace, draft-irtf-cfrg-cpace-21) — opt-in.
+<sub>src/server/aio-types.ts</sub>
+
+```ts
+aio.run({ cells, pairing: { pake: true } });
 ```
 
 ### `resolveUser`
@@ -899,8 +927,8 @@ refusalsReject?: boolean
 ```
 
 Answer an in-process caller the way the WIRE already answers: a write the reduce
-REFUSED (a `validate` hook, a machine guard) rejects `await cell.method()`
-instead of resolving. <sub>src/server/aio-types.ts</sub>
+REFUSED (a `validate` hook) rejects `await cell.method()` instead of resolving.
+<sub>src/server/aio-types.ts</sub>
 
 ### `journal`
 
@@ -1147,7 +1175,8 @@ onDisconnect?: (user?: AioUser) => void
 ```
 
 Called with the user when a WebSocket client disconnects (not for the
-Unix-socket transport). <sub>src/server/aio-types.ts</sub>
+Unix-socket transport, unless `localConnectHooks: true`).
+<sub>src/server/aio-types.ts</sub>
 
 ### `onStart`
 
@@ -1388,6 +1417,8 @@ Disconnect from the Redux DevTools extension.
 
 ```ts
 effect(fn: () => void | CleanupFn): CleanupFn
+effect(fn: () => void | CleanupFn, opts: EffectOptions): CleanupFn
+effect(fn: () => void | CleanupFn, opts?: EffectOptions): CleanupFn
 ```
 
 Run a side-effect that re-executes when its tracked signals change; returns a
@@ -1884,6 +1915,7 @@ function Panel({ filter }: { filter: string }) {
 
 ```ts
 Transition(props: TransitionProps): VNode | null
+Transition(props: Omit<TransitionProps, "children"> & { children? }): VNode | null
 ```
 
 Wrap a conditionally rendered child with enter/exit animations.
@@ -1899,6 +1931,7 @@ Wrap a conditionally rendered child with enter/exit animations.
 
 ```ts
 TransitionGroup(props: TransitionGroupProps): VNode
+TransitionGroup(props: Omit<TransitionGroupProps, "children"> & { children? }): VNode
 ```
 
 Animate list additions, removals, and reordering.

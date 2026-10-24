@@ -25,9 +25,11 @@ const _listeners = new Set<(key: string, n: number) => void>();
  *  call start between these two moments?" (air's control-drift.ts). */
 let _started = 0;
 /** Per key, the start numbers (`_started` at each start) of the calls still in
- *  flight, oldest first. A finish retires the oldest: calls to one method can
- *  answer out of order, so a number is an estimate — good enough to tell
- *  "started since T" from "running since before T". */
+ *  flight, oldest first. `finishPending` retires the call's OWN number; a bare
+ *  `bumpPending(key, -1)` retires the oldest (an estimate). Calls to one
+ *  method answer out of order, and an estimate retired a newer call's number
+ *  when an older call was still running — so `pendingAmong` said "the call
+ *  started since T is done" while it ran, and said the reverse of the old one. */
 const _inflight = new Map<string, number[]>();
 
 /** Adjust the in-flight count for `cell:method`. Returns the new count. */
@@ -43,6 +45,22 @@ export function bumpPending(key: string, delta: number): number {
   else _counts.set(key, next);
   for (const l of _listeners) l(key, next);
   return next;
+}
+
+/** Count one call to `key` in; returns its start number, which
+ *  `finishPending` retires — exactly this call's, whatever order calls end. */
+export function startPending(key: string): number {
+  bumpPending(key, 1);
+  return _started;
+}
+
+/** Count the call numbered `start` (from `startPending`) out. */
+export function finishPending(key: string, start: number): number {
+  const q = _inflight.get(key);
+  const i = q ? q.indexOf(start) : -1;
+  // To the front: bumpPending(-1) retires the oldest, which is now this one.
+  if (i > 0) q!.unshift(...q!.splice(i, 1));
+  return bumpPending(key, -1);
 }
 
 /** How many calls have started in this runtime, ever (see `_started`). */

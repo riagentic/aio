@@ -852,6 +852,12 @@ with it on the user's layout (AZERTY's `"ctrl+a"` is its A key). When the key
 types no ASCII character, the US position is used instead: macOS Alt+F typing
 `ƒ`, a dead key, or a Cyrillic layout. The object form matches `e.key` only.
 
+On a layout where `/` sits on a shifted digit (German: Shift+7), Ctrl+Shift+7
+types `/`. Bound alone, `"ctrl+/"` fires on it (Shift is free on a symbol key).
+With `"ctrl+shift+/"` bound too, only `"ctrl+shift+/"` runs: on a Shift-held
+press, a binding that leaves Shift free yields to one that names Shift — the
+most specific binding wins, never both.
+
 From a test, `ui.<anything>.press("Escape")` bubbles to the document — but aim
 it at something that is NOT an input, or the ignore-in-field rule swallows it
 and the test passes while asserting nothing.

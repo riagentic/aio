@@ -427,12 +427,36 @@ class EncodedCache {
 /** 32 MB of compressed bodies — a few hundred assets, or one very large one. */
 const _cache = new EncodedCache(32 * 1024 * 1024);
 
+/** Hash keys of UNTAGGED bodies seen once. A body with no handler tag is keyed
+ *  by its own hash, so every one-off response (an API reply, a timeline, a
+ *  health JSON) was a fresh memo entry nothing would ever ask for again —
+ *  measured in a soak, 32 MB of external memory filled within a minute of
+ *  JSON traffic, evicting the tagged app bundle the memo exists for. Such a
+ *  body is admitted on its SECOND sighting; a tagged one at once. */
+const _seenOnce = new Set<string>();
+const SEEN_ONCE_MAX = 1024;
+function seenBefore(key: string): boolean {
+  if (_seenOnce.delete(key)) return true;
+  _seenOnce.add(key);
+  if (_seenOnce.size > SEEN_ONCE_MAX) {
+    _seenOnce.delete(_seenOnce.values().next().value!);
+  }
+  return false;
+}
+
 /** @internal test seam — empty the compressed-body memo. Every hit is checked
  *  against its source bytes, so it is self-invalidating: product code has no reason to
  *  drop it, and dropping it re-compresses every live asset. */
 // aio-ok: test-only seam — the memo is self-invalidating in production
 export function _clearEncodedCache(): void {
   _cache.clear();
+  _seenOnce.clear();
+}
+
+/** @internal test seam — entries in the compressed-body memo. */
+// aio-ok: test-only seam — the regression test counts entries, the product never asks
+export function _encodedCacheSize(): number {
+  return _cache.size;
 }
 
 /** Options for `encodeResponse`. */
@@ -766,7 +790,9 @@ export async function encodeResponse(
       let out = _cache.get(key, bytes);
       if (!out) {
         out = await compress(enc, bytes);
-        _cache.set(key, bytes, out);
+        if (handlerTag !== null || seenBefore(key)) {
+          _cache.set(key, bytes, out);
+        }
       }
       // A "compressed" body that grew is a worse answer than the original.
       if (out.byteLength < bytes.byteLength) {

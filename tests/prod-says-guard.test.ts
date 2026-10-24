@@ -114,6 +114,11 @@ const REGISTRY: Record<string, [string, Class, string][]> = {
     ["missing-keys", "a", "advice: positional reconciliation is still right"],
     ["mixed-keys", "a", "advice"],
     [
+      "list-shift",
+      "a",
+      "advice: the DOM is right; the fix is keys, the diff cannot know them",
+    ],
+    [
       "dup-key-",
       "p",
       "dev names every key; production says the fact once from diffKeyed",

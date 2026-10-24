@@ -348,9 +348,11 @@ async function readDenoJson(
 function extractCells(files: SourceFile[]): CellInfo[] {
   const cells: CellInfo[] = [];
   // Match: cell('name', { ... }) or cell("name", { ... })
-  // A generic call (`cell<S>(`, `cell<Record<K, V>>(`) is a cell too.
+  // A generic call (`cell<S>(`, `cell<Record<K, V>>(`) is a cell too. A
+  // METHOD named cell (`p.cell<Broker>("broker")`, `p?.cell(…)` — a peer()
+  // handle) is not: never after a `.` (aipro §6).
   const cellRe =
-    /\bcell\s*(?:<(?:[^<>()]|<(?:[^<>()]|<[^<>()]*>)*>|\([^()]*\))*>\s*)?\(\s*(['"`])(\w[\w-]*)\1/g;
+    /(?<!\.\s*)(?<![\w$])cell\s*(?:<(?:[^<>()]|<(?:[^<>()]|<[^<>()]*>)*>|\([^()]*\))*>\s*)?\(\s*(['"`])(\w[\w-]*)\1/g;
 
   for (const file of files) {
     const code = codeText(file.content);

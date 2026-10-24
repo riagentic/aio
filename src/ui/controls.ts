@@ -338,6 +338,10 @@ export function Tabs(props: TabsProps): VNode {
   };
 
   const activeTab = tabs.find((t) => t.id === active);
+  // The tab in the page's tab order. A CONTROLLED `value` naming no tab (its
+  // tab was removed, or the app's state is stale) left every tab at -1, so Tab
+  // skipped the whole list — the trap the uncontrolled branch above closes.
+  const tabStop = activeTab ? active : firstEnabled;
   return h(
     "div",
     {
@@ -368,7 +372,7 @@ export function Tabs(props: TabsProps): VNode {
           // reference in a rendered tree.
           "aria-controls": `${baseId}-panel`,
           // Exactly one tab is tabbable; the rest are reached with arrows.
-          tabIndex: t.id === active ? 0 : -1,
+          tabIndex: t.id === tabStop ? 0 : -1,
           disabled: t.disabled,
           onClick: () => !t.disabled && select(t.id),
           onKeyDown: onKeyDown(i),
@@ -496,7 +500,9 @@ export function Alert(props: AlertProps): VNode {
     {
       ...rest(props, ["variant", "title", "children", "onDismiss", "class"]),
       class: cx(`aio-alert aio-alert--${variant}`, cls),
-      role: variant === "error" ? "alert" : "note",
+      // A caller's `role` wins (`??` — see Spinner): `role="status"` is how a
+      // "Saved" callout gets announced politely, and it was overwritten.
+      role: props.role ?? (variant === "error" ? "alert" : "note"),
     },
     h(
       "div",
@@ -678,14 +684,21 @@ export function Menu(props: MenuProps): VNode {
     onCleanup(() => doc.removeEventListener("pointerdown", onDocDown, true));
   });
 
+  /** The item to focus once the list exists — taken by the list's `ref`. */
+  const pendingFocus = useRef<readonly [number, 1 | -1] | null>(null);
   const openWith = (index: number, dir: 1 | -1 = 1): void => {
     if (open.peek()) {
       focusItem(index, dir); // the list is already there
       return;
     }
+    // The list does not exist until this render commits — and a microtask
+    // queued HERE is not "after the commit": the handler's signal writes are
+    // batched, so the render's own flush is queued after this handler
+    // returns, i.e. after any microtask queued in it. Opening the menu by
+    // click, Enter or ArrowDown therefore left focus on the trigger. The
+    // list's `ref` fires as the list is built, so it asks from there.
+    pendingFocus.current = [index, dir];
     open.set(true);
-    // The list does not exist until this render commits.
-    queueMicrotask(() => focusItem(index, dir));
   };
 
   return h(
@@ -740,6 +753,13 @@ export function Menu(props: MenuProps): VNode {
           class: "aio-menu__list",
           role: "menu",
           id,
+          ref: (el: HTMLElement | null) => {
+            const p = pendingFocus.current;
+            if (!el || !p) return;
+            pendingFocus.current = null;
+            // Built, not yet in the document: focus() needs it connected.
+            queueMicrotask(() => focusItem(p[0], p[1]));
+          },
           ...(label ? { "aria-label": label } : {}),
         },
         ...items.map((it, i) =>

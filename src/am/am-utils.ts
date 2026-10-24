@@ -51,7 +51,7 @@ import {
 } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, outError, outValue, sayErr } from "./am-output.ts";
-import { trojanGet, trojanPost } from "./am-http.ts";
+import { trojanGet } from "./am-http.ts";
 import { type Component, projectComponents } from "./am-components.ts";
 import { cwdIsProject, projectRoot } from "./am-project.ts";
 
@@ -710,6 +710,7 @@ export function sayOtherRoot(
 }
 
 /** Write lock data — replaces old writePid() */
+// aio-ok(dead-wiring): test fixture alias of writeLock — tests plant locks with it
 export function writePid(pf: LockData): void {
   writeLock(pf);
 }
@@ -1004,13 +1005,90 @@ export function resolvePort(
 
 // ── State path resolution ───────────────────────────────────
 
-/** Traverse path with JS-like syntax: "fleet[0].stats", "fleet[*].{pair,status}", "owner.{id,name}" */
-export function resolvePath(
-  obj: unknown,
-  path: string,
-): { found: true; value: unknown } | { found: false } {
+/** The state-path syntax {@linkcode resolvePath} reads — ONE line, printed
+ *  on a miss so a caller learns the grammar from the error. */
+export const PATH_SYNTAX =
+  "path syntax: a.b · a[0] · a[*].x · a.{x,y} · a[?k] (k truthy) · a[?k=v] · a[?k!=v] (v as JSON, else a string)";
+
+/** `[?k]` / `[?k=v]` / `[?k!=v]` as a predicate over an array item; `has`
+ *  says whether `k` is on the item at all (a key on NO item is a typo). */
+function itemFilter(
+  expr: string,
+): (item: unknown) => { has: boolean; keep: boolean } {
+  const m = expr.match(/^(.+?)(!=|=)(.*)$/);
+  const key = (m ? m[1]! : expr).trim();
+  let want: unknown = undefined;
+  if (m) {
+    try {
+      want = JSON.parse(m[3]!);
+    } catch {
+      want = m[3]; // aio-ok: not JSON — the value is compared as a string
+    }
+  }
+  return (item) => {
+    const r = resolvePath(item, key);
+    const v = r.found ? r.value : undefined;
+    if (!m) return { has: r.found, keep: Boolean(v) };
+    const eq = JSON.stringify(v) === JSON.stringify(want);
+    return { has: r.found, keep: m[2] === "=" ? eq : !eq };
+  };
+}
+
+/** Traverse path with JS-like syntax: "fleet[0].stats", "fleet[*].{pair,status}",
+ *  "owner.{id,name}", "fleet[?live].name", "fleet[?status=\"up\"]" ({@linkcode PATH_SYNTAX}) */
+export function resolvePath(obj: unknown, path: string): PathResult {
+  // Additive: whatever the pre-filter grammar resolves (a literal key
+  // "x[?y]", ".z" = key "" then z) resolves the same; only its misses get the
+  // filter grammar.
+  const old = walkPath(obj, path, false);
+  return old.found ? old : walkPath(obj, path, true);
+}
+
+type PathResult = { found: true; value: unknown } | { found: false };
+
+function walkPath(obj: unknown, path: string, filters: boolean): PathResult {
+  const sub = filters
+    ? resolvePath
+    : (o: unknown, p: string) => walkPath(o, p, false);
+  // Item filter `[?…]` — taken first unless a `*` comes before it (then the
+  // wildcard maps the rest, filter included, over its items).
+  // The filter ends at the `]` that ends a segment, so `[?tags=["x"]]` holds.
+  const fm = path.match(/\[\?(.+?)\](?=$|[.[])/);
+  if (filters && fm && !path.slice(0, fm.index).includes("*")) {
+    const prefix = path.slice(0, fm.index);
+    const after = path.slice(fm.index! + fm[0].length);
+    const rest = after.startsWith(".") ? after.slice(1) : after;
+    const parent = prefix
+      ? sub(obj, prefix)
+      : { found: true as const, value: obj };
+    if (!parent.found) return parent;
+    if (!Array.isArray(parent.value)) return { found: false };
+    const test = itemFilter(fm[1]!);
+    const checked = (parent.value as unknown[]).map((item) => ({
+      item,
+      ...test(item),
+    }));
+    // No item has the key at all: a typo, not an empty match.
+    if (checked.length && !checked.some((c) => c.has)) return { found: false };
+    const kept = checked.filter((c) => c.keep).map((c) => c.item);
+    if (!rest) return { found: true, value: kept };
+    // A bracket addresses the KEPT LIST (`[0]` = first match, `[?…]` chains);
+    // a dot maps over its items, as after `[*]`.
+    if (after.startsWith("[")) return sub(kept, rest);
+    const results: unknown[] = [];
+    for (const item of kept) {
+      const r = sub(item, rest);
+      if (r.found) results.push(r.value);
+    }
+    return results.length || !kept.length
+      ? { found: true, value: results }
+      : { found: false };
+  }
+
   // Normalize bracket notation: fleet[0] → fleet.0, fleet[*] → fleet.*
   path = path.replace(/\[(\d+|\*)\]/g, ".$1");
+  // "[0].x" on an array (the kept list after a filter); ".*" stays the wildcard.
+  if (filters && /^\.(?!\*)/.test(path)) path = path.slice(1);
 
   // Wildcard: split on first *, resolve prefix as array, map suffix over elements
   const starIdx = path.indexOf(".*");
@@ -1019,7 +1097,7 @@ export function resolvePath(
     const suffix = path.slice(starIdx + 2); // skip ".*"
     const rest = suffix.startsWith(".") ? suffix.slice(1) : suffix;
     const parent = prefix
-      ? resolvePath(obj, prefix)
+      ? sub(obj, prefix)
       : { found: true as const, value: obj };
     if (!parent.found) return parent;
     if (!Array.isArray(parent.value)) return { found: false };
@@ -1027,7 +1105,7 @@ export function resolvePath(
     if (!rest) return { found: true, value: arr };
     const results: unknown[] = [];
     for (const item of arr) {
-      const r = resolvePath(item, rest);
+      const r = sub(item, rest);
       if (r.found) results.push(r.value);
     }
     return results.length ? { found: true, value: results } : { found: false };
@@ -1039,7 +1117,7 @@ export function resolvePath(
     const prefix = braceMatch[1];
     const picks = braceMatch[2]!.split(",").map((s) => s.trim());
     const parent = prefix
-      ? resolvePath(obj, prefix)
+      ? sub(obj, prefix)
       : { found: true as const, value: obj };
     if (!parent.found) return parent;
     if (parent.value == null || typeof parent.value !== "object") {
@@ -1051,13 +1129,13 @@ export function resolvePath(
     for (const key of picks) {
       // Support nested picks: {stats.pnl} traverses into the picked parent
       if (key.includes(".")) {
-        const r = resolvePath(src, key);
+        const r = sub(src, key);
         if (r.found) {
           result[key] = r.value;
           any = true;
         }
       } else {
-        const r = resolvePath(src, key);
+        const r = sub(src, key);
         if (r.found && r.value !== undefined) {
           result[key] = r.value;
           any = true;
@@ -1543,20 +1621,6 @@ export async function runTrojanGet(
   timeoutMs?: number,
 ): Promise<void> {
   const result = await trojanGet(ctx.port, route, ctx.appId, timeoutMs);
-  if (!result.ok) {
-    outError(result.error, ctx.mode);
-    Deno.exit(1);
-  }
-  outValue(result.data, ctx.mode);
-}
-
-/** POST to a trojan route and print the result — exits(1) loudly on failure. */
-export async function runTrojanPost(
-  ctx: AmCtx,
-  route: string,
-  body: unknown,
-): Promise<void> {
-  const result = await trojanPost(ctx.port, route, body, ctx.appId);
   if (!result.ok) {
     outError(result.error, ctx.mode);
     Deno.exit(1);

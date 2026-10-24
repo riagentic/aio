@@ -177,6 +177,8 @@ await aio.run({ cells: [c], appId: "rr", persist: false, client: "server-only" }
           status: string;
         };
         assertEquals(doc.status, "started", r.out);
+        // The note says it was THIS restart's child that stood down.
+        assert(r.err.includes("this restart's child"), r.err);
         assertEquals(
           doc.pid,
           now.pid,

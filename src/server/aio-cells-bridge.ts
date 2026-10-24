@@ -6,6 +6,7 @@ import type { CellDef, ComposedCells } from "../state/cell.ts";
 import type { Msg } from "../state/cell-types.ts";
 import { _releaseCellBindings } from "../state/cell-reactive.ts";
 import { _boundDispatchOf, _whileCellsBoot } from "../state/cell-catalog.ts";
+import { isDevMode } from "../state/dev-flag.ts";
 import { _bindCallScope, mergeLongIntoPerfBudget } from "../state/cell-impl.ts";
 import { bindCell } from "../state/cell.ts";
 import {
@@ -50,7 +51,10 @@ import {
   createStormDetector,
   type StormInfo,
 } from "../diagnostics/dispatch-storm.ts";
-import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
+import {
+  _bareUnobserved,
+  WORKER_PATCH_ACTION,
+} from "../state/cell-compose-reduce.ts";
 import { _setDiagScope, diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { makeRedactor } from "../diagnostics/redact.ts";
 import { parseCli } from "./aio-cli.ts";
@@ -354,6 +358,25 @@ export function buildLegacyConfig(
   const workerStorm = fc.dispatchStorm === false
     ? null
     : createStormDetector({ ...stormCfg, breaker: false, onStorm });
+  // A bare type ("inc") that no cell, listener, onAction/plugin hook or
+  // beforeReduce observed ran nothing. Still acked ok — a hook-only event is
+  // a documented pattern (docs/basics/plugins.md) — but dev says so, once per
+  // type. Observe-only.
+  const _bareWarned = new Set<string>();
+  const _hintBareUnobserved = (action: unknown): void => {
+    if (
+      fc.onAction || beforeReduce || !isDevMode() ||
+      !action || typeof action !== "object" || !_bareUnobserved.has(action)
+    ) return;
+    const t = String((action as { type?: unknown }).type);
+    if (_bareWarned.has(t)) return;
+    _bareWarned.add(t);
+    log.warn(
+      `action '${t}' has no 'cell:' prefix and no cell, listener or hook ` +
+        `observed it — it did NOTHING. A cell method is called as ` +
+        `'<cell>:<method>'. (warned once per type)`,
+    );
+  };
   const userBeforeReduce = beforeReduce as
     | ((a: unknown, s: unknown, u?: unknown) => unknown)
     | undefined;
@@ -423,14 +446,14 @@ export function buildLegacyConfig(
     // would have re-opened.
     perfBudget: mergeLongIntoPerfBudget(fc.perfBudget, composed.cells),
     reduce: ((state: unknown, action: unknown) =>
-      inAppScope(
-        scope,
-        () =>
-          (composed.reduce as (s: unknown, a: unknown) => unknown)(
-            state,
-            action,
-          ),
-      )) as AioConfig<
+      inAppScope(scope, () => {
+        const out = (composed.reduce as (s: unknown, a: unknown) => unknown)(
+          state,
+          action,
+        );
+        _hintBareUnobserved(action);
+        return out;
+      })) as AioConfig<
         Record<string, unknown>,
         unknown,
         unknown

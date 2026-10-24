@@ -1087,10 +1087,11 @@ Deno.test({
       await refuses([join(dir, "dist")], "no " + name);
       await Deno.writeFile(join(release, "prod", "app"), v2);
       await refuses([release], "is not that file");
-      // An install that is an unpacked folder has nothing to patch.
+      // A sealed .app has nothing to patch (a .zip install is patched file
+      // by file — tests/updates-tree-patch.test.ts).
       await Deno.writeTextFile(
         join(release, "prod", "zip.json"),
-        JSON.stringify({ sha256: hex(v1), url: "app", target: "electron-zip" }),
+        JSON.stringify({ sha256: hex(v1), url: "app", target: "electron-app" }),
       );
       const zip = await make([release], "zip.json");
       assertEquals(zip.patches, []);

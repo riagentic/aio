@@ -737,6 +737,15 @@ async function markLegacy(path: string): Promise<void> {
   });
 }
 
+/** The admin dir a store checkout's own `.git` file names (null when it has
+ *  none) — read through the checkout, not through one clone's registrations:
+ *  the store is shared by every aio clone on the machine. */
+async function storeGitdir(path: string): Promise<string | null> {
+  const gitFile = await Deno.readTextFile(join(path, ".git")).catch(() => null);
+  const raw = gitFile ? /^gitdir:\s*(.+)$/m.exec(gitFile)?.[1] : undefined;
+  return raw ? resolve(path, raw.trim()) : null;
+}
+
 /** Decide what an EXISTING store directory is, before anyone trusts it:
  *
  *  - being written right now — a lock younger than
@@ -763,11 +772,7 @@ async function settleStoreDir(
   // `root`'s registrations: the store is shared by every aio clone on the
   // machine (the installed one, a dev checkout), and a version another clone
   // is writing — or wrote — is registered THERE.
-  const gitFile = await Deno.readTextFile(join(path, ".git")).catch(() => null);
-  const gitdirRaw = gitFile
-    ? /^gitdir:\s*(.+)$/m.exec(gitFile)?.[1]
-    : undefined;
-  const gitdir = gitdirRaw ? resolve(path, gitdirRaw.trim()) : null;
+  const gitdir = await storeGitdir(path);
   const lock = gitdir
     ? await Deno.stat(join(gitdir, "locked")).catch(() => null)
     : null;
@@ -834,10 +839,149 @@ async function settleStoreDir(
   return null;
 }
 
+// ── Pruning the store (`am prune versions`) ────────────────
+
+/** One store entry's verdict: kept, or removable — and the sentence why. */
+export type VersionPruneDecision = {
+  ref: string;
+  path: string;
+  keep: boolean;
+  why: string;
+};
+
+/** What git reports in a store checkout that is not the checkout itself —
+ *  changed, untracked or IGNORED paths (a `feedback/` note lives in an
+ *  ignored dir) — minus `deno.lock`, which deno rewrites on use. Null when
+ *  git cannot inspect it. */
+async function localChanges(path: string): Promise<string[] | null> {
+  const r = await git(path, [
+    "--no-optional-locks",
+    "status",
+    "--porcelain",
+    "--ignored",
+  ]);
+  if (!r.ok) return null;
+  // `XY path` per line — but `git()` trims, so the FIRST line's leading
+  // space (` M deno.lock`) is gone: strip the status word, not 3 columns.
+  return r.out.split("\n").map((l) => l.replace(/^\s*\S+\s+/, "")).filter((f) =>
+    f !== "" && f !== "deno.lock"
+  );
+}
+
+async function versionVerdict(
+  ref: string,
+  path: string,
+  protect: ReadonlyMap<string, string>,
+): Promise<{ keep: boolean; why: string }> {
+  const kept = (why: string) => ({ keep: true, why });
+  const reason = protect.get(ref);
+  if (reason) return kept(reason);
+  if ((await Deno.lstat(path)).isSymlink) {
+    return kept("a symlink, not a checkout am made — remove it by hand");
+  }
+  const gitdir = await storeGitdir(path);
+  if (!gitdir) {
+    return kept("no .git link — not a finished checkout; remove it by hand");
+  }
+  if (await exists(join(gitdir, "locked"))) {
+    return kept(
+      "locked: being provisioned now, or killed mid-add " +
+        "(the next `am pin`/`am fix` settles it)",
+    );
+  }
+  const changes = await localChanges(path);
+  if (changes === null) {
+    return kept(
+      "git cannot inspect it (the clone that made it moved or " +
+        "is gone?) — remove it by hand if no app uses it",
+    );
+  }
+  if (changes.length > 0) {
+    return kept(
+      `has files that are not the release (${changes[0]}${
+        changes.length > 1 ? ` +${changes.length - 1} more` : ""
+      }) — not am's to delete`,
+    );
+  }
+  const sha = /^main-([0-9a-f]{7,40})$/.exec(ref)?.[1];
+  const target = sha ?? (parseVersion(ref) ? `refs/tags/${ref}` : null);
+  if (!target) return kept("not a version name am provisions");
+  if (
+    !(await git(path, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      `${target}^{commit}`,
+    ])).ok
+  ) {
+    return kept(
+      `its ${sha ? "commit" : "tag"} is gone from the clone — ` +
+        `it could never be provisioned again`,
+    );
+  }
+  return {
+    keep: false,
+    why: `no known app uses it — \`am pin ${ref}\` provisions it again`,
+  };
+}
+
+/** Every store entry, judged. `protect` maps a ref to why it stays (an app
+ *  pins or links it, the newest release, the checkout am runs from); beyond
+ *  that only a clean, unlocked checkout that can be provisioned again goes —
+ *  anything git cannot vouch for is kept, with the reason. */
+export async function planVersionPrune(
+  protect: ReadonlyMap<string, string>,
+): Promise<VersionPruneDecision[]> {
+  const out: VersionPruneDecision[] = [];
+  for (const ref of await provisioned()) {
+    const path = versionPath(ref);
+    out.push({ ref, path, ...(await versionVerdict(ref, path, protect)) });
+  }
+  return out;
+}
+
+/** Remove the plan's removable entries through git (`worktree remove`, run in
+ *  the checkout, so the clone that REGISTERED it forgets it — whichever clone
+ *  that is). One `--force` for the deno.lock {@linkcode localChanges} allows;
+ *  a lock taken since the plan still refuses. */
+export async function applyVersionPrune(
+  plan: readonly VersionPruneDecision[],
+): Promise<{ removed: string[]; failed: { path: string; error: string }[] }> {
+  const removed: string[] = [];
+  const failed: { path: string; error: string }[] = [];
+  for (const d of plan) {
+    if (d.keep) continue;
+    // Run from the registering clone's git dir, not the checkout: Windows
+    // refuses to delete a directory that is a live process's cwd, so git
+    // started inside it failed "Permission denied" on every entry.
+    const common = await git(d.path, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ]);
+    const r = await git(common.ok ? common.out : d.path, [
+      "worktree",
+      "remove",
+      "--force",
+      d.path,
+    ]);
+    if (await exists(d.path)) {
+      failed.push({ path: d.path, error: r.out || "it is still there" });
+      continue;
+    }
+    removed.push(d.path);
+    await Deno.remove(completionMarker(d.path)).catch(() => {
+      // aio-ok: a legacy checkout has no marker
+    });
+  }
+  return { removed, failed };
+}
+
 /** Remove a provisioned version (its worktree registration too). No
  *  repo-wide `git worktree prune` here: `root` may be the developer's own
  *  checkout, and that call forgets every worktree of theirs whose directory
  *  is momentarily missing. `-f -f` removes this one even when locked. */
+// aio-ok(dead-wiring): the store-entry removal primitive; tests clean provisioned versions with it (`am prune versions` goes through applyVersionPrune, which judges each entry first)
 export async function removeVersion(
   root: string,
   ref: string,

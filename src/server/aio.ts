@@ -41,8 +41,13 @@ import {
 } from "../diagnostics/time-travel.ts";
 import { createScheduleManager } from "../state/schedule.ts";
 import { createOwnManager } from "../state/own.ts";
+import { isFrameworkCell } from "../state/framework-cells.ts";
 import { routeEffect } from "../state/route-effect.ts";
-import { notifyCrossUserGate, showNotifyEffect } from "./aio-dispatch.ts";
+import {
+  notifyCrossUserGate,
+  showAppIconEffect,
+  showNotifyEffect,
+} from "./aio-dispatch.ts";
 import { getLogger, log } from "../diagnostics/logger-api.ts";
 import { timeTravelEnabled } from "../diagnostics/types.ts";
 import {
@@ -164,6 +169,7 @@ import {
   buildReportOpts,
   createMemoizedUIState,
   createUdsBroadcastController,
+  guardMirroredWrites,
   handleThinClient,
   initDiagAndVitals,
   resolveTitle,
@@ -223,6 +229,7 @@ import {
 import { offerMoveToApplications } from "./macos-move.ts";
 import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import {
+  buildChannel,
   deriveDataContract,
   judgeKeepOld,
   PROBE_NONCE_ENV,
@@ -241,6 +248,11 @@ import { openSessionStore, type SessionStore } from "./sessions.ts";
 import { openUserStore } from "./auth-users.ts";
 import { holdFileSizeGuard, resolveAppId } from "./single-instance-lock.ts";
 import { appKeyPath, defaultAppKeyConfig, resolveAppKey } from "./app-key.ts";
+import {
+  isWeakToken,
+  WEAK_TOKEN_MIN_BITS,
+  WEAK_TOKEN_MIN_CHARS,
+} from "./server-auth.ts";
 import "./deno-version.ts"; // load order: evaluated here, as before the split
 import { dirname, join, resolve } from "@std/path";
 import { lint, printLint } from "./lint.ts";
@@ -287,7 +299,7 @@ import {
   validateCallableConfig,
   validateConfig,
 } from "./config.ts";
-import { count } from "../diagnostics/fmt.ts";
+import { count, thrownText } from "../diagnostics/fmt.ts";
 import { isDiagnosticsOptOut } from "../diagnostics/diagnostics-optout.ts";
 import { resolveBudgets, setBudgets } from "../state/budgets.ts";
 import {
@@ -481,7 +493,13 @@ async function _runPhases<S, A, E>(
     console.error(
       probeLine(
         "persisting-cells",
-        String((config._persistingCellIds ?? []).length),
+        // The app's own: aio's `updates`/`feedback` persist too, and a
+        // count with them asked the author to version a cell they do not own
+        // ("declares 0 cells, but this build persists 2" for a one-cell app).
+        String(
+          (config._persistingCellIds ?? []).filter((id) => !isFrameworkCell(id))
+            .length,
+        ),
         nonce,
       ),
     );
@@ -1173,8 +1191,9 @@ async function _runPhases<S, A, E>(
     // must go through the same projection every other wire uses (it used to
     // read raw state). No `user`: a sync cell may not carry a per-user filter
     // at all (aio-composition.ts refuses it), so this is exactly the
-    // structural view.
-    getUIState: (s: Record<string, unknown>) => getUIState(s as S),
+    // structural view. The RAW getter: aio-boot hands it a one-cell state,
+    // and the memoized one would evict every client's cached view for it.
+    getUIState: (s: Record<string, unknown>) => _rawGetUIState(s as S),
     getReportOpts: () => _reportOpts,
     journal: config.journal,
     redactActions: config.redactActions,
@@ -1759,7 +1778,9 @@ async function _runPhases<S, A, E>(
           return r === undefined || r === d ? undefined : r;
         }) as S;
       } catch (e) {
-        log.error(`hook onRestore (after journal replay): ${e}`);
+        log.error(
+          `hook onRestore (after journal replay): ${thrownText(e)}`,
+        );
       }
     }
     return next;
@@ -3841,6 +3862,12 @@ async function _runPhases<S, A, E>(
                 ),
                 _workerUserCalls > 0,
               ),
+            appIcon: (e) =>
+              void showAppIconEffect(
+                e,
+                server?.broadcastUi,
+                (m) => log.warn("aio", m),
+              ),
             app: (e) => void dispatch(e as unknown as A), // cross-cell action
           })),
     });
@@ -3901,7 +3928,11 @@ async function _runPhases<S, A, E>(
     try {
       sent = _cloneAcrossWorkerBoundary(a, "action payload", cellId) as A;
     } catch (e) {
-      return Promise.reject(e);
+      const refused = Promise.reject(e);
+      refused.catch(() => {
+        // aio-ok: fire-and-forget guard, as below — the awaiter still gets it
+      });
+      return refused;
     }
     // An ASYNC method answers through its registered call, not through this
     // dispatch's promise (that one resolves `undefined` once the method is
@@ -3926,12 +3957,20 @@ async function _runPhases<S, A, E>(
     // ACTION_REFUSED`. Moved in the same turn, by the code that made the
     // stand-in, before the ack path asks.
     _moveRejections(sent, a);
-    return Promise.resolve(out).then((v) => {
+    const back = Promise.resolve(out).then((v) => {
       _moveRejections(sent, a); // …and again for a refusal recorded on commit
       return v === undefined
         ? v
         : _cloneAcrossWorkerBoundary(v, "return value", cellId);
     });
+    // A new promise, so dispatch's own fire-and-forget guard (B-4) does not
+    // cover it: an unawaited call that threw was an `unhandledrejection` here
+    // and on the real bridge, quiet on a main-isolate cell. Awaiters still
+    // get the rejection.
+    back.catch(() => {
+      // aio-ok: fire-and-forget guard — the awaiter still gets the rejection
+    });
+    return back;
   }) as typeof dispatch;
 
   const _routed = workerPool.route((a) => dispatch(a as unknown as A));
@@ -4146,7 +4185,11 @@ async function _runPhases<S, A, E>(
         }
       },
       port,
-      asyncDb,
+      asyncDb: guardMirroredWrites(
+        asyncDb,
+        boot.mirroredTables,
+        (m) => log.warn(m),
+      ),
       initialState,
       persistence,
       schedulePersist: () => schedulePersist(),
@@ -4237,6 +4280,23 @@ async function _runPhases<S, A, E>(
         `restarts). The share link below carries it; devices pair by PIN. ` +
         `This is the alpha52 default. To run OPEN to everyone on the ` +
         `network, say so explicitly: key: false.`,
+    );
+  }
+  // The same bar a static `users:` token is held to — the shared key is the
+  // ONLY credential in front of an exposed app, and the failure budget slows
+  // a guesser without stopping one (a valid key is always served).
+  if (
+    typeof _cfgKey === "string" && _cfgKey === _keyRes.key &&
+    isWeakToken(_cfgKey)
+  ) {
+    log.warn(
+      "auth",
+      `security: weak fixed \`key\` — under ${WEAK_TOKEN_MIN_CHARS} chars ` +
+        `or ~${WEAK_TOKEN_MIN_BITS} bits, it is ` +
+        `guessable at network speed, and it is the only thing in front of ` +
+        `this exposed app. Use key: true (a generated key, persisted), or ` +
+        "generate one with `openssl rand -base64 24` and load it from the " +
+        "environment.",
     );
   }
   if (_cfgKey === false && expose && !_perUserAuth) {
@@ -4580,8 +4640,7 @@ async function _runPhases<S, A, E>(
       dataDir: _dirs.data,
       appName: appId,
       appVersion: await _appVersion(),
-      stamp: (appDenoJson()?.build as { channel?: string } | undefined)
-        ?.channel,
+      stamp: buildChannel(appDenoJson()?.build),
       flag: cli.channel,
       local: {
         schema: PERSIST_SCHEMA_VERSION,
@@ -4792,6 +4851,7 @@ async function _runPhases<S, A, E>(
       httpSocketPath: transport.httpSocketPath,
       port: livePort,
       token,
+      pairingPake: config.pairing?.pake === true,
       users,
       perUserAuth: _perUserAuth,
       tlsCert: transport.tlsCert,

@@ -595,6 +595,20 @@ export type AioConfig<S, A, E> = {
    *  `defaultAppKeyConfig` in aio.ts); this line said "omitted = no auth"
    *  until 1.0.6. */
   key?: string | boolean;
+  /** PIN pairing by PAKE (CPace, draft-irtf-cfrg-cpace-21) — opt-in.
+   *  With `pake: true` the pairing code has 8 digits, never crosses the wire,
+   *  and the exchange is bound to the TLS certificate the client sees: a
+   *  relay at first pairing gets neither the key nor a certificate pin, and a
+   *  recorded exchange gives nothing to guess the code against offline. The
+   *  aio client and Android client pair this way on their own (an 8-digit code
+   *  is the signal); clients older than the release that added it cannot pair
+   *  and are told so. Default off: today's 6-digit `{ pin }` exchange.
+   *
+   *  ```ts
+   *  aio.run({ cells, pairing: { pake: true } });
+   *  ```
+   *  See docs/auth/auth.md#pairing. */
+  pairing?: { pake?: boolean };
   resolveUser?: ResolveUserFn<S>; // dynamic user resolution — overrides users if both set (AIO-171)
   /** A proven local aio app calling with `peer()` → its user (see
    *  `ResolvePeerFn`). Opt-in. @experimental */
@@ -691,6 +705,7 @@ export type AioConfig<S, A, E> = {
   serveDirs?: Record<string, string>;
   client?: "electron" | "browser" | "cli" | "server-only"; // default: 'electron'
   keepServer?: boolean; // default: false — keep server running after client closes (moved from ui.keepAlive)
+  localConnectHooks?: boolean; // default: false — onConnect/onDisconnect also for local-socket windows
   transport?: "uds" | "ws" | "auto"; // default: 'auto' — UDS on linux/mac+electron, WS otherwise (moved from ui.transport)
   /** Kill the running instance and take its singleton lock (default: false).
    *  Spelled `killExisting` until alpha76 — the flag has been `--takeover`
@@ -1285,6 +1300,18 @@ export type CellsConfig = {
   /** Electron only: keep the server running after the window closes (also
    *  `--keep-server`); with any other client, boot is refused. */
   keepServer?: boolean;
+  /** `true`: `onConnect` / `onDisconnect` also run for a desktop window on
+   *  the local socket (UDS, a named pipe on Windows), with no user
+   *  (`undefined`). Default `false`: they run for WebSocket clients only, as
+   *  through 1.0.24. A control request (`am`) is never a connection.
+   *
+   *  @example
+   *  ```ts
+   *  localConnectHooks: true, // presence counts the desktop window too
+   *  onConnect: () => void presence.join(),
+   *  ```
+   */
+  localConnectHooks?: boolean;
   /** How the local client reaches the server. `"auto"` (default): a Unix
    *  socket for a local, non-exposed Electron app, else WebSocket.
    *  `--transport` wins. */
@@ -1315,6 +1342,20 @@ export type CellsConfig = {
    *  ```
    */
   key?: string | boolean;
+  /** PIN pairing by PAKE (CPace, draft-irtf-cfrg-cpace-21) — opt-in.
+   *  With `pake: true` the pairing code has 8 digits, never crosses the wire,
+   *  and the exchange is bound to the TLS certificate the client sees: a
+   *  relay at first pairing gets neither the key nor a certificate pin, and a
+   *  recorded exchange gives nothing to guess the code against offline. The
+   *  aio client and Android client pair this way on their own (an 8-digit code
+   *  is the signal); clients older than the release that added it cannot pair
+   *  and are told so. Default off: today's 6-digit `{ pin }` exchange.
+   *
+   *  ```ts
+   *  aio.run({ cells, pairing: { pake: true } });
+   *  ```
+   *  See docs/auth/auth.md#pairing. */
+  pairing?: { pake?: boolean };
   /** `(token, state) => user | null` — authenticate each connection's token
    *  against current state. Overrides `users`. */
   resolveUser?: ResolveUserFn;
@@ -1426,7 +1467,7 @@ export type CellsConfig = {
    *  you on purpose. */
   guardDispatches?: boolean;
   /** Answer an in-process caller the way the WIRE already answers: a write the
-   *  reduce REFUSED (a `validate` hook, a machine guard) rejects
+   *  reduce REFUSED (a `validate` hook) rejects
    *  `await cell.method()` instead of resolving.
    *
    *  Measured on one app, one cell, one method: over the wire the ack is
@@ -1576,10 +1617,11 @@ export type CellsConfig = {
    *  runs. A throw is reported and never stops dispatch. */
   onEffect?: (effect: unknown, state: unknown, user?: AioUser) => void;
   /** Called with the user when a WebSocket client connects. A local
-   *  Electron window on the Unix-socket transport does not call it. */
+   *  Electron window on the Unix-socket transport does not call it, unless
+   *  `localConnectHooks: true` (then with no user: `undefined`). */
   onConnect?: (user?: AioUser) => void;
   /** Called with the user when a WebSocket client disconnects (not for the
-   *  Unix-socket transport). */
+   *  Unix-socket transport, unless `localConnectHooks: true`). */
   onDisconnect?: (user?: AioUser) => void;
   /** Runs once after boot, when cell methods are callable — seed data,
    *  start a timer. Not awaited; a throw or rejection is logged (see

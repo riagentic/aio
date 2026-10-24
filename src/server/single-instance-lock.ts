@@ -15,6 +15,7 @@
 
 import { basename, join, resolve } from "@std/path";
 import { appHome } from "./app-dirs.ts";
+import { homedir } from "./paths.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { _renameDeps } from "../diagnostics/rename-over.ts";
 import {
@@ -59,7 +60,7 @@ import {
   zombieLine,
   zombieVerdict,
 } from "./lock-owner.ts";
-import { delay, ownPidNs } from "./process-liveness.ts";
+import { delay, ownPidNs, parentPidOf } from "./process-liveness.ts";
 
 // ── Moved out — re-exported so every importer keeps this path ──
 export {
@@ -298,6 +299,10 @@ export type LockData = {
    *  alpha66 — a missing value means the default home. */
   home?: string;
   socketPath?: string; // UDS socket path (when using UDS transport)
+  /** The HTTP handler's socket (`<key>.http.sock`) of an app with no TCP
+   *  port — the door `peer()` takes for blobs and a proven identity. Absent
+   *  whenever a port exists, and on locks written before 1.0.25. */
+  httpSocketPath?: string;
   /** The address `port` is bound on, as configured (`127.0.0.1`, `0.0.0.0`,
    *  `::`, a LAN address, a name) — written when the lock is taken, from the
    *  same decider the server binds with. `port`
@@ -436,8 +441,7 @@ function handoffSecret(): string | undefined {
 function devSupervisorPid(): number | undefined {
   try {
     if (Deno.env.get("AIO_DEV_SUPERVISED") !== "1") return undefined;
-    const pid = Number(Deno.env.get("AIO_PARENT_PID"));
-    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+    return parentPidOf(Deno.env.get("AIO_PARENT_PID"));
   } catch {
     return undefined; // aio-ok: no env permission — then nothing supervises it
   }
@@ -1365,12 +1369,14 @@ export function instances(appId?: string): InstanceInfo[] {
   return results;
 }
 
-/** The LIVE instances of ANOTHER apps root (`AIO_APPS_DIR=appsRoot`), read
- *  without moving this process into it: no lock dir is created, no stale
- *  lock removed (that root's own readers do that). For `am instances`, which
- *  lists every `--instance` scope beside its own. */
+/** The LIVE instances of ANOTHER apps root (`AIO_APPS_DIR=appsRoot`; `""`:
+ *  the default one, no AIO_APPS_DIR), read without moving this process into
+ *  it: no lock dir is created, no stale lock removed (that root's own readers
+ *  do that). For `am instances`, which lists every `--instance` scope beside
+ *  its own, and `peer(id, { instance })`. */
 export function liveInstancesUnder(appsRoot: string): InstanceInfo[] {
-  const { base, scope } = _lockDirParts(resolve(appsRoot));
+  const root = appsRoot ? resolve(appsRoot) : "";
+  const { base, scope } = _lockDirParts(root);
   const results: InstanceInfo[] = [];
   for (const dir of _lockDirCandidates(base, scope).filter(_exists)) {
     try {
@@ -1380,7 +1386,8 @@ export function liveInstancesUnder(appsRoot: string): InstanceInfo[] {
         if (!lock || !isLockOwnerAlive(lock)) continue;
         results.push({
           ...lock,
-          home: lock.home ?? join(resolve(appsRoot), lock.appId),
+          home: lock.home ??
+            (root ? join(root, lock.appId) : join(homedir(), `.${lock.appId}`)),
           alive: true,
         });
       }

@@ -33,6 +33,7 @@ Deno.test("routeEffect: a notify effect reaches the notify handler and nothing e
     schedule: () => seen.push("schedule"),
     own: () => seen.push("own"),
     notify: () => seen.push("notify"),
+    appIcon: () => seen.push("appIcon"),
     app: () => seen.push("app"),
   });
   assertEquals(seen, ["notify"]);

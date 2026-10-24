@@ -362,15 +362,62 @@ export function _ownHomeEnv(
   };
 }
 
+/** Windows: the per-user folders a test browser writes outside its profile
+ *  moved into `home` — measured on Windows 11 (Edge, 2026-10-24): a launch
+ *  writes `%TEMP%\cv_debug.log` and jump lists under
+ *  `%APPDATA%\Microsoft\Windows\Recent\CustomDestinations`; with these
+ *  five moved it wrote nothing under the real USERPROFILE. Pure.
+ *  @internal exported for its test */
+export function _ownWindowsHomeEnv(home: string): Record<string, string> {
+  const local = `${home}\\AppData\\Local`;
+  return {
+    USERPROFILE: home,
+    APPDATA: `${home}\\AppData\\Roaming`,
+    LOCALAPPDATA: local,
+    TEMP: `${local}\\Temp`,
+    TMP: `${local}\\Temp`,
+  };
+}
+
+/** What a macOS Chromium writes under the user's home whatever HOME says. */
+export const MACOS_BROWSER_HOME_LEAK =
+  "~/Library/Application Support/<browser>/Crashpad/settings.dat and " +
+  "~/Library/Preferences/<browser id>.plist";
+
+let _saidHomeMacos = false;
+
 /** The env that gives a browser on `profile` a HOME of its own, inside the
  *  profile (it goes when the profile goes) — or `{}`: this is opt-in
- *  (`AIO_TEST_BROWSER_HOME=own`, Linux), and by default a test browser runs
- *  in the developer's HOME, as it always has. Spread it into the spawn's
+ *  (`AIO_TEST_BROWSER_HOME=own`), and by default a test browser runs in the
+ *  developer's HOME, as it always has. Linux and Windows; on macOS what
+ *  leaks cannot be moved, and that is said once. Spread it into the spawn's
  *  `env`, BEFORE the display's (whose `XAUTHORITY` must win). */
-export function browserHomeEnv(profile: string): Record<string, string> {
-  if (
-    Deno.build.os !== "linux" || Deno.env.get("AIO_TEST_BROWSER_HOME") !== "own"
-  ) return {};
+export function browserHomeEnv(
+  profile: string,
+  os: string = Deno.build.os,
+): Record<string, string> {
+  if (Deno.env.get("AIO_TEST_BROWSER_HOME") !== "own") return {};
+  if (os === "windows") {
+    const env = _ownWindowsHomeEnv(`${profile}\\aio-home`);
+    Deno.mkdirSync(env.APPDATA!, { recursive: true });
+    Deno.mkdirSync(env.TEMP!, { recursive: true });
+    return env;
+  }
+  if (os !== "linux") {
+    // Measured on macOS 14 (Chrome for Testing 156, 2026-10-24): these are
+    // written through the account's home, not $HOME — and neither
+    // --disable-crash-reporter, --disable-breakpad nor --crash-dumps-dir
+    // moves them. Said once, never ignored quietly.
+    if (!_saidHomeMacos) {
+      _saidHomeMacos = true;
+      console.warn(
+        `[aio:test] AIO_TEST_BROWSER_HOME=own: on ${os} a test browser still ` +
+          `writes ${MACOS_BROWSER_HOME_LEAK} in your home — nothing moves ` +
+          `them; everything else stays in its throwaway profile.`,
+      );
+    }
+    return {};
+  }
   const home = `${profile}/aio-home`;
   const own = _ownHomeEnv(home, Deno.env.toObject());
   Deno.mkdirSync(home, { recursive: true });

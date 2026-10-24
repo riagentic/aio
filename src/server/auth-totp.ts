@@ -150,6 +150,7 @@ export function _onTotpReplayReset(fn: () => void): () => void {
 }
 
 /** Test isolation — forget which steps have been consumed. @internal */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetTotpReplay(): void {
   _lastStep.clear();
   for (const reset of [..._replayResetHooks]) reset();

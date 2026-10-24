@@ -172,16 +172,22 @@ Deno.test("updates: a legacy poisoned `etag` is ignored, so a hidden offer reapp
 // never be offered again, on this boot or any future one. Only a genuine "there
 // is nothing newer" may be cached.
 Deno.test("updates: a dismissal never caches the ETag", async () => {
-  const dataDir = await tempDir("aio-upd-dismiss-");
-  const { cacheCurrentEtag } = await import("../src/server/updates-check.ts");
-
-  cacheCurrentEtag(dataDir, `"rel-2.0.0"`, { dismissed: true });
-  assertEquals(
-    readTrust(dataDir).etagCurrent,
-    undefined,
-    "'not now' is not 'nothing is there'",
-  );
-
-  cacheCurrentEtag(dataDir, `"rel-1.0.0"`, { dismissed: false });
-  assertEquals(readTrust(dataDir).etagCurrent, `"rel-1.0.0"`);
+  // Through the runtime, not the helper alone: the product's own check is the
+  // one that must not cache a "Not now".
+  const host = await releaseHost("2.0.0");
+  try {
+    const { rt, dataDir } = await runtimeFor(host.source, "1.0.0");
+    const res = await rt.check({ dismissed: "2.0.0" });
+    assertEquals(res.kind, "current", "a dismissed release reads as current");
+    assertEquals(
+      readTrust(dataDir).etagCurrent,
+      undefined,
+      "'not now' is not 'nothing is there'",
+    );
+    const again = await rt.check({ dismissed: null });
+    assertEquals(again.kind, "offer", "undismissed, the release is offered");
+    assertEquals(host.conditional, [false, false], "no 304 short-circuit");
+  } finally {
+    await host.stop();
+  }
 });

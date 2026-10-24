@@ -116,6 +116,12 @@ const OWNERS: Record<string, [Owner, string]> = {
     "one call (_resetAioRuntime) is in src/state/, which may not import air. " +
     "testUI's mount clears it, which is every UI test",
   ],
+  _resetTTPanel: [
+    "LIFECYCLE",
+    "the time-travel panel's DOM node and Ctrl+. listener (a dev hook, " +
+    "air/time-travel-dom.ts) — `resetTT` calls it from the client teardown " +
+    "(browser-air-transport.ts); not RUNTIME: it lives in src/air/",
+  ],
   _resetDevWarnings: [
     "HARNESS",
     "the renderer's once-only `_devWarn` ids (duplicate keys, a hydration " +

@@ -1,5 +1,120 @@
 # Changelog
 
+## v1.0.25-beta — an aio window can no longer take the desktop down, PIN pairing by PAKE, a read-only production probe, and eight hunt rounds of fixes (2026-10-24)
+
+> **Nothing is removed or renamed, and no option changes meaning.** Everything
+> new is added: `pairing: { pake: true }`, `am state --prod`,
+> `peer(id, { instance })`, `ZoomPan`, `errorSummary()`, deno.json
+> `"neutral": "soft"` and `android.schemes`, and more. A few behaviours change
+> because they were wrong — most visibly where a desktop window opens (never at
+> a screen edge), a handful of inputs that are now refused by name instead of
+> misread, and tests that passed for the wrong reason. An app upgrades with
+> `am pin` and `am fix` and no edit by hand. See
+> [the upgrade guide](docs/upgrade/from-1.0.24-beta-to-1.0.25-beta.md).
+
+### Desktop — a window never opens at a screen edge
+
+- **Every window aio places** (the app's, the splash, the download window, the
+  Retry / Quit question) lies 64 logical pixels (`EDGE_MARGIN`) inside its
+  screen's work area. A window placed at x = 0 has its window-manager frame at x
+  = -10 (Cinnamon's invisible resize border; a frameless Electron window grows
+  its own shadow edge to -16); an NVIDIA X driver faulted on that (Xid 69) and
+  driver 595 then took Xorg — the whole desktop — down (a field report). aio no
+  longer relies on the driver or the window manager to bounds-check.
+- A saved window as big as the screen opens smaller and **maximized**; a size or
+  position that is not a finite number is no value.
+- Window and tray icons above 256×256 px are scaled to 256 (an icon is an X11
+  window property, re-sent on every animation frame). `window-state.json` is
+  written to a temp file and renamed, so a crash never leaves it empty.
+- New release gate **real X driver (GPU lab)** (`deno task test:gpu-lab`): a
+  real aio app, framed and frameless, from every saved state that crashed a
+  desktop, shown to the NVIDIA X driver on a second GPU (`scripts/gpu-lab.sh`);
+  red on any negative window coordinate and on any Xid. `scripts/x-blackbox.sh`
+  records what X saw before a crash.
+- Each Linux window carries its own class (the app id), so the dock groups it
+  under the app; the Windows Start-menu shortcut carries an AppUserModelID, so
+  the taskbar names the app. A GTK splash no longer crashes the process after it
+  closes. An AppImage run without FUSE stops its app when it is stopped.
+- **`appIcon()` effect**: change the window/tray icon and tooltip at run time,
+  frames for an animation; a window that opens later shows it too.
+
+### Pairing and remote access
+
+- **`pairing: { pake: true }`** (opt-in): PIN pairing by CPace — an 8-digit
+  code, the exchange bound to the certificate the client sees, the profile
+  sealed under a key derived from it. A relay that reads the code cannot pair in
+  its place. Needs TLS; the Electron client and the Android APK both speak it.
+  Known limitations in [Auth](docs/auth/auth.md).
+- **`am state --prod [path]`**: a read-only probe of a production build's client
+  view (`GET /__aio/view`), behind the same gates as the app's own clients
+  (`AIO_TOKEN` for a per-user view).
+- Behind a trusted TLS proxy, cookies are `Secure` and the OIDC redirect is
+  `https`; `auth.oidc.redirectUri` sets it verbatim. A proven non-admin `peer()`
+  caller no longer gets the time-travel history.
+
+### Cross-app
+
+- **`peer(id, { instance })`** (`@experimental`): reach a service running in
+  another instance scope (`null`: the default one). A handle follows a callee
+  that restarted on a new port; a caller's `as` identity is proven over the
+  local socket.
+
+### UI and state
+
+- **`ZoomPan`** with pure `zoomAt` / `fitView` in `aio/ui`;
+  **`errorSummary(err, max?)`** beside `errorCode`;
+  **`serverFn(ns, { timeoutMs })`**;
+  **`effect(fn, { rerunOnSelfWrite: true })`**.
+- deno.json **`"neutral": "soft"`**: near-grey neutrals under the app's colour.
+- Async methods: writes made before an `await` commit in program order
+  (`Promise.all([c.inc(), c.inc()])` is 2). Keyed moves keep focus and
+  selection. A focused field with a debounced handler keeps what was typed.
+- An offline edit refused only for a far-behind device clock is re-issued, also
+  after a reload; unsent changes of a cell that stopped syncing are reported.
+
+### Data and server
+
+- Refused by name instead of misread: a `Date`/`Map`/`Set`/nested array as a SQL
+  param, `BEGIN`/`COMMIT`/`ROLLBACK` inside a callback transaction, a malformed
+  `users`, `trustProxyHeader` or mount, a bad `build.channel`.
+- A failed main module exits 1 (it hung); calls still running at the shutdown
+  deadline are rejected with `DISPATCH_CLOSED`.
+- Persist excludes like `list.*.secret` are honoured; a prod restart of the same
+  build no longer reloads open tabs.
+
+### Updates and builds
+
+- **`.zip` desktop installs update from a per-file tree patch**
+  (`am publish --patch-from=`): measured 27 KB instead of a 175 MB zip for a
+  one-line change. The web target's install reuses unchanged `assets` files.
+- **`android.schemes`**: deep links into the Android app. A font or display size
+  change no longer reloads the page.
+- A boot no longer saves the channel it resolved (only `updates.setChannel()`
+  pins one).
+
+### App manager, aiol and tests
+
+- `am prune versions`; `am state`/`am expect` path filters (`[?key]`,
+  `[?key=value]`); `am migrate --tests`; `deno task bench --only=`.
+- `testUI` after a login reads and calls as that user; an un-awaited
+  `expectCell`/`waitFor`/`settle` fails the test that made it.
+- aiol no longer reads `p.cell<…>()` on a `peer()` handle as a cell definition.
+- `aio/cli` progress and spinners go to stderr; stdout is the program's output.
+- Windows: `am prune versions` removes what it lists (git ran inside the folder
+  it deleted, which Windows refuses); `am stop` / `am restart` of a dev app that
+  is still booting ends its dev session instead of leaving it "waiting for a
+  fix"; `install.ps1` / `run.ps1` accept a `HOME` on a drive that is not
+  mounted.
+- A repeating schedule on a worker cell that dies for good stops with one error,
+  also when a tick was in flight at the crash.
+
+### Inside
+
+- Eight hunt rounds, a fix-everything-known wave and an adversarial review after
+  each: bugs fixed across the renderer, sync, auth, persistence, updates, build,
+  Android, Windows, macOS and `am`, each with a test that went red without its
+  fix. A time-travel test that waited forever now fails in seconds.
+
 ## v1.0.24-beta — one aio app calls another by appId, an app picks its own colour, and 186 bugs fixed (2026-10-23)
 
 > **Nothing is removed or renamed, and no option changes meaning.** Everything

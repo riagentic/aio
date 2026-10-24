@@ -18,6 +18,7 @@
 // one rejection → one application. The chaos loop reproduces it in a handful
 // of rounds; a fixed test had to know to look.
 import { assert, assertEquals } from "@std/assert";
+import { FakeTime } from "@std/testing/time";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
 import { mulberry32 } from "./sync/properties/_prop.ts";
 import { connectCli } from "../src/server/cli-client.ts";
@@ -28,7 +29,6 @@ import {
   FakeWS,
   fastBackoff,
   installFakeWS,
-  tick,
   track,
   type Tracked,
   waitFor,
@@ -58,224 +58,269 @@ const KINDS = [
   "outcome: rejected, never applied",
 ];
 
+const realSetTimeout = globalThis.setTimeout;
+
+/** The chaos loop: `rounds` schedules of `steps` from `seed`, every
+ *  invariant asserted. Runs on VIRTUAL time (`FakeTime`): which timer has
+ *  fired by a step is decided by the schedule alone, never by how loaded the
+ *  machine is — so a `FUZZ_SEED` replays exactly (it used to depend on timer
+ *  order under load). `stall` wakes each tick that many real ms late, as a
+ *  loaded machine does, to prove it.
+ *  Returns the kinds it reached and each round's log. */
+async function chaos(
+  seed: number,
+  rounds: number,
+  steps: number,
+  stall = 0,
+): Promise<{ seen: Set<string>; logs: string[] }> {
+  const rnd = mulberry32(seed);
+  const chance = (p: number) => rnd() < p;
+  const seen = new Set<string>();
+  const logs: string[] = [];
+
+  for (let round = 0; round < rounds; round++) {
+    const time = new FakeTime();
+    // A loaded machine wakes a timer late: `stall` real ms before each tick.
+    const tick = async (ms = 5) => {
+      if (stall) await new Promise((r) => realSetTimeout(r, stall));
+      await time.tickAsync(ms);
+    };
+    const restoreWS = installFakeWS();
+    const restoreT = fastBackoff();
+    const log: string[] = [];
+    let clock = 0;
+    const now = () => ++clock;
+
+    // The server model. `applied` counts how many times each intent was
+    // executed; `appliedAt` is when the FIRST execution happened.
+    const applied = new Map<string, number>();
+    const appliedAt = new Map<string, number>();
+    const consumed = new WeakMap<FakeWS, number>();
+    // A cid is random; the log names it by the order it reached the wire, so
+    // one seed's log is one string.
+    const cidNo = new Map<string, number>();
+    const wire = (cid: string) => {
+      if (!cidNo.has(cid)) cidNo.set(cid, cidNo.size);
+      return `#${cidNo.get(cid)}`;
+    };
+
+    const cli = connectCli<{ n: number }>("http://localhost:1/x", {
+      ackTimeoutMs: 0, // no ceiling: this suite is about settlement, not timeouts
+    });
+    const name = `chaos_${round}`;
+    const box = cell(name, {
+      state: { n: 0 },
+      methods: {
+        bump(s: { n: number }, by = 1) {
+          s.n += by;
+        },
+        // An ASYNC method, so this fuzzer can reach the executor-settled
+        // ack path — see the note in transport-exactly-once.test.ts.
+        async bumpAsync(s: { n: number }, by = 1) {
+          await Promise.resolve();
+          s.n += by;
+          return s.n;
+        },
+      },
+    }) as unknown as CellDef & {
+      bump: (by?: number) => Promise<unknown>;
+      bumpAsync: (by?: number) => Promise<unknown>;
+    };
+    cli.bind(box);
+    const calls: Call[] = [];
+
+    /** Drain what the live socket has written: apply, ack, or lose it. */
+    const serve = (ws: FakeWS) => {
+      const from = consumed.get(ws) ?? 0;
+      for (let i = from; i < ws.sent.length; i++) {
+        const f = dec(ws.sent[i]!);
+        if (f?.t !== "action") continue;
+        const d = f.d as { cid?: string };
+        if (!d.cid) continue;
+        if (chance(0.12)) {
+          log.push(`drop ${wire(d.cid)}`);
+          seen.add("drop");
+          continue; // the frame never reached the server
+        }
+        applied.set(d.cid, (applied.get(d.cid) ?? 0) + 1);
+        if (!appliedAt.has(d.cid)) appliedAt.set(d.cid, now());
+        log.push(`apply ${wire(d.cid)}`);
+        if (chance(0.75) && ws.readyState === FakeWS.OPEN) {
+          ws.deliver(enc("ack", { cid: d.cid, ok: true, value: 1 }));
+          seen.add("ack");
+        } else seen.add("lost-ack"); // applied, but the ack is lost
+      }
+      consumed.set(ws, ws.sent.length);
+    };
+
+    try {
+      for (let step = 0; step < steps; step++) {
+        const ws = FakeWS.live[FakeWS.live.length - 1];
+        if (ws && ws.readyState === FakeWS.CONNECTING) {
+          if (chance(0.6)) {
+            ws.open();
+            log.push("open");
+            seen.add("open");
+          } else if (chance(0.5)) {
+            // A connect attempt that never establishes (server still down).
+            // This is the interleaving that exposes the shipped bug: the
+            // close fires while the queue is NON-empty, so a client that
+            // rejects everything pending settles calls it is about to send.
+            ws.close();
+            log.push("failed-connect");
+            seen.add("failed-connect");
+          }
+        }
+        if (ws && ws.readyState === FakeWS.OPEN) serve(ws);
+        if (chance(0.45)) {
+          const cid = `call${calls.length}`;
+          // Half the calls take the ASYNC door, which settles through the
+          // executor rather than the reduce result — the path this fuzzer
+          // could not reach while every call was `bump` (audit a21/F1).
+          const useAsync = chance(0.5);
+          calls.push({
+            cid,
+            t: track(useAsync ? box.bumpAsync(1) : box.bump(1), now),
+          });
+          log.push(`call ${calls.length - 1}${useAsync ? " async" : ""}`);
+          seen.add(useAsync ? "call async" : "call sync");
+        }
+        if (ws && ws.readyState === FakeWS.OPEN && chance(0.3)) {
+          ws.close();
+          log.push("kill");
+          seen.add("kill");
+        }
+        await tick(2);
+      }
+
+      // Calm down: let the client reconnect and drain everything it still
+      // holds, so I1 is about hangs and not about the test giving up early.
+      // One round in four skips it: close() then meets calls nobody ever
+      // wrote, and those may only reject (I2's other half).
+      const calm = !chance(0.25);
+      if (!calm) {
+        // …one of them for certain: made with the socket down, so it is
+        // queued and never sent (not left to how the timers happened to
+        // fall — under load every call had been written by here).
+        const live = FakeWS.live[FakeWS.live.length - 1];
+        if (live && live.readyState === FakeWS.OPEN) live.close();
+        calls.push({
+          cid: `call${calls.length}`,
+          t: track(box.bump(1), now),
+        });
+        log.push("no calm-down, one last call offline");
+      }
+      for (let i = 0; calm && i < 60; i++) {
+        const ws = FakeWS.live[FakeWS.live.length - 1];
+        if (ws && ws.readyState === FakeWS.CONNECTING) ws.open();
+        if (ws && ws.readyState === FakeWS.OPEN) {
+          const from = consumed.get(ws) ?? 0;
+          for (let j = from; j < ws.sent.length; j++) {
+            const f = dec(ws.sent[j]!);
+            if (f?.t !== "action") continue;
+            const d = f.d as { cid?: string };
+            if (!d.cid) continue;
+            applied.set(d.cid, (applied.get(d.cid) ?? 0) + 1);
+            if (!appliedAt.has(d.cid)) appliedAt.set(d.cid, now());
+            ws.deliver(enc("ack", { cid: d.cid, ok: true, value: 1 }));
+          }
+          consumed.set(ws, ws.sent.length);
+        }
+        if (calls.every((c) => c.t.done)) break;
+        await tick(5);
+      }
+      // Anything still outstanding is settled by close() — which is honest
+      // only because close() also throws the queue away.
+      cli.close();
+      await tick(20);
+
+      logs.push(log.join(" · "));
+      const repro = `FUZZ_SEED=${seed} round ${round}: ${log.join(" · ")}`;
+
+      // I1 — every promise settles.
+      for (const [i, c] of calls.entries()) {
+        assert(c.t.done, `call ${i} never settled — ${repro}`);
+      }
+      // The client owns the cids, so recover them from the wire. Frames go
+      // out in call order (the queue is FIFO), and a call is written at most
+      // once, so wireCids[i] belongs to calls[i]; any tail beyond
+      // wireCids.length are the calls close() discarded unsent.
+      const wireCids = FakeWS.live
+        .flatMap((w) => w.sent)
+        .map((l) => dec(l))
+        .filter((f) => f?.t === "action")
+        .map((f) => (f!.d as { cid: string }).cid);
+      assertEquals(
+        new Set(wireCids).size,
+        wireCids.length,
+        `the same intent was written to the wire twice — ${repro}`,
+      );
+      assert(
+        wireCids.length <= calls.length,
+        `more frames than intents — ${repro}`,
+      );
+      // I3 — one intent, at most one application.
+      for (const [cid, n] of applied) {
+        assert(n <= 1, `I3: cid ${cid} applied ${n}× — ${repro}`);
+      }
+      for (const [i, c] of calls.entries()) {
+        const cid = wireCids[i];
+        if (cid === undefined) {
+          seen.add("outcome: never written");
+          assert(
+            !c.t.ok,
+            `I2: call ${i} resolved without ever reaching the wire — ${repro}`,
+          );
+          continue;
+        }
+        if (c.t.ok) {
+          // I2 — a resolve means the server really ran it.
+          seen.add("outcome: resolved");
+          assertEquals(
+            applied.get(cid) ?? 0,
+            1,
+            `I2: resolved a call the server never applied — ${repro}`,
+          );
+        } else if (appliedAt.has(cid)) {
+          // I4 — a rejection is final: nothing may be applied after it.
+          seen.add("outcome: applied, then rejected");
+          assert(
+            appliedAt.get(cid)! < c.t.at,
+            `I4: cid ${cid} was applied AFTER its caller was told it ` +
+              `failed — one intent, a rejection AND an application — ${repro}`,
+          );
+        } else seen.add("outcome: rejected, never applied");
+      }
+    } finally {
+      try {
+        cli.close();
+      } catch { /* already closed */ }
+      restoreT();
+      restoreWS();
+      time.restore();
+    }
+  }
+  return { seen, logs };
+}
+
 Deno.test({
   name: "chaos: one intent, one outcome — under drop / kill / reconnect",
   async fn() {
-    const rnd = mulberry32(SEED);
-    const chance = (p: number) => rnd() < p;
-    const seen = new Set<string>();
-
-    for (let round = 0; round < ROUNDS; round++) {
-      const restoreWS = installFakeWS();
-      const restoreT = fastBackoff();
-      const log: string[] = [];
-      let clock = 0;
-      const now = () => ++clock;
-
-      // The server model. `applied` counts how many times each intent was
-      // executed; `appliedAt` is when the FIRST execution happened.
-      const applied = new Map<string, number>();
-      const appliedAt = new Map<string, number>();
-      const consumed = new WeakMap<FakeWS, number>();
-
-      const cli = connectCli<{ n: number }>("http://localhost:1/x", {
-        ackTimeoutMs: 0, // no ceiling: this suite is about settlement, not timeouts
-      });
-      const name = `chaos_${round}`;
-      const box = cell(name, {
-        state: { n: 0 },
-        methods: {
-          bump(s: { n: number }, by = 1) {
-            s.n += by;
-          },
-          // An ASYNC method, so this fuzzer can reach the executor-settled
-          // ack path — see the note in transport-exactly-once.test.ts.
-          async bumpAsync(s: { n: number }, by = 1) {
-            await Promise.resolve();
-            s.n += by;
-            return s.n;
-          },
-        },
-      }) as unknown as CellDef & {
-        bump: (by?: number) => Promise<unknown>;
-        bumpAsync: (by?: number) => Promise<unknown>;
-      };
-      cli.bind(box);
-      const calls: Call[] = [];
-
-      /** Drain what the live socket has written: apply, ack, or lose it. */
-      const serve = (ws: FakeWS) => {
-        const from = consumed.get(ws) ?? 0;
-        for (let i = from; i < ws.sent.length; i++) {
-          const f = dec(ws.sent[i]!);
-          if (f?.t !== "action") continue;
-          const d = f.d as { cid?: string };
-          if (!d.cid) continue;
-          if (chance(0.12)) {
-            log.push(`drop ${d.cid.slice(0, 4)}`);
-            seen.add("drop");
-            continue; // the frame never reached the server
-          }
-          applied.set(d.cid, (applied.get(d.cid) ?? 0) + 1);
-          if (!appliedAt.has(d.cid)) appliedAt.set(d.cid, now());
-          log.push(`apply ${d.cid.slice(0, 4)}`);
-          if (chance(0.75) && ws.readyState === FakeWS.OPEN) {
-            ws.deliver(enc("ack", { cid: d.cid, ok: true, value: 1 }));
-            seen.add("ack");
-          } else seen.add("lost-ack"); // applied, but the ack is lost
-        }
-        consumed.set(ws, ws.sent.length);
-      };
-
-      try {
-        for (let step = 0; step < STEPS; step++) {
-          const ws = FakeWS.live[FakeWS.live.length - 1];
-          if (ws && ws.readyState === FakeWS.CONNECTING) {
-            if (chance(0.6)) {
-              ws.open();
-              log.push("open");
-              seen.add("open");
-            } else if (chance(0.5)) {
-              // A connect attempt that never establishes (server still down).
-              // This is the interleaving that exposes the shipped bug: the
-              // close fires while the queue is NON-empty, so a client that
-              // rejects everything pending settles calls it is about to send.
-              ws.close();
-              log.push("failed-connect");
-              seen.add("failed-connect");
-            }
-          }
-          if (ws && ws.readyState === FakeWS.OPEN) serve(ws);
-          if (chance(0.45)) {
-            const cid = `call${calls.length}`;
-            // Half the calls take the ASYNC door, which settles through the
-            // executor rather than the reduce result — the path this fuzzer
-            // could not reach while every call was `bump` (audit a21/F1).
-            const useAsync = chance(0.5);
-            calls.push({
-              cid,
-              t: track(useAsync ? box.bumpAsync(1) : box.bump(1), now),
-            });
-            log.push(`call ${calls.length - 1}${useAsync ? " async" : ""}`);
-            seen.add(useAsync ? "call async" : "call sync");
-          }
-          if (ws && ws.readyState === FakeWS.OPEN && chance(0.3)) {
-            ws.close();
-            log.push("kill");
-            seen.add("kill");
-          }
-          await tick(2);
-        }
-
-        // Calm down: let the client reconnect and drain everything it still
-        // holds, so I1 is about hangs and not about the test giving up early.
-        // One round in four skips it: close() then meets calls nobody ever
-        // wrote, and those may only reject (I2's other half).
-        const calm = !chance(0.25);
-        if (!calm) {
-          // …one of them for certain: made with the socket down, so it is
-          // queued and never sent (not left to how the timers happened to
-          // fall — under load every call had been written by here).
-          const live = FakeWS.live[FakeWS.live.length - 1];
-          if (live && live.readyState === FakeWS.OPEN) live.close();
-          calls.push({
-            cid: `call${calls.length}`,
-            t: track(box.bump(1), now),
-          });
-          log.push("no calm-down, one last call offline");
-        }
-        for (let i = 0; calm && i < 60; i++) {
-          const ws = FakeWS.live[FakeWS.live.length - 1];
-          if (ws && ws.readyState === FakeWS.CONNECTING) ws.open();
-          if (ws && ws.readyState === FakeWS.OPEN) {
-            const from = consumed.get(ws) ?? 0;
-            for (let j = from; j < ws.sent.length; j++) {
-              const f = dec(ws.sent[j]!);
-              if (f?.t !== "action") continue;
-              const d = f.d as { cid?: string };
-              if (!d.cid) continue;
-              applied.set(d.cid, (applied.get(d.cid) ?? 0) + 1);
-              if (!appliedAt.has(d.cid)) appliedAt.set(d.cid, now());
-              ws.deliver(enc("ack", { cid: d.cid, ok: true, value: 1 }));
-            }
-            consumed.set(ws, ws.sent.length);
-          }
-          if (calls.every((c) => c.t.done)) break;
-          await tick(5);
-        }
-        // Anything still outstanding is settled by close() — which is honest
-        // only because close() also throws the queue away.
-        cli.close();
-        await tick(20);
-
-        const repro = `FUZZ_SEED=${SEED} round ${round}: ${log.join(" · ")}`;
-
-        // I1 — every promise settles.
-        for (const [i, c] of calls.entries()) {
-          assert(c.t.done, `call ${i} never settled — ${repro}`);
-        }
-        // The client owns the cids, so recover them from the wire. Frames go
-        // out in call order (the queue is FIFO), and a call is written at most
-        // once, so wireCids[i] belongs to calls[i]; any tail beyond
-        // wireCids.length are the calls close() discarded unsent.
-        const wireCids = FakeWS.live
-          .flatMap((w) => w.sent)
-          .map((l) => dec(l))
-          .filter((f) => f?.t === "action")
-          .map((f) => (f!.d as { cid: string }).cid);
-        assertEquals(
-          new Set(wireCids).size,
-          wireCids.length,
-          `the same intent was written to the wire twice — ${repro}`,
-        );
-        assert(
-          wireCids.length <= calls.length,
-          `more frames than intents — ${repro}`,
-        );
-        // I3 — one intent, at most one application.
-        for (const [cid, n] of applied) {
-          assert(n <= 1, `I3: cid ${cid} applied ${n}× — ${repro}`);
-        }
-        for (const [i, c] of calls.entries()) {
-          const cid = wireCids[i];
-          if (cid === undefined) {
-            seen.add("outcome: never written");
-            assert(
-              !c.t.ok,
-              `I2: call ${i} resolved without ever reaching the wire — ${repro}`,
-            );
-            continue;
-          }
-          if (c.t.ok) {
-            // I2 — a resolve means the server really ran it.
-            seen.add("outcome: resolved");
-            assertEquals(
-              applied.get(cid) ?? 0,
-              1,
-              `I2: resolved a call the server never applied — ${repro}`,
-            );
-          } else if (appliedAt.has(cid)) {
-            // I4 — a rejection is final: nothing may be applied after it.
-            seen.add("outcome: applied, then rejected");
-            assert(
-              appliedAt.get(cid)! < c.t.at,
-              `I4: cid ${cid} was applied AFTER its caller was told it ` +
-                `failed — one intent, a rejection AND an application — ${repro}`,
-            );
-          } else seen.add("outcome: rejected, never applied");
-        }
-      } finally {
-        try {
-          cli.close();
-        } catch { /* already closed */ }
-        restoreT();
-        restoreWS();
-      }
-    }
+    const { seen } = await chaos(SEED, ROUNDS, STEPS);
     // A schedule that stopped producing a fault, or an outcome an invariant
     // is about, checks nothing about it.
     if (ROUNDS >= 24 && STEPS >= 40) {
       assertEquals(KINDS.filter((k) => !seen.has(k)), [], "kinds never run");
     }
+  },
+});
+
+Deno.test({
+  name:
+    "chaos: a seed replays exactly — a loaded machine draws the same schedule",
+  async fn() {
+    const calm = await chaos(SEED, 4, STEPS);
+    const loaded = await chaos(SEED, 4, STEPS, 8);
+    assertEquals(loaded.logs, calm.logs);
   },
 });

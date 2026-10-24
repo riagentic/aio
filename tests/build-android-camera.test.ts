@@ -40,6 +40,8 @@ function manifestFor(camera: boolean | undefined): string {
     "{{ICON_ATTR}}": 'android:icon="@mipmap/ic_launcher"',
     "{{CLEARTEXT_ATTR}}": "",
     "{{CAMERA_PERMISSION}}": _cameraPermission(camera),
+    "{{DEEP_LINK_ATTR}}": "",
+    "{{DEEP_LINK_FILTERS}}": "",
   });
 }
 
@@ -113,6 +115,7 @@ Deno.test("android camera: the manifest and the WebView are ONE decider", () => 
       "{{TALKS_TO_SERVER}}": "false",
       "{{IS_CLIENT}}": "false",
       "{{CAMERA_DECLARED}}": String(camera),
+      "{{DEEP_LINKS}}": "false",
       "{{SPLASH}}": "null",
     });
     assertStringIncludes(kotlin, `CAMERA_DECLARED = ${camera}`);

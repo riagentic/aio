@@ -1815,6 +1815,7 @@ function staticCycles(
 }
 
 /** All import specifiers (static + dynamic) from transpiled JS output. */
+// aio-ok(dead-wiring): test convenience over extractImportsByKind, which the product calls
 export function extractImports(code: string): string[] {
   const { static: s, dynamic: d } = extractImportsByKind(code);
   return [...s, ...d];

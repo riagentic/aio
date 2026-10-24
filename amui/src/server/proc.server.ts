@@ -1043,6 +1043,47 @@ async function tailText(
   };
 }
 
+/** How far a stdout capture may trail the framework log and still be this
+ *  process's: both are written line by line together, so a gap means the
+ *  capture is a PREVIOUS run's (launched by another launcher, or by none). */
+const CAPTURE_SLACK_MS = 5_000;
+
+/** Combined-source order by FRESHNESS, not by name. There are three stdout
+ *  captures — `am start`'s `stdout.log`, amui's `.aio-amui-start.log`, the
+ *  legacy `.aio.log` — and whichever launcher started the CURRENT process
+ *  writes only its own. The fixed order read `stdout.log` first whenever it
+ *  existed, so an app `am start`ed once and restarted from amui showed the
+ *  dead process's output forever. Newest capture first; a capture older than
+ *  the framework log (an app now run from a terminal) goes behind it. */
+async function freshCaptureFirst(
+  paths: string[],
+  appId: string | null,
+  home: string | null,
+): Promise<string[]> {
+  const mtime = async (p: string) => {
+    try {
+      return (await Deno.stat(p)).mtime?.getTime() ?? 0;
+    } catch {
+      return 0; // absent — ranks last, and the read loop skips it
+    }
+  };
+  const fw = appId
+    ? join(appDirs(appId, home ?? undefined).logs, "app.log")
+    : null;
+  const fwTime = fw ? await mtime(fw) : 0;
+  const isCapture = (p: string) =>
+    p !== fw && !p.endsWith(join(".aio", "log", "app.log"));
+  const ranked = await Promise.all(
+    paths.map(async (p, i) => ({ p, i, t: await mtime(p) })),
+  );
+  const captures = ranked.filter((r) => isCapture(r.p) && r.t > 0)
+    .sort((a, b) => b.t - a.t || a.i - b.i);
+  const fresh = captures.filter((r) => r.t >= fwTime - CAPTURE_SLACK_MS);
+  const stale = captures.filter((r) => r.t < fwTime - CAPTURE_SLACK_MS);
+  const rest = ranked.filter((r) => !captures.includes(r));
+  return [...fresh, ...rest, ...stale].map((r) => r.p);
+}
+
 /** Tail an app's logs. `cwd` is the app's working dir (== project path for a
  *  dev app; the lock cwd for a running instance); `appId` (when known) unlocks
  *  the app's own log directory, under `home` (the running instance's data
@@ -1055,9 +1096,14 @@ export async function readLogs(
   appId: string | null = null,
   home: string | null = null,
 ): Promise<RawLog> {
-  for (const rel of logCandidates(source, appId, home)) {
-    // `own` candidates are already absolute; join() leaves those untouched.
-    const p = isAbsolute(rel) ? rel : join(cwd, rel);
+  // `own` candidates are already absolute; join() leaves those untouched.
+  let paths = logCandidates(source, appId, home).map((rel) =>
+    isAbsolute(rel) ? rel : join(cwd, rel)
+  );
+  if (source === "combined") {
+    paths = await freshCaptureFirst(paths, appId, home);
+  }
+  for (const p of paths) {
     let stat: Deno.FileInfo;
     try {
       stat = await Deno.stat(p);

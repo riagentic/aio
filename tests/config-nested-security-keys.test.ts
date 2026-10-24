@@ -27,6 +27,7 @@ import {
   NESTED_CONFIGS,
   VALID_AUTH_KEYS,
   VALID_FEATURES_CONFIG_KEYS,
+  VALID_SECURITY_KEYS,
   VALID_SESSIONS_KEYS,
   VALID_TLS_KEYS,
   VALID_UPDATES_KEYS,
@@ -146,4 +147,62 @@ Deno.test("every security block is reached by the ONE nested validator", () => {
   }
   assertEquals(NESTED_CONFIGS.tls!(), VALID_TLS_KEYS);
   assertEquals(NESTED_CONFIGS.sessions!(), VALID_SESSIONS_KEYS);
+});
+
+// `security` is a security block too: `{ hedaers: false }` kept the headers on
+// in silence, `{ cps: "strict" }` left the policy at "basic", and a one-word
+// `csp` that is not a mode (`"Strict"`) was sent VERBATIM as the policy — a
+// header naming no directive, so the page ran with no CSP at all.
+Deno.test("VALID_SECURITY_KEYS names every SecurityConfig field", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../src/server/security-config.ts", import.meta.url),
+  );
+  const fields = typeFields(src, "export interface SecurityConfig {");
+  assert(
+    fields.length >= 8,
+    `read only ${fields.length} SecurityConfig fields`,
+  );
+  assertEquals([...VALID_SECURITY_KEYS].sort(), fields.sort());
+  assertEquals(NESTED_CONFIGS.security!(), VALID_SECURITY_KEYS);
+});
+
+Deno.test("security: a misspelled key or a csp word that is no mode is WARNED, not refused", () => {
+  // They booted through 1.0.24, so they still boot (frozen surface) — loudly.
+  const cases: [Record<string, unknown>, string][] = [
+    [{ security: { hedaers: false } }, "headers"],
+    [{ security: { cps: "strict" } }, "csp"],
+    [{ security: { csp: "Strict" } }, '"strict"'],
+    [{ security: { csp: "stirct" } }, '"strict"'],
+  ];
+  for (const [cfg, near] of cases) {
+    const v = verdict(cfg);
+    assert(!v.refused, `${JSON.stringify(cfg)} must still boot — ${v.said}`);
+    assert(v.said.includes(near), `must name ${near} — ${v.said}`);
+  }
+});
+
+Deno.test("security: a one-word csp is still sent as given after the warning", async () => {
+  const { securityHeaders } = await import("../src/server/security-headers.ts");
+  const h = securityHeaders({ csp: "Strict" }, {});
+  assertEquals(h["Content-Security-Policy"], "Strict");
+});
+
+Deno.test("security: every documented spelling still boots", () => {
+  for (
+    const security of [
+      { csp: "basic" },
+      { csp: "strict", cspNonce: true },
+      { csp: "off" },
+      { csp: false },
+      { csp: "default-src 'self'" },
+      { csp: "sandbox" },
+      { csp: "upgrade-insecure-requests" },
+      { headers: false, frameOptions: false, compress: false },
+      { hsts: true, referrerPolicy: "no-referrer", permissionsPolicy: "x=()" },
+      { cspDirectives: { "base-uri": false } },
+    ]
+  ) {
+    const v = verdict({ security });
+    assert(!v.refused, `${JSON.stringify(security)} — ${v.said}`);
+  }
 });

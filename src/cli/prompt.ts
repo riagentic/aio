@@ -152,7 +152,11 @@ export async function password(
       }
       chunk = new Uint8Array(0);
       for (const ch of text) {
-        if (ch === "\x03") throw new InputClosedError(question); // ^C
+        // ^C, and ^D: raw mode turns the terminal's EOF key into a byte, so
+        // it was typed INTO the secret (`"\x04"` returned as the password).
+        if (ch === "\x03" || ch === "\x04") {
+          throw new InputClosedError(question);
+        }
         if (ch === "\x7f" || ch === "\b") value = value.slice(0, -1);
         else value += ch;
       }

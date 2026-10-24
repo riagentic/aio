@@ -20,17 +20,19 @@ while seam and hunter coverage stay obligatory.
 The run never takes the whole machine: on Linux every shard, and everything it
 spawns, is pinned off the first 4 cores (`taskset`) and niced; `check:release`
 runs every gate in the same fence. `AIO_TEST_FREE_CORES=N` keeps N cores free.
-Processes, not `deno test --parallel`: that shares `Deno.cwd()` and `Deno.env`
-between files, and dozens of tests change both. Each process gets its own
-`AIO_APPS_DIR` (`.aio-test-shards/<n>/.aio-test-home`) and its own per-user
-stores beside it (`.aio-test-shards/<n>/stores/`): `AIO_VERSIONS_DIR`,
-`AIO_FEEDBACK_DIR`, `AIO_INSTALL_ROOT` and an empty `AIO_HOME` — a test never
-provisions into the real `~/.local/lib/aio-versions` that every pinned app runs.
-A single-file `deno test` gets the same from the harness and from every
-`tempDir()`. The run snapshots the real version store and the install's worktree
-registry before the first shard and fails, naming the entry, if anything was
-added, changed or removed; `check:home-clean` also fails on a store entry whose
-worktree points into a test sandbox.
+`AIO_TEST_TRACE_LEAKS=1` runs every shard with `--trace-leaks`: a leak an
+earlier file of the shard left then names the stack that started it. Processes,
+not `deno test --parallel`: that shares `Deno.cwd()` and `Deno.env` between
+files, and dozens of tests change both. Each process gets its own `AIO_APPS_DIR`
+(`.aio-test-shards/<n>/.aio-test-home`) and its own per-user stores beside it
+(`.aio-test-shards/<n>/stores/`): `AIO_VERSIONS_DIR`, `AIO_FEEDBACK_DIR`,
+`AIO_INSTALL_ROOT` and an empty `AIO_HOME` — a test never provisions into the
+real `~/.local/lib/aio-versions` that every pinned app runs. A single-file
+`deno test` gets the same from the harness and from every `tempDir()`. The run
+snapshots the real version store and the install's worktree registry before the
+first shard and fails, naming the entry, if anything was added, changed or
+removed; `check:home-clean` also fails on a store entry whose worktree points
+into a test sandbox.
 
 `check:home-clean` also fails on a test-shaped install (`app-<8 hex>`,
 `e2e-<8 hex>`, `ver-probe-<8 hex>`) in `~/app`, `~/.local/bin`,
@@ -54,6 +56,28 @@ line and nothing else — for the person who removes them.
   what exposed a chmod the logger never awaited, an esbuild child that outlived
   `server.shutdown()`, and three sleep-based waits. Fix the wait, never
   serialize the file.
+
+## The real X driver (GPU lab)
+
+Every GUI test runs in Xephyr, a nested X server that draws in software: no aio
+window ever reaches the machine's real display driver there. The NVIDIA X driver
+crash (an aio window's frame at x = -10 took Xorg down) was invisible to all of
+them. `deno task test:gpu-lab` (`tests/gpu-lab-window-bounds.test.ts`) boots a
+real aio app from source as Electron on `scripts/gpu-lab.sh` — a second Xorg
+with the NVIDIA driver on an idle GPU, muffin as the window manager — from every
+saved window state that took the desktop down, framed and frameless, and records
+every window the X server sees (`scripts/x-blackbox.py`). It is red on any
+negative coordinate of a shown window and on any NVIDIA Xid. `release-check`
+runs it when the lab is up and says `SKIPPED` loudly when it is not.
+
+```sh
+scripts/gpu-lab.sh prep && sudo scripts/gpu-lab.sh up && scripts/gpu-lab.sh desk muffin
+deno task test:gpu-lab
+scripts/gpu-lab.sh down
+```
+
+To record a crash on a real desktop: `scripts/x-blackbox.sh` before, `stop`
+after; the last lines in `untracked/blackbox/latest/` are what X saw.
 
 ## Catalogue
 

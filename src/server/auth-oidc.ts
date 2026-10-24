@@ -21,6 +21,7 @@ import {
 import type { SessionStore } from "./sessions.ts";
 import type { AioUser } from "./aio-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { thrownText } from "../diagnostics/fmt.ts";
 export interface OidcConfig {
   /** Provider issuer URL, e.g. "https://accounts.google.com". */
   issuer: string;
@@ -40,6 +41,13 @@ export interface OidcConfig {
    *  closed, SSO accounts still auto-created (an SSO-only app that should not
    *  seed every identity by hand). Only a literal `true` opens it. */
   signup?: boolean;
+  /** The `redirect_uri` sent to the provider, VERBATIM — exactly what is
+   *  registered there, e.g. "https://app.example.com/__aio/auth/oidc/callback".
+   *  Default: derived from the request (`<scheme>://<host>/__aio/auth/oidc/
+   *  callback`, https behind a trusted TLS proxy). Set it to keep a URI the
+   *  provider already has, or when a proxy rewrites the path. It must reach
+   *  `/__aio/auth/oidc/callback`. Absolute http(s) URL, checked at boot. */
+  redirectUri?: string;
 }
 
 interface Discovery {
@@ -154,12 +162,14 @@ async function jwksKeys(
 }
 
 /** Test isolation — drop discovery/JWKS caches. */
+// aio-ok(dead-wiring): a test seam — only tests/ reach it, the product never does
 export function _resetOidcCaches(): void {
   _discovery.clear();
   _jwks.clear();
   _jwksReread.clear();
   _issuerMissingWarned.clear();
   _unverifiedEmailWarned.clear();
+  _proxyHttpsWarned.clear();
 }
 
 /** Verify an RS256 ID token against the issuer's JWKS. Returns claims. */
@@ -280,7 +290,8 @@ export interface OidcDeps {
   sessions: SessionStore;
   ttlMs?: number;
   cookie: (token: string) => string;
-  /** TLS active — mark the binder cookie Secure. */
+  /** The browser is on https (`servedOverHttps` in auth-flows.ts) — mark
+   *  the binder cookie Secure AND build the `redirect_uri` as https. */
   secure?: boolean;
   /** `auth.oidc.signup ?? auth.signup` — false means "admin-seeded users only", and the callback
    *  is an account-creating door like `POST /signup`: an identity with no
@@ -351,6 +362,46 @@ export const _safeReturnPath = (p: string | null): string => {
   return out;
 };
 
+/** The `redirect_uri` — the SAME at /start and at the token exchange, and on
+ *  the scheme the browser is on (`deps.secure`), not the one this socket
+ *  speaks: behind a TLS-terminating proxy the socket is http, and an http
+ *  `redirect_uri` is refused by the provider. */
+const callbackUri = (
+  u: URL,
+  deps: Pick<OidcDeps, "secure" | "cfg">,
+): string =>
+  deps.cfg.redirectUri ??
+    `${
+      deps.secure ? "https:" : u.protocol
+    }//${u.host}/__aio/auth/oidc/callback`;
+
+/** Callback URIs already announced — see `_warnProxyHttpsCallback`. */
+const _proxyHttpsWarned = new Set<string>();
+
+/** Said ONCE per callback URI: the https `redirect_uri` built from the
+ *  trusted proxy's `X-Forwarded-Proto`. Up to 1.0.24-beta this deployment sent
+ *  `http://…`, and a provider that has only that URI registered (Keycloak,
+ *  Authentik, Dex accept http) refuses the new one on ITS page, where the
+ *  app's log never sees it. */
+function _warnProxyHttpsCallback(u: URL, deps: OidcDeps, uri: string): void {
+  if (
+    deps.cfg.redirectUri !== undefined || !deps.secure ||
+    u.protocol !== "http:" || _proxyHttpsWarned.has(uri)
+  ) {
+    return;
+  }
+  _proxyHttpsWarned.add(uri);
+  log.warn(
+    "auth",
+    `oidc redirect_uri is ${uri} — https, because the trusted proxy says ` +
+      `the browser is on https (X-Forwarded-Proto). Register exactly this ` +
+      `URI with the provider (client "${deps.cfg.clientId}"); one that has ` +
+      `only the http:// form registered refuses the login on its own page. ` +
+      `To keep the URI the provider already has, set auth.oidc.redirectUri ` +
+      `to it (used verbatim).`,
+  );
+}
+
 export async function oidcStart(
   req: Request,
   deps: OidcDeps,
@@ -387,7 +438,8 @@ export async function oidcStart(
       n: nonce,
     }),
   );
-  const redirectUri = `${self.origin}/__aio/auth/oidc/callback`;
+  const redirectUri = callbackUri(self, deps);
+  _warnProxyHttpsCallback(self, deps, redirectUri);
   const auth = new URL(d.authorization_endpoint);
   auth.searchParams.set("response_type", "code");
   auth.searchParams.set("client_id", deps.cfg.clientId);
@@ -433,7 +485,7 @@ export async function oidcCallback(
   }
 
   const d = await discover(deps.cfg.issuer);
-  const redirectUri = `${url.origin}/__aio/auth/oidc/callback`;
+  const redirectUri = callbackUri(url, deps);
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
@@ -562,7 +614,9 @@ export async function oidcCallback(
       role = deps.cfg.role?.(emailVerified ? claims : rest) ?? "user";
     } catch (e) {
       log.warn(
-        `[aio] auth: oidc login refused for "${id}" — auth.oidc.role threw: ${e}` +
+        `[aio] auth: oidc login refused for "${id}" — auth.oidc.role threw: ${
+          thrownText(e)
+        }` +
           (claimedEmail !== undefined && !emailVerified
             ? ` (claims.email was removed because the provider did not ` +
               `verify it)`

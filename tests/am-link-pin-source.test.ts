@@ -140,4 +140,9 @@ Deno.test("am fix --dry-run: a path-pinned link is already right, not 'would-fix
     "ok",
     `dep/aio already points at the pinned checkout: ${JSON.stringify(link)}`,
   );
+  // …and the pin line names where that pin LIVES: deno.json holds no
+  // aioVersion here, so "(deno.json aioVersion)" sent the reader to a file
+  // without one.
+  const pin = doc.results.find((r) => r.name === "aio version pin")!;
+  assertEquals(pin?.note, `path:${checkout} (${LOCAL_PIN_FILE})`);
 });

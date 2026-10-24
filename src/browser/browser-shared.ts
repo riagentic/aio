@@ -32,6 +32,8 @@ export { schedule } from "../state/schedule.ts";
 // effect creators plus a Map, no Deno API, nothing to gain from a second copy.
 export { own } from "../state/own.ts";
 export { notify } from "../state/notify.ts";
+export { appIcon } from "../state/app-icon.ts";
+import { applyAppIcon } from "./app-icon-client.ts";
 import type { NotifyOptions } from "../state/notify.ts";
 import { showDesktopNotification } from "./desktop-notify.ts";
 // Static, not `import()`: a dynamic import of it made the bundler wrap the
@@ -265,6 +267,10 @@ export function handleControlFrame(
       // this client to show. Shared by the WebSocket and IPC transports, like
       // every other control frame here.
       showDesktopNotification(f.d as NotifyOptions);
+      return true;
+    case "icon":
+      // The app's icon/tooltip a method changed (`s.$do(appIcon(...))`).
+      applyAppIcon(f.d);
       return true;
     case "proto": {
       const theirs = parseProtoHello(f.d);

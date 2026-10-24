@@ -207,7 +207,7 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
   await Deno.mkdir(www, { recursive: true });
   await _writeConnectPage(
     www,
-    plistText(appName),
+    appName,
     cfg.bakedServer,
     "ios",
     cfg.strictPin,

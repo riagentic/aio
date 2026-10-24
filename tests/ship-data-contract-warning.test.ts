@@ -10,6 +10,7 @@
 // print the count — but a repo with two apps must call `shipApp()` directly
 // (the fleet builder reads one `entry`), and the function said nothing. The
 // count was in the wrapper, not in the thing that builds the manifest.
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { unpublishableReason } from "../src/server/app-version.ts";
 import { fromFileUrl } from "@std/path";
@@ -91,5 +92,43 @@ Deno.test("a persisting app prints its cell count beside the contract", async ()
     );
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("the persisting-cells count is the APP's: aio's own updates cell is not one to version", async () => {
+  // `am publish` of a one-cell app with updates on said "the data contract
+  // declares 0 cells, but this build persists 2" — and asked the author to
+  // give a `version` to `updates`, a cell they do not own.
+  const dir = await tempDir("aio-contract-");
+  try {
+    const mod = new URL("../mod.ts", import.meta.url).href;
+    await Deno.writeTextFile(
+      `${dir}/app.ts`,
+      `import { aio, cell } from ${JSON.stringify(mod)};\n` +
+        `import "${new URL("../src/updates.ts", import.meta.url).href}";\n` +
+        `const notes = cell("notes", { state: { items: [] }, methods: {} });\n` +
+        `await aio.run({ cells: [notes], updates: { source: ` +
+        `${JSON.stringify(`file://${dir}/releases`)}, check: false } });\n`,
+    );
+    const out = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "-A",
+        "--config",
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
+        `${dir}/app.ts`,
+        "--aio-data-contract",
+      ],
+      cwd: dir,
+      env: { AIO_APPS_DIR: `${dir}/apps` },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const stderr = new TextDecoder().decode(out.stderr);
+    const m = /^\[aio\] persisting-cells: (\d+)$/m.exec(stderr);
+    assert(m, `no persisting-cells marker on stderr:\n${stderr.slice(-600)}`);
+    assertEquals(m[1], "1", "notes only — updates is aio's own");
+  } finally {
+    await dropTempDir(dir);
   }
 });

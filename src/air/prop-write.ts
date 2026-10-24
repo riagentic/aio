@@ -530,10 +530,11 @@ export function _controlDrifted(
   // string ("abc", "1e") is still drift — the state has a value and the
   // element does not show it.
   const type = (el as { type?: string }).type;
-  if (
-    el.tagName === "INPUT" && (type === "number" || type === "range") &&
-    have !== "" && want !== ""
-  ) {
+  if (el.tagName === "INPUT" && (type === "number" || type === "range")) {
+    // NaN is what an EMPTY number field means (`valueAsNumber`), and writing
+    // it shows "" — not drift, or every cleared numeric field re-wrote itself.
+    if (want === "NaN") return have !== "";
+    if (have === "" || want === "") return true;
     const a = Number(have);
     return !(Number.isFinite(a) && a === Number(want));
   }
@@ -583,7 +584,13 @@ type Echo = {
   /** `pendingStarted()` when the newest keystroke's event began, until its
    *  dispatch is over (see `_closeKeystroke`). */
   open?: number;
+  /** `Date.now()` at the newest keystroke. */
+  at?: number;
 };
+
+/** How long a field typed into with no call started keeps the typed text
+ *  against a re-assert of its UNCHANGED prop — control-drift's grace. */
+const _TYPED_GRACE_MS = 1000;
 // PER PROPERTY, not one ring per element. A `<input type="checkbox">` carries
 // both `value` and `checked`, and one shared ring keyed by whichever property
 // asked first collided their fingerprints: `_echoKey("checked", true)` is the
@@ -631,6 +638,7 @@ function _echoRing(el: EchoEl, k: string): Echo {
     r.open = pendingStarted();
     _openRings(el).add(r);
     r.started = pendingStarted();
+    r.at = Date.now();
     r.vals.push(_echoKey(k, (el as unknown as Record<string, unknown>)[k]));
     if (r.vals.length > _ECHO_RING) r.vals.shift();
     r.live = true;
@@ -698,6 +706,16 @@ function _staleEcho(el: EchoEl, k: string, v: unknown): boolean {
     }
     if (i < 0 && key === r.base) return true;
   }
+  // A handler that stores LATER (a debounce, a draft variable): its keystrokes
+  // started no call, and an unrelated render re-asserting the UNCHANGED prop
+  // (`key === r.shown`) used to eat what was typed. Kept for the grace; a
+  // changed prop, the handler's own same-task answer, or a late render still
+  // wins.
+  if (
+    k === "value" && focused && !r.live && r.vals.length && !r.mine.length &&
+    key === r.shown &&
+    Date.now() - (r.at ?? 0) < _TYPED_GRACE_MS
+  ) return true;
   if (r.live || !focused || i < 0 || i === r.vals.length - 1) {
     r.vals.length = 0;
     r.base = undefined;

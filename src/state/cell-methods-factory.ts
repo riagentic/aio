@@ -50,6 +50,22 @@ import { refuseRetired, removalOf } from "./removals-core.ts";
  *  hint it reset is gone with the flip it announced (alpha57). */
 export function _resetTransactionHints(): void {}
 
+/** Cell id → method → parameters it DECLARES after `s` (defaults counted;
+ *  `null` = a rest parameter, any count). Read by a door that receives
+ *  arguments as data (`am dispatch`) to say when a call passes more than the
+ *  method can take — `methodArity` is required-only and cannot. Latest
+ *  definition of an id wins, as in the cell registry. */
+const _declaredArgs = new Map<string, Record<string, number | null>>();
+
+/** What {@link _declaredArgs} holds for `cell:method`; `undefined` = unknown. */
+export function declaredMethodArgs(
+  cell: string,
+  method: string,
+): number | null | undefined {
+  const m = _declaredArgs.get(cell);
+  return m && Object.hasOwn(m, method) ? m[method] : undefined;
+}
+
 export function createCellFromMethods<
   N extends string,
   S extends Record<string, unknown>,
@@ -70,6 +86,15 @@ export function createCellFromMethods<
   const methods = (config.methods ?? {}) as Record<string, Method<S>>;
   const methodNames = Object.keys(methods);
   const selectorNames = Object.keys(config.selectors ?? {});
+  _declaredArgs.set(
+    prefix,
+    Object.fromEntries(
+      methodNames.map((k) => [
+        k,
+        declaredArgCount(methods[k] as (...a: never[]) => unknown),
+      ]),
+    ),
+  );
 
   // Validate names against reserved keys — fail fast with clear message
   checkReservedKeys(name, methodNames, "method");

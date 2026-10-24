@@ -25,7 +25,7 @@ fundamentally different, use the right tool:
 
 | If you need...                               | Use instead                           |
 | -------------------------------------------- | ------------------------------------- |
-| Server-side rendering (SSR)                  | Fresh, Next.js, Astro                 |
+| Server-rendered, SEO-first pages             | Fresh, Next.js, Astro                 |
 | Server components / streaming HTML           | Next.js, Remix                        |
 | Native mobile performance                    | React Native, Flutter                 |
 | Multi-region distributed state               | ElectricSQL, CRDTs, custom clustering |
@@ -131,10 +131,14 @@ responsibility.
 
 ---
 
-### Why no built-in form validation hook?
+### Form validation — `useForm` or a method?
 
-Validation is state mutation — errors need to be in state so the UI can render
-them. Methods handle this naturally:
+Both exist, for different jobs. Field-by-field form UX (touched, errors per
+field, "refuse to submit until valid") is `useForm` from `aio/air` —
+[forms](../ui/air-forms.md), and
+[cookbook #3](cookbook.md#3-a-form-that-refuses-to-submit-until-it-is-valid).
+Validation the SERVER must enforce is state mutation — errors need to be in
+state so every client can render them, and a method handles it naturally:
 
 ```ts
 methods: {
@@ -148,9 +152,9 @@ methods: {
 }
 ```
 
-No dedicated form-validation hook needed — it would just be another place to
-look. (The cell-level `validate` config guards state invariants, not form UX.)
-See [Methods](../state/methods.md) for form state patterns.
+A browser-side check is a convenience; the method is the rule. (The cell-level
+`validate` config guards state invariants, not form UX.) See
+[Methods](../state/methods.md) for form state patterns.
 
 ---
 

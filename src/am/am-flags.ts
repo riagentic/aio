@@ -96,7 +96,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // "every gated verb refuses --zzz" and "every verb appears" — neither can
   // see a flag the COMMAND implements and the table omits. That direction is
   // gated now too (tests/am-help-flags-are-accepted.test.ts).
-  state: ["--watch", "--offline"],
+  state: ["--watch", "--offline", "--prod"],
   expect: [],
   record: ["--from"],
   timeline: ["--from"],
@@ -176,7 +176,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   heap: [],
   // Does the client graph BUILD? `deno check` cannot answer this.
   check: [],
-  migrate: ["--from"],
+  migrate: ["--from", "--tests"],
   testgen: ["--out", "--entry"],
   preview: ["--export", "--props"],
   // Where findings about aio go — outside the version store.
@@ -321,7 +321,7 @@ export function unknownFlags(
  *  The flags listed here are the ones whose meaning belongs to particular
  *  verbs. Not listed (and so still accepted everywhere) are the flags that
  *  really are cross-cutting (`--app --port --home --json --quiet --help
- *  --wait --timeout --client-index --entry --force`) and the two that
+ *  --timeout --client-index --entry --force`) and the two that
  *  steer a LAUNCH (`--no-wait --transport`), which a stop-then-start script
  *  passes to its whole sequence. PASSTHROUGH verbs are never judged. */
 export const SCOPED_GLOBAL_FLAGS: Readonly<Record<string, readonly string[]>> =
@@ -339,6 +339,17 @@ export const SCOPED_GLOBAL_FLAGS: Readonly<Record<string, readonly string[]>> =
     "--body": ["dispatch"],
     "--args": ["dispatch"],
     "--data": ["remove", "publish"],
+    // start/restart/watch are PASSTHROUGH (never judged) but read it too, so
+    // the warning names them as readers.
+    "--wait": [
+      "start",
+      "stop",
+      "restart",
+      "watch",
+      "state",
+      "expect",
+      "dispatch",
+    ],
   };
 
 /** The warning for a global flag this verb does not read, or null. Pure — the

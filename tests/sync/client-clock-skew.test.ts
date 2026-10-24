@@ -554,7 +554,7 @@ Deno.test("clock skew: a frame answered across a suspend is not taken as an offs
   }
 });
 
-Deno.test("clock skew: a stale refusal carries the server's time, so the next edit is not refused", async () => {
+Deno.test("clock skew: a stale refusal carries the server's time — the refused edit is made again with it, and the next one is not refused", async () => {
   const cap = captureWarns();
   const rejected: string[] = [];
   const net = createNet({
@@ -568,14 +568,21 @@ Deno.test("clock skew: a stale refusal carries the server's time, so the next ed
       now: () => Date.now() - 25 * HOUR,
     });
     // No catch-up first: the edit is stamped 25 h old and refused as stale.
+    // Sent once by this session — so never applied: it is made again on the
+    // server's time (tests/sync/stale-own-op-reissued.test.ts), not dropped.
     await pi.engine.handleLocalAction(CELL, "set", { v: "first" });
     await net.pump();
-    assertEquals(rejected.length, 1);
-    assert(rejected[0]!.startsWith(STALE_OP_REASON), rejected[0]);
+    assertEquals(rejected, [], "re-issued, not lost");
+    assertEquals(net.live(), { v: "first" });
     await pi.engine.handleLocalAction(CELL, "set", { v: "next" });
     await net.pump();
-    assertEquals(rejected.length, 1, rejected.join(" | "));
+    assertEquals(rejected, [], rejected.join(" | "));
     assertEquals(net.live(), { v: "next" });
+    const stamps = ops(pi.sentLog).map((f) => f.d.hlc[0] as number);
+    assert(
+      Date.now() - stamps.at(-2)! < HOUR,
+      "the re-issued edit carries the server's time",
+    );
   } finally {
     cap.restore();
     await net.close();

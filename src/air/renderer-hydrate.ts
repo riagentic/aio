@@ -138,6 +138,11 @@ function _write(op: () => void): void {
   else op();
 }
 
+/** A portal throw waiting for its boundary to finish claiming (see the Portal
+ *  branch of `_hydrateNode`), and whether a boundary is open to take it. */
+let _portalThrow: { thrown: unknown } | null = null;
+let _inBoundary = false;
+
 /** Record the inverse of a structural change made inside an attempt. */
 function _undoable(undo: () => void): void {
   _attempt?.undo.push(undo);
@@ -427,7 +432,19 @@ function _hydrateNodeInner(
   // portal on a hydrated page empty forever: the modal/toast/menu of an
   // SSR'd app never appeared, and nothing said why.
   if (vnode.tag === Portal) {
-    createDom(vnode, ctx, isSvg, parent);
+    try {
+      createDom(vnode, ctx, isSvg, parent);
+    } catch (thrown) {
+      // SSR skips a Portal, so this throw is the CLIENT's alone and the
+      // server's markup around it is the boundary's CONTENT. Deferred to the
+      // boundary: its other children still claim their server nodes, so it
+      // knows exactly which region its fallback replaces — instead of
+      // hydrating the fallback against the content, missing, and discarding
+      // the whole server page.
+      if (!_inBoundary) throw thrown;
+      _portalThrow ??= { thrown };
+      return 0;
+    }
     if (vnode._anchor) _portalAnchors.add(vnode._anchor as Node);
     return 0;
   }
@@ -453,11 +470,23 @@ function _hydrateNodeInner(
     // recovered from a server-rendered fallback and never caught a throw that
     // started after hydration — the subtree silently stopped updating.
     if (isBoundary) _boundaryStack.push(vnode);
+    const outerPortalThrow = _portalThrow, outerInBoundary = _inBoundary;
+    _portalThrow = null;
+    if (!isFragment) _inBoundary = true;
+    /** The server nodes the boundary's content occupies — known when the
+     *  throw was a portal's (deferred until every sibling claimed). */
+    let region = -1;
     try {
       for (const child of vnode.children) {
         const consumed = _hydrateNode(parent, child, ctx, isSvg, idx);
         if (consumed < 0) return -1;
         idx += consumed;
+      }
+      if (!isFragment && _portalThrow) {
+        const { thrown } = _portalThrow;
+        _portalThrow = null;
+        region = idx - childIndex;
+        throw thrown;
       }
       if (mine) {
         _attempt = outer;
@@ -502,6 +531,26 @@ function _hydrateNodeInner(
         // comment for — see `_fallbackSlot`.
         const fb = _fallbackSlot(shown);
         vnode._rendered = fb;
+        if (region >= 0) {
+          // A portal threw (client only): the server wrote the CONTENT, so the
+          // fallback is built and replaces exactly that region — the rest of
+          // the page stays the server's.
+          const old = [...parent.childNodes].slice(
+            childIndex,
+            childIndex + region,
+          );
+          const before = parent.childNodes.length;
+          const built = createDom(fb, ctx, isSvg, parent);
+          const at = parent.childNodes[childIndex] ?? null;
+          if (built) parent.insertBefore(built, at);
+          for (const n of old) n.remove();
+          _undoable(() => {
+            for (const n of old) parent.insertBefore(n, at);
+            if (built) (built as ChildNode).remove?.();
+          });
+          vnode._dom = getDom(fb) ?? parent.childNodes[childIndex] ?? undefined;
+          return parent.childNodes.length - before + region;
+        }
         const n = _hydrateNode(parent, fb, ctx, isSvg, childIndex);
         if (n >= 0) {
           vnode._dom = getDom(fb) ?? parent.childNodes[childIndex] ?? undefined;
@@ -524,6 +573,8 @@ function _hydrateNodeInner(
       throw thrown;
     } finally {
       _attempt = outer;
+      _portalThrow = outerPortalThrow;
+      _inBoundary = outerInBoundary;
       if (isBoundary) _boundaryStack.pop();
     }
     // A Fragment inside an attempt that missed has no position left to claim.
@@ -676,6 +727,8 @@ const _splitTails = new WeakSet<Node>();
 function _dropSplitTail(parent: Node, idx: number): void {
   const tail = parent.childNodes[idx];
   if (tail && _splitTails.has(tail)) {
+    const was = (tail as Text).data;
+    _write(() => _textDiverged(parent, was, ""));
     const next = tail.nextSibling;
     parent.removeChild(tail);
     _undoable(() => parent.insertBefore(tail, next));
@@ -790,10 +843,44 @@ function _hydrateText(
         _splitTails.delete(tail);
       });
     } else {
+      // The canonical hydration mismatch — a `Date`, a random id, a
+      // `window`-dependent string rendered differently on the two sides —
+      // was repaired in SILENCE, while a differing attribute warns. Same
+      // divergence, same channel. What the HTML parser itself rewrites (CRLF
+      // and lone CR become LF, NUL is dropped) is not a divergence.
+      // Said once the claim stands: an attempt (a boundary's children) that
+      // falls back to the server's fallback never claimed anything.
+      if (have !== _parsedText(want)) {
+        _write(() => _textDiverged(parent, have, want));
+      }
       _write(() => text.textContent = want);
     }
   }
   return text;
+}
+
+/** Say that server text and the component's disagree — the canonical
+ *  hydration mismatch (a `Date`, a random id, a `window`-dependent string).
+ *  It was repaired in SILENCE while a differing attribute warns: same
+ *  divergence, same channel. The texts are named in dev only. */
+function _textDiverged(parent: Node, have: string, want: string): void {
+  const tag = (parent as Element).tagName?.toLowerCase() ?? "#fragment";
+  _wrong(
+    "hydrate-text",
+    `hydrate() found text in <${tag}> that disagrees with the component — ` +
+      `repaired to what the component says.`,
+    ` Server: ${JSON.stringify(have.slice(0, 60))}, client: ${
+      JSON.stringify(want.slice(0, 60))
+    }. Server and client rendered different text (Date/random/window in ` +
+      `render, or an environment difference).`,
+  );
+}
+
+/** `s` as the HTML parser hands it back from markup: CRLF and a lone CR are
+ *  LF, and NUL is dropped. */
+function _parsedText(s: string): string {
+  // deno-lint-ignore no-control-regex
+  return s.replace(/\r\n?/g, "\n").replace(/\u0000/g, "");
 }
 
 /** One scratch element per document, reused by `_canonStyle`. Dev-only path. */

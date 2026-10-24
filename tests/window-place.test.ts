@@ -13,6 +13,7 @@ import {
   type Bounds,
   boundsFromState,
   centredOn,
+  EDGE_MARGIN,
   type Rect,
   splashOrigin,
   windowRect,
@@ -108,8 +109,9 @@ Deno.test("window place: the owner's layout — saved window on DP-2 opens there
   assertEquals(rule(CASES[0]!), { x: 636, y: 624, width: 1296, height: 939 });
   // 800×600 centred on DP-2's work area.
   assertEquals(rule(CASES[1]!), { x: 880, y: 812, width: 800, height: 600 });
-  // Gone: moved into DP-2, the screen it overlaps most (here none: the first).
-  assertEquals(rule(CASES[3]!), { x: 1560, y: 900, width: 1000, height: 800 });
+  // Gone: moved into DP-2, the screen it overlaps most (here none: the first),
+  // EDGE_MARGIN (64) inside its right edge.
+  assertEquals(rule(CASES[3]!), { x: 1496, y: 900, width: 1000, height: 800 });
 });
 
 Deno.test("window place: the Electron main script runs the rule's own source — same rectangle on every case, in both shells", () => {
@@ -353,6 +355,181 @@ Deno.test("window place: the splash centres on the window's rectangle, on its sc
       }),
       centredOn(r, 480, 300),
       c.name,
+    );
+  }
+});
+
+// ── the edge margin: nothing aio places reaches a screen edge ─────────────
+// feedback/critical.md: a window placed at x = 0 gets its window-manager
+// frame at x = -10 (muffin) or grows its own shadow to x = -16 (frameless
+// Electron); an NVIDIA X driver faults on that and can take the desktop
+// down. These make an off-screen or non-integer rect unshippable.
+
+/** Every rect the rule returns lies the margin inside its screen, in whole
+ *  pixels, at least 1×1. */
+function assertInside(r: Rect & { screen: Rect }, what: string) {
+  const s = r.screen;
+  const mx = Math.min(EDGE_MARGIN, Math.floor(s.width / 8));
+  const my = Math.min(EDGE_MARGIN, Math.floor(s.height / 8));
+  for (const v of [r.x, r.y, r.width, r.height]) {
+    assert(
+      Number.isInteger(v),
+      `${what}: ${JSON.stringify(r)} has a non-integer`,
+    );
+  }
+  assert(r.width >= 1 && r.height >= 1, `${what}: empty ${JSON.stringify(r)}`);
+  assert(
+    r.x >= s.x + mx && r.y >= s.y + my &&
+      r.x + r.width <= s.x + s.width - mx &&
+      r.y + r.height <= s.y + s.height - my,
+    `${what}: ${JSON.stringify(r)} is not ${mx}/${my} px inside ${
+      JSON.stringify(s)
+    }`,
+  );
+}
+
+Deno.test("window place: EDGE_MARGIN is the literal the emitted functions carry", () => {
+  assertEquals(EDGE_MARGIN, 64);
+  for (const fn of [windowRect, centredOn]) {
+    assertStringIncludes(
+      fn.toString(),
+      `Math.min(${EDGE_MARGIN}, Math.floor(s.width / 8))`,
+    );
+    assertStringIncludes(
+      fn.toString(),
+      `Math.min(${EDGE_MARGIN}, Math.floor(s.height / 8))`,
+    );
+  }
+});
+
+Deno.test("window place: the field states that took the desktop down open inside the margin, maximized", () => {
+  // A work area under a desktop panel, and the states three apps had saved
+  // when they took the desktop down (x = 0, the whole work area).
+  const wa = { x: 0, y: 518, width: 2560, height: 1368 };
+  const screens = [wa, { x: 2560, y: 0, width: 1440, height: 2560 }];
+  for (
+    const state of [
+      '{"x":0,"y":518,"width":2560,"height":1368,"declaredWidth":1000,"declaredHeight":780}',
+      '{"x":0,"y":518,"width":2560,"height":1368,"declaredWidth":1200,"declaredHeight":820,"maximized":true}',
+      '{"x":-10,"y":473,"width":2580,"height":1413,"declaredWidth":800,"declaredHeight":600}',
+    ]
+  ) {
+    const d = JSON.parse(state);
+    const r = windowRect(
+      boundsFromState(state, d.declaredWidth, d.declaredHeight),
+      screens,
+      wa,
+    );
+    assertInside(r, state);
+    assertEquals({ x: r.x, y: r.y }, { x: 64, y: 582 }, state);
+    assert(
+      r.fills,
+      `${state}: a window as big as the work area opens maximized`,
+    );
+  }
+  // An ordinary window is not maximized.
+  assertEquals(
+    windowRect({ width: 800, height: 600 }, screens, wa).fills,
+    false,
+  );
+});
+
+Deno.test("window place: randomized — any input (NaN, Infinity, negative, huge, fractional, odd screens) gives a whole rect inside the margin", () => {
+  let seed = 0x2545f491;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) >>> 0) / 2 ** 32;
+  const pick = <T>(a: T[]) => a[Math.floor(rnd() * a.length)]!;
+  const weird = () =>
+    pick([
+      NaN,
+      Infinity,
+      -Infinity,
+      0,
+      -1,
+      -10,
+      0.5,
+      1e9,
+      -1e9,
+      1e-9,
+      Math.round(rnd() * 5000) - 1000,
+      rnd() * 3000,
+    ]);
+  const screen = (): Rect => ({
+    x: pick([0, -1920, 1920, 2560, Math.round(rnd() * 4000) - 2000]),
+    y: pick([0, -1080, 392, 518, Math.round(rnd() * 3000) - 1000]),
+    width: pick([
+      1,
+      7,
+      64,
+      200,
+      800,
+      1366,
+      1440,
+      2560,
+      3840,
+      Math.ceil(rnd() * 5000),
+    ]),
+    height: pick([
+      1,
+      7,
+      64,
+      200,
+      768,
+      1080,
+      1440,
+      2560,
+      Math.ceil(rnd() * 5000),
+    ]),
+  });
+  for (let i = 0; i < 20000; i++) {
+    const screens = Array.from({ length: Math.floor(rnd() * 3) }, screen);
+    const primary = screens[0] ?? screen();
+    const b = {
+      width: weird(),
+      height: weird(),
+      x: rnd() < 0.2 ? undefined : weird(),
+      y: weird(),
+    };
+    const r = windowRect(b as never, screens, primary);
+    assertInside(r, `#${i} ${JSON.stringify(b)}`);
+    if (r.screen.width >= 16 && r.screen.height >= 16) {
+      const w = 1 + Math.floor(rnd() * 600), h = 1 + Math.floor(rnd() * 300);
+      const o = centredOn(r, w, h);
+      const s = r.screen;
+      const mx = Math.min(EDGE_MARGIN, Math.floor(s.width / 8));
+      const my = Math.min(EDGE_MARGIN, Math.floor(s.height / 8));
+      assert(
+        Number.isInteger(o.x) && Number.isInteger(o.y),
+        `#${i} centredOn ${JSON.stringify(o)}`,
+      );
+      assert(
+        o.x >= s.x + mx && o.y >= s.y + my,
+        `#${i} centredOn ${JSON.stringify(o)} left/above the margin`,
+      );
+      if (w <= s.width - 2 * mx) {
+        assert(o.x + w <= s.x + s.width - mx, `#${i} centredOn right`);
+      }
+      if (h <= s.height - 2 * my) {
+        assert(o.y + h <= s.y + s.height - my, `#${i} centredOn below`);
+      }
+    }
+  }
+});
+
+Deno.test("window place: window-state.json is written to a temp file and renamed — a crash never leaves it empty", () => {
+  for (
+    const src of [
+      electronMainScript("http://127.0.0.1:1/", { title: "x" }),
+      electronMainScriptUDS("http://127.0.0.1:1/", "/tmp/x.sock", {
+        meta: { title: "x" },
+      }),
+    ]
+  ) {
+    const a = src.indexOf("function saveBounds(win)");
+    const body = src.slice(a, src.indexOf("\n}", a));
+    assert(/rename(Sync)?\(tmp, stateFile\)/.test(body), body);
+    assert(
+      !/writeFile(Sync)?\(stateFile/.test(body),
+      `writes the state in place:\n${body}`,
     );
   }
 });

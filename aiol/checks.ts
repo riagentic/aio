@@ -1033,7 +1033,7 @@ export const checkPerformance: Checker = (ctx) => {
   const isAppSurface = (f: typeof sourceFiles[number]) => {
     if (f.ext === ".tsx") return true; // a component
     const code = codeText(f.content);
-    return /\bcell\s*\(\s*['"`]/.test(code) ||
+    return /(?<!\.\s*)(?<![\w$])cell\s*\(\s*['"`]/.test(code) ||
       /\baio\s*\.\s*run\s*\(/.test(code);
   };
   // The path rule wins over the content heuristic: a benchmark that defines a
@@ -1284,8 +1284,10 @@ export const checkUI: Checker = (ctx) => {
   // multi-line body, and none of that is knowable from source — so anything
   // ambiguous is left alone. A lint that cries wolf is one people learn to
   // pass with `|| true`, and then the true positives go with it.
+  // `name` and `data-testid` too: the surface names a control by them
+  // (`src/air/ui-surface.ts`), so `<input name="email" />` HAS a path.
   const NAMED_ATTR =
-    /\b(?:aria-label|aria-labelledby|title|t|placeholder|alt)\s*=/;
+    /(?<![\w-])(?:aria-label|aria-labelledby|title|t|placeholder|alt|name|data-testid)\s*=/;
   const EMPTY_INTERACTIVE =
     /<(button|select|textarea)([^>]*)>\s*<\/\1>|<(input)([^>]*?)\/?>/;
   for (const file of tsxFiles) {
@@ -1294,7 +1296,20 @@ export const checkUI: Checker = (ctx) => {
     // or a regex literal is not an element. `codeText` blanks those bodies
     // and keeps every line where it was, so the raw lines still serve the
     // marker check and the report.
-    const code = codeText(file.content).split("\n");
+    const text = codeText(file.content);
+    const code = text.split("\n");
+    // A control inside a wrapping `<label>` is named by the label's text (the
+    // surface reads it the way HTML associates it) — open minus closed
+    // `<label>` tags before the control says whether one encloses it.
+    const lineAt: number[] = [];
+    for (let i = 0, o = 0; i < code.length; o += code[i]!.length + 1, i++) {
+      lineAt.push(o);
+    }
+    const inLabel = (at: number): boolean => {
+      const before = text.slice(0, at);
+      return (before.match(/<label\b/g)?.length ?? 0) >
+        (before.match(/<\/label\s*>/g)?.length ?? 0);
+    };
     for (let i = 0; i < lines.length; i++) {
       const line = code[i] ?? "";
       const m = EMPTY_INTERACTIVE.exec(line);
@@ -1310,6 +1325,7 @@ export const checkUI: Checker = (ctx) => {
       // cannot see. Treated as named — a false NEGATIVE is cheap here and a
       // false positive is not.
       if (tag === "input" && /\bid\s*=/.test(attrs)) continue;
+      if (inLabel(lineAt[i]! + m.index!)) continue;
       // A HIDDEN input is not interactive and needs no accessible name — the
       // claim ("has no accessible name") is meaningless for it, and every form
       // with a CSRF field would carry a warning it can only suppress. Read the
@@ -1628,16 +1644,22 @@ export const checkUI: Checker = (ctx) => {
       report(
         "error",
         "ui",
-        `${file.relative}:${lineIdx} — ${m[0]} is server-only but this file ${
-          isCellFile
-            ? "contains a cell() definition shared with the browser bundle"
-            : "is compiled into the browser bundle"
-        }, where the \`Deno\` global does not exist — the client throws \`Deno is not defined\` at first render`,
+        isCellFile
+          // A cell file: the call may well sit in a server-run method — but
+          // the FILE ships in the browser bundle, so "read it in a cell
+          // method" (the component advice) was advice it already followed.
+          ? `${file.relative}:${lineIdx} — ${
+            m[0]
+          } is server-only but this file contains a cell() definition shared with the browser bundle, where the \`Deno\` global does not exist — any of it that runs in the client (a sync method under sync/localFirst/scope:"client", module code) throws \`Deno is not defined\``
+          : `${file.relative}:${lineIdx} — ${
+            m[0]
+          } is server-only but this file is compiled into the browser bundle, where the \`Deno\` global does not exist — the client throws \`Deno is not defined\` at first render`,
         {
           file: file.relative,
           line: lineIdx,
-          fix:
-            "Read it on the server — in a cell method, or in a *.server.ts module loaded with a dynamic import — and put the value in cell state; the component reads the state.",
+          fix: isCellFile
+            ? 'Move the Deno call into a *.server.ts module and reach it from the method with `await import("./x.server.ts")` — the bundle leaves that import out (docs/build/imports.md).'
+            : "Read it on the server — in a cell method, or in a *.server.ts module loaded with a dynamic import — and put the value in cell state; the component reads the state.",
         },
       );
     }
@@ -2040,7 +2062,13 @@ function isDestructureTarget(
     // `x[s.i]` — an INDEX bracket, not an array pattern.
     let p = open - 1;
     while (p >= 0 && /\s/.test(code[p]!)) p--;
-    if (code[open] === "[" && /[\w$)\]]/.test(code[p] ?? "")) return false;
+    // A KEYWORD before `[` is not an operand: `return [s.a] = v` is a
+    // pattern, not `return` indexed.
+    const word = /[\w$]+$/.exec(code.slice(Math.max(0, p - 15), p + 1))?.[0];
+    if (
+      code[open] === "[" && /[\w$)\]]/.test(code[p] ?? "") &&
+      !(word && OPERAND_KEYWORDS.has(word))
+    ) return false;
     // Its matching close.
     let close = after;
     for (depth = 0; close < code.length; close++) {
@@ -2055,6 +2083,23 @@ function isDestructureTarget(
     hi = close + 1;
   }
 }
+
+/** Keywords that end a token run before an expression — a `[` after one of
+ *  them opens an array (or pattern), never an index. */
+const OPERAND_KEYWORDS: ReadonlySet<string> = new Set([
+  "return",
+  "yield",
+  "await",
+  "typeof",
+  "void",
+  "delete",
+  "throw",
+  "case",
+  "in",
+  "of",
+  "else",
+  "do",
+]);
 
 /** `++s.x` / `--s.x` / `delete s.x` — a write dressed as a prefix. Pure. */
 function isPrefixWrite(code: string, start: number): boolean {
@@ -5276,10 +5321,13 @@ export const checkTimerDispatch: Checker = (ctx) => {
   // The cell BINDINGS in this project — a call is only interesting if the
   // thing being called is a cell.
   const bindings = new Set<string>();
+  const bindingOf = new Map<CellInfo, string>();
   for (const c of cells) {
     const line = codeText(c.file.content).split("\n")[c.line - 1] ?? "";
     const b = /\b(?:const|let|var)\s+(\w+)\s*=\s*cell\s*\(/.exec(line);
-    if (b) bindings.add(b[1]!);
+    if (!b) continue;
+    bindings.add(b[1]!);
+    bindingOf.set(c, b[1]!);
   }
   if (bindings.size === 0) return;
   let found = 0, checked = 0;
@@ -5331,7 +5379,26 @@ export const checkTimerDispatch: Checker = (ctx) => {
       // one, so offering them there is worse than saying nothing.
       const inComponent = file.name.endsWith(".tsx") ||
         /\bon(?:Mount|Cleanup)\s*\(|\bafterRender\s*\(/.test(code);
-      const fix = inComponent
+      // Inside a cell METHOD the door is the method's own effect channel. The
+      // boot-time doors would turn "N ms after this call" into "once at boot"
+      // — a linter-shipped bug.
+      const host = cells.find((c) => {
+        if (c.file !== file) return false;
+        const span = _cellConfigSpan(code, c.line);
+        const meth = span && _blockOf(code, span[0], span[1], "methods");
+        return !!meth && m.index! > meth[0] && m.index! < meth[1];
+      });
+      const sched = host &&
+        `s.$do(schedule.after("${host.name}.${method}", N, ${
+          bindingOf.get(host) === obj
+            ? `self("${method}")`
+            : `${obj}.${method}.action()`
+        }))`;
+      const fix = sched
+        ? `      fix: schedule it from the method — \`${sched}\` — so the ` +
+          `dispatch is logged, cancellable and replayed. See ` +
+          `docs/state/methods.md.`
+        : inComponent
         ? `      fix: bind the timer to the mount — ` +
           `\`onMount(() => { const t = setTimeout(() => ${obj}.${method}(), N); ` +
           `onCleanup(() => clearTimeout(t)); })\` — so the dispatch cannot ` +
@@ -5350,9 +5417,10 @@ export const checkTimerDispatch: Checker = (ctx) => {
         {
           file: file.relative,
           line,
-          fix: inComponent
-            ? `onCleanup(() => clearTimeout(t))`
-            : `onStart: () => ${obj}.${method}()`,
+          fix: sched ??
+            (inComponent
+              ? `onCleanup(() => clearTimeout(t))`
+              : `onStart: () => ${obj}.${method}()`),
         },
       );
     }
@@ -5450,10 +5518,40 @@ export const checkTsxHiddenReads: Checker = (ctx) => {
           path,
         });
       }
+      // The same read in the two other spellings the runtime refuses just as
+      // hard: `const { apiKey } = vault` and `vault["apiKey"]` (the literal is
+      // read from the RAW text — `codeText` blanks string bodies).
+      const also = new Map<string, number>();
+      for (
+        const d of code.matchAll(
+          new RegExp(
+            `\\{([^{}]*)\\}\\s*=\\s*${bind}\\b(?!\\s*[.\\[(])`,
+            "g",
+          ),
+        )
+      ) {
+        for (const part of d[1]!.split(",")) {
+          const k = /^\s*([\w$]+)\s*(?:[:=]|$)/.exec(part)?.[1];
+          if (k && top.has(k) && !also.has(k)) also.set(k, d.index!);
+        }
+      }
+      for (
+        const b of code.matchAll(
+          new RegExp(`(?<![.\\w$])${bind}\\s*\\[\\s*(?=["'\`])`, "g"),
+        )
+      ) {
+        const at = b.index! + b[0].length;
+        const k = /^(["'`])([\w$]+)\1/.exec(file.content.slice(at))?.[2];
+        if (k && top.has(k) && !also.has(k)) also.set(k, b.index!);
+      }
       for (const { re, key, path } of targets) {
         const hit = re.exec(code);
-        if (!hit) continue;
-        const line = code.slice(0, hit.index).split("\n").length;
+        const at = Math.min(
+          hit?.index ?? Infinity,
+          path === key ? also.get(key) ?? Infinity : Infinity,
+        );
+        if (at === Infinity) continue;
+        const line = code.slice(0, at).split("\n").length;
         if (isSuppressed(file.lines, line - 1)) continue;
         found++;
         const fact = `has${key.charAt(0).toUpperCase()}${key.slice(1)}`;
@@ -5474,7 +5572,9 @@ export const checkTsxHiddenReads: Checker = (ctx) => {
               `state: { ${fact}: false, … } — set it where ${path} is written; read ${bind}.${fact} here`,
           },
         );
-        break; // one finding per (file, binding, field) — not one per read
+        // One finding per (file, binding, field) — not one per read. This
+        // used to `break` here, so a file's SECOND hidden field was never
+        // reported until the first one was fixed.
       }
     }
   }
@@ -6656,6 +6756,9 @@ export const checkSyncMethodIO: Checker = (ctx) => {
       const line = code.slice(0, fn.start + m.index).split("\n").length;
       if (isSuppressed(cell.file.lines, line - 1)) continue;
       found++;
+      // The fix awaits the ASYNC twin: `await Deno.readTextFileSync(…)` still
+      // blocks, and `$do` takes only schedule/own effects (it throws on I/O).
+      const io = m[1]!.replace(/Sync$/, "");
       report(
         "error",
         "cells",
@@ -6664,14 +6767,15 @@ export const checkSyncMethodIO: Checker = (ctx) => {
           `inside the dispatch loop: a Promise it returns is not state, and ` +
           `sync I/O there blocks every other method of the app.\n` +
           `      fix: make it \`async ${fn.name}(${fn.param || "s"}, …)\` — ` +
-          `await the I/O, then write \`${fn.param || "s"}\`; or keep the ` +
-          `method sync and hand the I/O to \`${fn.param || "s"}.$do(…)\`.`,
+          `await ${
+            io === m[1] ? "the I/O" : `the async \`${io}()\``
+          }, then write \`${fn.param || "s"}\`.`,
         {
           file: cell.file.relative,
           line,
-          fix: `async ${fn.name}(${fn.param || "s"}) { const r = await ${
-            m[1]
-          }(…); ${fn.param || "s"}.x = r }`,
+          fix: `async ${fn.name}(${
+            fn.param || "s"
+          }) { const r = await ${io}(…); ${fn.param || "s"}.x = r }`,
         },
       );
     }
@@ -7906,6 +8010,165 @@ export const checkStateKeyCollision: Checker = (ctx) => {
   }
 };
 
+// ══════════════════════════════════════════════════════════════════════
+// 36. AN EFFECT BUILT AND THROWN AWAY
+// ══════════════════════════════════════════════════════════════════════
+//
+// `schedule.*` and `own.*` are pure BUILDERS: they return an effect value and
+// do nothing until `s.$do(…)` runs it. A bare statement
+// `schedule.after("t", 500, self("tick"))` is therefore a no-op — no timer,
+// no warning, ever (and a dropped `own.set` parks its factory for nothing).
+//
+// EXACT CRITERION (warn): a call `<schedule|own>.<member>(` — the names bound
+// by an `import { … } from "aio…"` (aliases followed), or `aio.schedule.` —
+// that starts a STATEMENT: the code before it ends in `;`, `{`, `}` or `)`
+// (an `if (…)` body), or a line break the language ends the statement at. An argument, an assignment, a
+// `return`, an arrow body or `void …` all USE the value and never fire.
+
+const _EFFECT_MEMBERS: Record<"schedule" | "own", string> = {
+  schedule: "after|every|at|cron|backoff|poll|next|cancel",
+  own: "set|dispose",
+};
+
+export const checkDroppedEffect: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, report } = ctx;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    if (isTestPath(file.relative) || isToolingPath(file.relative)) continue;
+    const raw = file.content;
+    const code = codeText(raw);
+    const names: Array<[string, string]> = [];
+    for (
+      const m of code.matchAll(
+        /\bimport\s+(?!type\b)\{([^}]*)\}\s*from\s*/g,
+      )
+    ) {
+      const spec = /^["']([^"']*)["']/.exec(raw.slice(m.index! + m[0].length))
+        ?.[1] ?? "";
+      if (!/^(?:aio(?:\/|$)|jsr:@riagentic\/aio)/.test(spec)) continue;
+      for (const part of m[1]!.split(",")) {
+        const b = /^\s*(schedule|own|aio)\b(?:\s+as\s+([\w$]+))?\s*$/
+          .exec(part);
+        if (!b) continue;
+        if (b[1] === "aio") {
+          names.push([`${b[2] ?? "aio"}.schedule`, "schedule"]);
+        } else names.push([b[2] ?? b[1]!, b[1]!]);
+      }
+    }
+    for (const [local, api] of names) {
+      const esc = local.replace(/[$.]/g, "\\$&").replace(
+        /\\\./g,
+        "\\s*\\.\\s*",
+      );
+      const re = new RegExp(
+        `(?<![\\w$.])${esc}\\s*\\.\\s*(${
+          _EFFECT_MEMBERS[api as "schedule" | "own"]
+        })\\s*\\(`,
+        "g",
+      );
+      for (const m of code.matchAll(re)) {
+        const head = code.slice(0, m.index!);
+        const prev = /\S?(?=\s*$)/.exec(head)?.[0] ?? "";
+        const gap = head.length - head.trimEnd().length;
+        const nl = head.lastIndexOf("\n");
+        const starts = prev === "" || ";{})".includes(prev) ||
+          (nl >= head.length - gap && _asiEndsStatement(code, nl));
+        if (!starts) continue;
+        const line = code.slice(0, m.index!).split("\n").length;
+        if (isSuppressed(file.lines, line - 1)) continue;
+        const call = `${local.replace(/\s+/g, "")}.${m[1]}(…)`;
+        report(
+          "warn",
+          "patterns",
+          `${file.relative}:${line} — \`${call}\` builds an effect and the ` +
+            `statement throws it away. ${api}.* only BUILDS the effect; ` +
+            `nothing runs until \`s.$do(…)\` takes it — so this line does ` +
+            `nothing, silently.`,
+          { file: file.relative, line, fix: `s.$do(${call})` },
+        );
+      }
+    }
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// 43. A `useLocal` TUPLE VALUE READ INSIDE A CLOSURE THAT OUTLIVES THE RENDER
+// ══════════════════════════════════════════════════════════════════════
+//
+// `const [n, setN] = useLocal(0)` copies THIS render's value into `n`. A
+// closure the render hands to something that outlives it — an `onMount` body,
+// a listener it adds, a timer — keeps that copy for good: `setN(n + 1)` from a
+// window listener counts to 1 and stays there (a field report, docs-only
+// until this rule). The fix is the live getter / an updater
+// (`clicks.local`, `clicks.set((n) => n + 1)`). Handlers aio re-reads at
+// event time (`onWindowEvent`, `onGlobalKey`, `useInterval`, `useRaf`, JSX
+// `on*` props) are current, so they are not closures this rule asks about.
+const _OUTLIVES = /\b(?:onMount|addEventListener|setTimeout|setInterval)\s*\(/g;
+
+export const checkStaleLocalTuple: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, report, pass } = ctx;
+  let found = 0, checked = 0;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    if (/\.test\.tsx?$/.test(file.name)) continue;
+    const raw = file.content;
+    const code = codeText(raw);
+    for (
+      const m of codeMatches(
+        raw,
+        /\b(?:const|let)\s*\[\s*([$\w]+)\s*(?:,\s*[$\w]+\s*)?\]\s*=\s*useLocal\s*[<(]/g,
+      )
+    ) {
+      checked++;
+      const value = m[1]!;
+      const fn = _enclosingFn(code, m.index!);
+      const from = fn ? fn.open : 0;
+      const to = fn ? _balancedClose(code, fn.open) : code.length;
+      const read = new RegExp(`(?<![$\\w.])${value}(?![$\\w:])`);
+      // Shadowed inside: a binding or a PARAMETER of that name (`(n) =>`,
+      // `n =>`, `function (n)`) — a call argument `log(n)` is a read.
+      const own = new RegExp(
+        `\\b(?:const|let|var)\\s+${value}\\b|\\([^()]*\\b${value}\\b[^()]*\\)\\s*(?::[^=()]*)?=>|\\b${value}\\s*=>|\\bfunction\\b[^(]*\\([^)]*\\b${value}\\b`,
+      );
+      let reported = -1;
+      for (const c of code.slice(from, to).matchAll(_OUTLIVES)) {
+        const at = from + c.index!;
+        if (at < m.index! || at < reported) continue; // before it / inside one said
+        const open = at + c[0].length - 1;
+        const close = _balancedParen(code, open);
+        if (close === -1) continue;
+        const body = code.slice(open + 1, close);
+        if (!read.test(body) || own.test(body)) continue;
+        const line = code.slice(0, at).split("\n").length;
+        if (isSuppressed(file.lines, line - 1)) continue;
+        reported = close;
+        found++;
+        report(
+          "warn",
+          "ui",
+          `${file.relative}:${line} — \`${value}\` is the \`useLocal\` tuple ` +
+            `value of the render that made this closure, and the closure ` +
+            `outlives it (\`${
+              c[0].replace(/\s*\($/, "")
+            }\`): every later read ` +
+            `sees that render's value, so \`set(${value} + 1)\` from here ` +
+            `stops counting after one.\n` +
+            `      fix: keep the handle (\`const x = useLocal(…)\`) and read ` +
+            `\`x.local\` inside, or write with an updater ` +
+            `(\`x.set((v) => v + 1)\`). See docs/ui/air-reference.md.`,
+          {
+            file: file.relative,
+            line,
+            fix: `x.local / x.set((v) => …)`,
+            manual: "the handle form changes how the component reads it",
+          },
+        );
+      }
+    }
+  }
+  if (checked > 0 && found === 0) {
+    pass("no useLocal tuple value read in a closure that outlives its render");
+  }
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkScanCoverage,
   checkCellStateInterface,
@@ -7950,4 +8213,6 @@ export const ALL_CHECKS: Checker[] = [
   checkBodyCleanupTeardown,
   checkHookOrder,
   checkStateKeyCollision,
+  checkDroppedEffect,
+  checkStaleLocalTuple,
 ];

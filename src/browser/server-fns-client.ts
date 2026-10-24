@@ -1,7 +1,8 @@
 // server-fns-client.ts — browser side of the serverFns seam (perfect-aio B3).
 // `serverFn<T>(ns)` returns a typed proxy that calls the server over the live
 // transport: an "sfn" envelope out, an "sfnr" envelope back (B4b v2).
-// Fail-loud: server errors reject with the server's message; 30s timeout.
+// Fail-loud: server errors reject with the server's message; 30s timeout
+// (`serverFn(ns, { timeoutMs })` sets another).
 
 import {
   enc,
@@ -10,10 +11,12 @@ import {
   wireError,
 } from "../protocol/envelope.ts";
 import { serializeArgs } from "../protocol/wire-value.ts";
-import type { Remote } from "../protocol/protocol-types.ts";
+import {
+  type Remote,
+  type ServerFnOptions,
+  serverFnTimeoutMs,
+} from "../protocol/protocol-types.ts";
 import { getConnectedSignal } from "../state-core.ts";
-
-const SFN_TIMEOUT_MS = 30_000;
 
 const _pending = new Map<string, {
   resolve: (v: unknown) => void;
@@ -22,10 +25,11 @@ const _pending = new Map<string, {
    *  picker the function opened. */
   timer: ReturnType<typeof setTimeout> | undefined;
   what: string;
+  ms: number;
 }>();
 
 /** Start `cid`'s full timeout. */
-function _arm(cid: string): ReturnType<typeof setTimeout> {
+function _arm(cid: string, ms: number): ReturnType<typeof setTimeout> {
   return setTimeout(() => {
     const p = _pending.get(cid);
     if (!p) return;
@@ -33,11 +37,11 @@ function _arm(cid: string): ReturnType<typeof setTimeout> {
     p.reject(
       new Error(
         `${p.what} timed out after ${
-          SFN_TIMEOUT_MS / 1000
+          ms / 1000
         }s — the server never replied (the function may still be running)`,
       ),
     );
-  }, SFN_TIMEOUT_MS);
+  }, ms);
 }
 
 // Returns whether the frame actually LEFT. `_sendRaw` has answered that
@@ -121,7 +125,7 @@ export function handleSfnHold(data: unknown): void {
   if (r!.hold) {
     clearTimeout(p.timer);
     p.timer = undefined;
-  } else if (p.timer === undefined) p.timer = _arm(r!.cid);
+  } else if (p.timer === undefined) p.timer = _arm(r!.cid, p.ms);
 }
 
 /** The rejection for a call whose arguments cannot be encoded at all.
@@ -154,7 +158,18 @@ type FnMap = Record<string, (...args: any[]) => any>;
 
 /** Typed access to a serverFns namespace — the explicit server hop.
  *  `const api = serverFn<typeof apiDef>("api"); await api.chargeCard(9)` */
-export function serverFn<T extends FnMap>(ns: string): Remote<T> {
+export function serverFn<T extends FnMap>(ns: string): Remote<T>;
+/** `serverFn(ns)` with options — `{ timeoutMs }` sets how long a call waits
+ *  for the server's reply (default 30 000). */
+export function serverFn<T extends FnMap>(
+  ns: string,
+  opts: ServerFnOptions,
+): Remote<T>;
+export function serverFn<T extends FnMap>(
+  ns: string,
+  opts?: ServerFnOptions,
+): Remote<T> {
+  const ms = serverFnTimeoutMs(ns, opts);
   return new Proxy({} as Remote<T>, {
     get(_t, prop) {
       if (typeof prop !== "string") return undefined;
@@ -206,8 +221,8 @@ export function serverFn<T extends FnMap>(ns: string): Remote<T> {
             );
           }
           const cid = `sfn-${++_cid}-${Date.now()}`;
-          const timer = _arm(cid);
-          _pending.set(cid, { resolve, reject, timer, what });
+          const timer = _arm(cid, ms);
+          _pending.set(cid, { resolve, reject, timer, what, ms });
           if (!_send(enc("sfn", { cid, ns, name: prop, args: safeArgs }))) {
             _pending.delete(cid);
             clearTimeout(timer);

@@ -27,6 +27,7 @@
 
 import { log } from "../diagnostics/logger-api.ts";
 import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
+import { firstRunVerdict } from "./no-console.ts";
 
 /** How a child process ended: its exit code, the signal that killed it (if
  *  any), and the success shorthand. */
@@ -202,6 +203,12 @@ export async function spawn(
   const grace = opts.killGraceMs ?? 2000;
 
   if (Deno.build.os === "windows") {
+    // A program Windows has not run before is judged inside `spawn()`, for
+    // seconds, with the event loop stopped — judged here off the loop first.
+    const verdict = await firstRunVerdict(cmd);
+    if (verdict !== "given") {
+      log.debug("spawn", `${cmd}: no first-run verdict (${verdict})`);
+    }
     // Tracked on Windows too — `taskkill /T` walks the tree there, and a
     // forgotten child is a forgotten child on every platform.
     return _track(_spawnWindows(cmd, args, opts, grace), cmd);

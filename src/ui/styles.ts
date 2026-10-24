@@ -145,6 +145,10 @@ export const UI_CSS: string = `
 .aio-page__btn:hover:not(:disabled) { background: var(--aio-ui-surface); }
 .aio-page__btn:disabled { opacity: .45; cursor: default; }
 .aio-page__btn--current { background: var(--aio-ui-accent); border-color: var(--aio-ui-accent); color: var(--aio-ui-on-accent); }
+.aio-zoompan { position: relative; overflow: hidden; touch-action: none; user-select: none; cursor: grab; }
+.aio-zoompan__stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; } /* aio-ok: the stage is the origin of a physical translate/scale (pan x, zoomAt) — a logical inset would flip it in RTL and shift every point by the stage width */
+.aio-zoompan__controls { position: absolute; inset-inline-end: .5em; bottom: .5em; display: flex; gap: .25em; }
+.aio-zoompan__btn { min-width: 2em; padding: .25em .5em; border: 1px solid var(--aio-ui-line); background: var(--aio-ui-bg); color: var(--aio-ui-ink); border-radius: var(--aio-ui-radius); cursor: pointer; font: inherit; }
 
 .aio-toasts { position: fixed; bottom: 1rem; inset-inline-end: 1rem; display: flex; flex-direction: column; gap: .5em; z-index: 1100; max-width: min(24rem, 90vw); }
 .aio-toast { display: flex; align-items: center; gap: .6em; padding: .7em .9em; border-radius: var(--aio-ui-radius); background: var(--aio-ui-bg); color: var(--aio-ui-ink); border: 1px solid var(--aio-ui-line); border-inline-start: 3px solid var(--aio-ui-ink-soft); box-shadow: 0 6px 20px rgba(0,0,0,.18); font-family: var(--aio-ui-font); animation: aio-toast-in .18s ease-out; }

@@ -123,6 +123,7 @@ Deno.test("http: every framework endpoint obeys ONE method table", async () => {
     "/__aio/icon",
     "/__aio/metrics",
     "/__aio/snapshot",
+    "/__aio/view",
     "/__aio/vitals",
   ]);
   let matched = 0;
@@ -158,7 +159,7 @@ Deno.test("http: every framework endpoint obeys ONE method table", async () => {
   }
   assertEquals(
     matched,
-    28,
+    32,
     "every listed endpoint × every method it does not serve must be refused",
   );
 });

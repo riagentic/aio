@@ -552,8 +552,14 @@ Deno.test("android client: a self-signed server is let through ONLY on the certi
                     handler?.cancel()`,
   );
   // A pin is written only after the answer names the certificate PRESENTED:
-  // a pairing reply's own file, or a proof made with the link's key.
-  assertEquals(kt.split("pin(base, cert)").length, 3);
+  // a pairing reply's own file (plain or PAKE), or a proof made with the
+  // link's key.
+  assertEquals(kt.split("pin(base, cert)").length, 4);
+  assertStringIncludes(
+    kt,
+    `if (cert.isEmpty() || der1 == null || !pinMatches(cert, der1!!)) return fail(relay)
+            pin(base, cert)`,
+  );
   assertStringIncludes(
     kt,
     `if (cert.isEmpty() || der == null || !pinMatches(cert, der)) {
@@ -836,5 +842,27 @@ Deno.test("connect page: the iOS shell's page offers the share link only and nam
   } finally {
     console.log = log;
     await dropTempDir(dir);
+  }
+});
+
+// An entry that imports aio by a RELATIVE path (`../lib/aio.ts`): the probe
+// runs from stdin with the app root as its base, so the specifier resolved
+// against the root, not the entry — "Module not found", nothing baked, and
+// the APK lost the entry's ui.theme.
+Deno.test("bake: an entry importing aio by a relative path is probed from the entry's own directory", async () => {
+  const root = await appWith(
+    `import { aio } from "../lib/aio.ts";\nawait aio.run({ persist: false, ui: { theme: "full" } });\n`,
+  );
+  try {
+    await Deno.mkdir(join(root, "lib"));
+    await Deno.writeTextFile(
+      join(root, "lib", "aio.ts"),
+      `export { aio } from "aio";\n`,
+    );
+    const p = await probeRunOptions(root, "src/app.ts");
+    assert(typeof p === "object", String(p));
+    assertEquals(p.ui, { theme: "full" });
+  } finally {
+    await dropTempDir(root);
   }
 });

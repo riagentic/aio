@@ -78,6 +78,18 @@ const codebaseSrc = signal<"app" | "repo">("app");
 // arguments at all, which the trojan happily reported as "dispatched". A write
 // into a live app is at least as consequential as stopping it.
 const dispatchArgs = signal<Record<string, string>>({});
+// The pending confirmation for a consequential action (Stop / Restart / a
+// method dispatch), shown INLINE under the header. It used to be the native
+// `confirm()`, which is a modal that freezes the renderer: the live tiles stop
+// updating behind it, and `am trigger` (or any agent driving amui) hangs with
+// "client did not respond" until a human clicks the OS dialog. `id` scopes it
+// to the project it was asked for — switching projects never confirms the
+// wrong one.
+const pending = signal<{ id: string; msg: string; run: () => void } | null>(
+  null,
+);
+const ask = (id: string, msg: string, run: () => void) =>
+  pending.set({ id, msg, run });
 let _lastPath: string | null = null;
 let _stateReqPath: string | null = null; // sync dedupe for StateTab auto-load
 
@@ -405,6 +417,39 @@ function Sidebar() {
 }
 
 // ── detail: header ───────────────────────────────────────────────────────────
+function ConfirmBar({ d }: { d: ProjectDetail }) {
+  const p = pending.value;
+  if (!p || p.id !== d.id) return null;
+  return (
+    <div
+      role="alertdialog"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "8px",
+        padding: "8px 0 0",
+        fontSize: "12px",
+        color: C.text,
+      }}
+    >
+      <span>{p.msg}</span>
+      <button
+        type="button"
+        style={{ ...btnGhost, borderColor: C.redDim, color: C.red }}
+        onClick={() => {
+          pending.set(null);
+          p.run();
+        }}
+      >
+        Confirm
+      </button>
+      <button type="button" style={btnGhost} onClick={() => pending.set(null)}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
 function Header({ d }: { d: ProjectDetail }) {
   return (
     <div
@@ -486,7 +531,11 @@ function Header({ d }: { d: ProjectDetail }) {
                   type="button"
                   style={{ ...btnGhost, borderColor: C.blueDim, color: C.blue }}
                   onClick={() =>
-                    confirm(`Restart ${d.name}?`) && manager.restart(d.id)}
+                    ask(
+                      d.id,
+                      `Restart ${d.name}?`,
+                      () => manager.restart(d.id),
+                    )}
                 >
                   ↻ Restart
                 </button>
@@ -494,7 +543,7 @@ function Header({ d }: { d: ProjectDetail }) {
                   type="button"
                   style={{ ...btnGhost, borderColor: C.redDim, color: C.red }}
                   onClick={() =>
-                    confirm(`Stop ${d.name}?`) && manager.stop(d.id)}
+                    ask(d.id, `Stop ${d.name}?`, () => manager.stop(d.id))}
                 >
                   ■ Stop
                 </button>
@@ -511,6 +560,7 @@ function Header({ d }: { d: ProjectDetail }) {
             )}
         </div>
       </div>
+      <ConfirmBar d={d} />
       {manager.actionMsg && (
         <div style={{ color: C.text2, fontSize: "12px", padding: "6px 0 0" }}>
           {manager.actionMsg}
@@ -886,9 +936,12 @@ function CellsTab({ d }: { d: ProjectDetail }) {
   const run = (d: ProjectDetail, name: string, m: string) => {
     const payload = args(name).trim();
     const call = payload ? `${name}:${m}(${payload})` : `${name}:${m}()`;
-    const note = payload ? "" : "\n\nIt will be called with NO arguments.";
-    if (!confirm(`Run ${call} on ${d.name}?${note}`)) return;
-    manager.dispatch(d.id, `${name}:${m}`, payload);
+    const note = payload ? "" : " It will be called with NO arguments.";
+    ask(
+      d.id,
+      `Run ${call} on ${d.name}?${note}`,
+      () => manager.dispatch(d.id, `${name}:${m}`, payload),
+    );
   };
   return (
     <div>
@@ -1029,9 +1082,11 @@ function StateTab({ d }: { d: ProjectDetail }) {
   // re-dispatches. Never auto-polled; pulled on demand only.
   if (
     typeof document !== "undefined" &&
-    manager.detailStatePath !== d.id && _stateReqPath !== d.id
+    manager.detailStatePath !== d.id && _stateReqPath !== `${d.id}@${d.pid}`
   ) {
-    _stateReqPath = d.id;
+    // Keyed by pid too: a restart keeps `d.id`, and the new process's state
+    // must be fetched again (the server side drops the old snapshot).
+    _stateReqPath = `${d.id}@${d.pid}`;
     manager.loadState(d.id);
   }
   const loading = manager.detailStateLoading;

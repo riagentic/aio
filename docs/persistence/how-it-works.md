@@ -221,6 +221,11 @@ await aio.run({ dbPragmas: ["PRAGMA synchronous = FULL"] });
 setting keeps WAL, `busy_timeout` and the page cache. Turning a default off is
 still possible by saying so (`PRAGMA foreign_keys = OFF`).
 
+SQLite ignores a pragma it does not know without an error, and falls back to its
+default for a value it does not know (`synchronus`, `FUL`, `WALL`), so boot
+checks each `dbPragmas` entry once the file is open and logs an error naming any
+that did not take.
+
 ### What `journal: true` changes
 
 With `journal: true`, every committed action is appended to `<data>/journal`
@@ -323,10 +328,10 @@ recovered instead of lost.
   newer store. The triggers cost one small read per written row; a run with the
   journal off drops them.
 - **A refused sync op has no reactions.** When a sync op's cell refuses it
-  (`validate`, a machine guard, a disabled cell), no `listensTo` listener runs
-  for it, live or at boot: the op is deleted from the op-log, so a reaction
-  would have survived only until the next restart. A refused call's listeners
-  still run, and replay repeats the same decision (docs/state/composition.md).
+  (`validate`, a disabled cell), no `listensTo` listener runs for it, live or at
+  boot: the op is deleted from the op-log, so a reaction would have survived
+  only until the next restart. A refused call's listeners still run, and replay
+  repeats the same decision (docs/state/composition.md).
 - **A quarantined sync cell's lines are kept, not replayed.** Its state is its
   last snapshot, and a line from before the crash cannot be applied to it. Boot
   names the lines (their seq range), keeps them on disk, and replays them once
