@@ -2,27 +2,27 @@
   {
     "target": "android",
     "env": "emulator",
-    "commit": "d8dd6e979",
-    "date": "2026-10-23",
-    "detail": "API 35: standalone (dispatch, durable native store — survives an instant kill and a background kill, rotation, light/dark live, android.colorScheme dark and light hold against the system, app.ts options baked — ui.theme/lang/dir reach the phone, persist: false a new install while an install holding state keeps it, a second app keeps its own storage, browser workers (module, classic+nested, three deep, assets mount), nativeFetch past an Origin-refusing API, a foreign iframe can neither read nor write the store, build.splash shown at launch and closed on load not before minMs) + signed release (keystore from the environment, APK + AAB, not debuggable, runs) + client (connect, server dispatch, a call made offline delivered, Back, unreachable, keyed --expose server by pairing code and by share link over http and over self-signed TLS — certificate pinned; wrong code, unknown and changed certificate refused)"
+    "commit": "540587fe3",
+    "date": "2026-10-25",
+    "detail": "API 35: standalone (dispatch, durable native store — survives an instant kill and a background kill, rotation, light/dark live, android.colorScheme dark and light hold against the system, app.ts options baked — ui.theme/lang/dir reach the phone, persist: false a new install while an install holding state keeps it, a second app keeps its own storage, browser workers (module, classic+nested, three deep, assets mount), nativeFetch past an Origin-refusing API, a foreign iframe can neither read nor write the store, build.splash shown at launch and closed on load not before minMs) + signed release (keystore from the environment, APK + AAB, not debuggable, runs) + client (connect, server dispatch, a call made offline delivered, Back, unreachable, keyed --expose server by pairing code and by share link over http and over self-signed TLS — certificate pinned; wrong code, unknown and changed certificate refused; PAKE pairing (pairing.pake, 8-digit code, Cpace.kt) over TLS)"
   },
   {
     "target": "cli",
     "env": "binary",
-    "commit": "d8dd6e979",
-    "date": "2026-10-23",
+    "commit": "540587fe3",
+    "date": "2026-10-25",
     "detail": "compiled cli-client ↔ compiled server, state printed"
   },
   {
     "target": "macos",
     "env": "native suite",
-    "commit": "d8dd6e979",
-    "date": "2026-10-23",
-    "detail": "2714 test files in 2 shard(s), 2463s",
-    "how": "deno task test there; read from mac-suite-final.log",
-    "passed": 14603,
+    "commit": "540587fe3",
+    "date": "2026-10-25",
+    "detail": "2888 test files in 2 shard(s), 2243s",
+    "how": "deno task test on a real Apple-silicon Mac (macOS 26); read from its suite log",
+    "passed": 15078,
     "failed": 0,
-    "ignored": 333
+    "ignored": 350
   },
   {
     "target": "soak",
@@ -34,8 +34,8 @@
   {
     "target": "web",
     "env": "real-browser",
-    "commit": "d8dd6e979",
-    "date": "2026-10-23",
+    "commit": "540587fe3",
+    "date": "2026-10-25",
     "detail": "chromium: surface → trigger → server state converged"
   },
   {
@@ -52,8 +52,8 @@
   {
     "target": "windows",
     "env": "wine",
-    "commit": "2983410a8",
-    "date": "2026-09-07",
-    "detail": "11 cases"
+    "commit": "540587fe3",
+    "date": "2026-10-25",
+    "detail": "14 cases"
   }
 ]
