@@ -646,6 +646,11 @@ Deno.test("appUserModelId: the app and the one-click .exe give one title the sam
 // shortcut, "<title> - 1 running window".
 Deno.test("alignShortcutAumid: the recorded shortcut gets the window's id; nothing else is touched", async () => {
   const tmp = await tempDir("sfx-aumid-");
+  // %APPDATA% one level INSIDE the temp dir: the shortcut path is Windows
+  // text (`\Microsoft\Windows\…`), so off Windows its "directories" are
+  // one file name beside %APPDATA% — beside the temp dir itself it was left
+  // in the test root by every run.
+  const appData = join(tmp, "appdata");
   try {
     const install = join(tmp, "aio-sfx", "my-app", "win-x64");
     await Deno.mkdir(install, { recursive: true });
@@ -654,14 +659,14 @@ Deno.test("alignShortcutAumid: the recorded shortcut gets the window's id; nothi
       seen.push({ lnk, o }), { before: "", saved: true }
     )) as never;
     const align = (title: string | undefined, os = "windows") =>
-      alignShortcutAumid({ install, title, os, appData: tmp, link });
+      alignShortcutAumid({ install, title, os, appData, link });
     // Off Windows, no title, or no shortcut there: nothing.
     assertEquals(align("My App", "linux"), "kept");
     assertEquals(align("  \n "), "kept");
     assertEquals(align("My App"), "kept");
     assertEquals(seen, []);
     // The shortcut where the `.exe` puts it.
-    const { lnk } = sfxShortcutPaths(install, tmp, "My App");
+    const { lnk } = sfxShortcutPaths(install, appData, "My App");
     await Deno.mkdir(dirname(lnk), { recursive: true });
     await Deno.writeTextFile(lnk, "");
     assertEquals(align("My\tApp "), "kept", "named after another title");
