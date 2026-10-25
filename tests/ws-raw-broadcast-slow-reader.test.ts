@@ -70,14 +70,21 @@ async function readFor(
   let buf = new Uint8Array(0);
   let header = false;
   let read = 0;
+  // ONE read in flight, kept across idle ticks. Re-issuing it after an idle
+  // tick left the old one running: its bytes landed in `chunk` and were
+  // dropped, the frame parser lost its place, and payload bytes read as a
+  // close frame — MEASURED under suite load: "closed 12336" (0x3030, "00").
+  let pending: Promise<number | null> | undefined;
   while (Date.now() - t0 < ms) {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    pending ??= conn.read(chunk).catch(() => null);
     const n = await Promise.race([
-      conn.read(chunk).catch(() => null),
+      pending,
       new Promise<"idle">((r) => (timer = setTimeout(() => r("idle"), 500))),
     ]).finally(() => clearTimeout(timer));
-    if (n === null) return { read, at: Date.now() - t0 };
     if (n === "idle") continue;
+    pending = undefined;
+    if (n === null) return { read, at: Date.now() - t0 };
     read += n;
     const nb = new Uint8Array(buf.length + n);
     nb.set(buf);

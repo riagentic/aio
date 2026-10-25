@@ -7779,4 +7779,14 @@ export const LEDGER_1: readonly Mutation[] = [
     filter:
       "dev restart: a child ended by `am stop` ends the session even with exit code 1 — Windows' TerminateProcess",
   },
+  {
+    what:
+      "a test or a hand-run probe that leaves an aio app home under a name no shape claims (`~/.counter-app`) passes the suite's home check",
+    file: "scripts/check-home-clean.ts",
+    find: "      if (Deno.statSync(f).isFile) return true;",
+    replace: "      if (Deno.statSync(f).isFile) return false;",
+    test: "tests/check-home-clean-shapes.test.ts",
+    filter:
+      "check:home-clean: an aio app home is found by its CONTENT, whatever its name; a look-alike is not",
+  },
 ];

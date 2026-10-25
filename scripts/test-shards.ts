@@ -48,6 +48,7 @@ import {
   pickNestedDisplay,
 } from "../src/server/nested-display.ts";
 import {
+  aioHomes,
   driveRoots,
   homeStrays,
   isTestGitdir,
@@ -1332,6 +1333,8 @@ if (import.meta.main) {
   // …and what was test-shaped in the home already: an earlier run's is the
   // standalone gate's to name (`check:home-clean`), a NEW one is this run's.
   const straysBefore = new Set(homeStrays(Deno.env.toObject()));
+  // …and every aio app home there by CONTENT, which no name shape can claim.
+  const homesBefore = new Set(aioHomes(Deno.env.toObject()));
   // …and the drive roots of a Windows run, where a `/tmp/…` literal lands.
   const roots = driveRoots(Deno.env.toObject(), Deno.cwd(), Deno.build.os);
   const rootsBefore = rootEntries(roots);
@@ -1551,9 +1554,12 @@ if (import.meta.main) {
         `the test that resolved the store without the sandbox.`,
     );
   }
-  const strays = homeStrays(Deno.env.toObject()).filter((p) =>
-    !straysBefore.has(p)
-  );
+  const strays = [
+    ...homeStrays(Deno.env.toObject()).filter((p) => !straysBefore.has(p)),
+    ...aioHomes(Deno.env.toObject()).filter((p) =>
+      !homesBefore.has(p) && !straysBefore.has(p)
+    ),
+  ];
   if (strays.length > 0) {
     console.error(
       `\n✗ the run left ${strays.length} test artefact(s) in the REAL home ` +
@@ -1561,7 +1567,8 @@ if (import.meta.main) {
         `its own):\n  ${strays.join("\n  ")}\n  \`childEnv()\` ` +
         `(tests/e2e-app-harness.ts) gives a spawned app its home and its ` +
         `window's profile; \`ownHome()\` (tests/deno-dir-helper.ts) gives ` +
-        `an installer its HOME. These are yours to remove.`,
+        `an installer its HOME; a hand-run app wants ` +
+        `\`AIO_APPS_DIR=~/tmp/aio/apps\`. These are yours to remove.`,
     );
   }
   const rootLeaks = rootAdditions(rootsBefore, rootEntries(roots));

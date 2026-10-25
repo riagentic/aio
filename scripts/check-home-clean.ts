@@ -326,6 +326,41 @@ export function homeStrays(env: Env): string[] {
   ];
 }
 
+/** Is `dir` an aio app home — whatever its name? The files only aio's boot
+ *  writes there: `data/meta.json`, `logs/app.log`.
+ *
+ *  The name shapes above see only the ids this repo's harnesses generate.
+ *  MEASURED 2026-10-25: 23 more `~/.<x>` homes from hand-run probes and
+ *  one-off experiments (`.counter-app`, `.sync-probe`, `.p1a`, …), 1–3 months
+ *  old, with the gate green — no shape can claim a name a person picked, but
+ *  the content says what the name cannot. */
+export function isAioHome(dir: string): boolean {
+  for (
+    const f of [join(dir, "data", "meta.json"), join(dir, "logs", "app.log")]
+  ) {
+    try {
+      if (Deno.statSync(f).isFile) return true;
+    } catch { /* aio-ok: not there — try the next */ }
+  }
+  return false;
+}
+
+/** Every `~/.<x>` that {@link isAioHome} — the user's real apps among them, so
+ *  only what a run ADDED means anything (the suite runner compares). */
+export function aioHomes(env: Env): string[] {
+  const home = env.HOME ?? env.USERPROFILE;
+  if (!home) return [];
+  let names: string[];
+  try {
+    names = [...Deno.readDirSync(home)].map((e) => e.name);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return [];
+    throw e; // unreadable is not "empty" — the gate cannot vouch for it
+  }
+  return names.filter((n) => n.startsWith(".")).sort()
+    .map((n) => join(home, n)).filter(isAioHome);
+}
+
 /** The install check. Exit code: 0 clean, 1 dirty. */
 function checkInstalls(): number {
   const env = Deno.env.toObject();

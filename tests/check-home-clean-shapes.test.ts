@@ -12,7 +12,9 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
+  aioHomes,
   installStrays,
+  isAioHome,
   isInstallStray,
   isStubProfile,
 } from "../scripts/check-home-clean.ts";
@@ -117,6 +119,33 @@ Deno.test("check:home-clean: a profile holding only aio-main/ is a window that n
         join(home, ".config", "profiled"),
       ],
     );
+  } finally {
+    await dropTempDir(home);
+  }
+});
+
+Deno.test("check:home-clean: an aio app home is found by its CONTENT, whatever its name; a look-alike is not", async () => {
+  const home = await tempDir("aio-fakehome-");
+  try {
+    // Measured names (2026-10-25): no shape claims them.
+    await Deno.mkdir(join(home, ".counter-app", "logs"), { recursive: true });
+    await Deno.writeTextFile(join(home, ".counter-app", "logs", "app.log"), "");
+    await Deno.mkdir(join(home, ".p1a", "data"), { recursive: true });
+    await Deno.writeTextFile(join(home, ".p1a", "data", "meta.json"), "{}");
+    // Not aio's: empty, a dir named like the file, no dot, a file.
+    await Deno.mkdir(join(home, ".hzq9"));
+    await Deno.mkdir(join(home, ".cache", "logs", "app.log"), {
+      recursive: true,
+    });
+    await Deno.mkdir(join(home, "proj", "data"), { recursive: true });
+    await Deno.writeTextFile(join(home, "proj", "data", "meta.json"), "{}");
+    await Deno.writeTextFile(join(home, ".bashrc"), "");
+    assertEquals(aioHomes({ HOME: home }), [
+      join(home, ".counter-app"),
+      join(home, ".p1a"),
+    ]);
+    assert(!isAioHome(join(home, ".missing")));
+    assertEquals(aioHomes({}), []);
   } finally {
     await dropTempDir(home);
   }

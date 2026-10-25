@@ -815,7 +815,9 @@ Break one = damage, or an hour lost.
    notes.items, notes.open() — NO: notes.state.items · notes.selectors.open().
 7. **Repair verbs:** am doctor = running vs disk (→ am restart) · deno task doctor = config ·
    am fix = clone repair · am link = symlink · am migrate = retired APIs (aiol --safe-fix) ·
-   am prune = Electron runtimes no app has launched in N days (reports; --yes deletes).`;
+   am prune = Electron runtimes no app has launched in N days (reports; --yes deletes).
+8. **CLEAN UP only what you made.** Throwaway app: export AIO_APPS_DIR=~/tmp/aio/apps (home there,
+   not ~/.<appId>; same value for every am). Done → am stop + delete its folder and home.`;
 
 const MODEL = `## MODEL — one cell drives everything
 
@@ -1821,6 +1823,10 @@ section (\`--list\` for all; \`--task=new\` is the build flow).
 - **\`type\` alias for cell state, never \`interface\`.**
 - **Leave it running when the human asked to see it** — report the
   \`am instances\` line instead of \`am stop\`.
+- **Clean up what you made — only that.** For a throwaway app or probe,
+  \`export AIO_APPS_DIR=~/tmp/aio/apps\` for the whole session: its home lands
+  there, not in \`~/.<appId>\`, and every shell that runs \`am\` needs the same value.
+  When done: \`am stop\`, then delete its folder and its home.
 
 ## The loop
 

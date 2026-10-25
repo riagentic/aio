@@ -88,3 +88,32 @@ am trigger "App/Trail:up" click     # reply includes the fresh surface
 Filed under Clients because that is where `am` is documented, but it belongs in
 your dev loop, not your ops runbook: it is what lets you say "it works" rather
 than "the tests pass".
+
+## Where temporary files go — and cleaning up
+
+Everything a test, a probe or an experiment makes goes under ONE folder:
+`~/tmp/aio/` (`AIO_TEST_ROOT` moves it). Not `/tmp` — it is shared with every
+account on the machine — and not your home, where each app home is one more
+`~/.<appId>` that nobody can later tell from a real one.
+
+- **Test scratch** — `tempDir()` from `aio/testing` makes `~/tmp/aio/<prefix>…`;
+  `dropTempDir()` removes it. The harnesses (`testCell`, `testUI`, …) sandbox
+  every app directory on their own.
+- **A throwaway app or probe** — run it with its apps root there, for the whole
+  session — every shell that runs `am` needs the same value:
+
+  ```sh
+  export AIO_APPS_DIR=~/tmp/aio/apps   # its home: ~/tmp/aio/apps/<appId>
+  ```
+
+- **Clean up when done, devs and agents alike.** `am stop` what you started,
+  then delete the app's folder and its home. Keep only what you will reuse (a
+  lab script, a package cache); delete the rest — old checkouts, bundles, logs,
+  one-off scripts. Delete only what you made, never someone's real app. In this
+  repo, `deno task clean:tmp` removes what no live process uses and nobody
+  touched for a while in the test root.
+
+A suite run (`deno task test`) fails when it leaves a NEW aio app home in the
+real home — found by its content (`data/meta.json`, `logs/app.log`), whatever
+its name — and `deno task check:home-clean` names the test-shaped ones from
+earlier runs.

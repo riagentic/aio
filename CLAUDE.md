@@ -47,8 +47,10 @@ deno task amui              # visual app manager (amui/)
 deno task doctor            # config sanity checks
 ```
 
-Single file: `deno test -A tests/signal.test.ts` · single case:
-`deno test -A tests/signal.test.ts --filter "name"`.
+Single file: `deno run -A scripts/test-shards.ts tests/signal.test.ts` (the
+suite's sandbox + leak check) · single case:
+`AIO_APPS_DIR=~/tmp/aio/apps deno test -A tests/signal.test.ts --filter "name"`
+(a bare `deno test` gives a spawned app the real `~/.<appId>`).
 
 The coverage floor is flaky by nature — e2e child-process coverage is
 nondeterministic. Don't ratchet it on noise.
@@ -155,6 +157,13 @@ initial-state curl proves nothing about whether a method actually runs.
 
 ## Conventions
 
+- **Clean up — devs and agents alike.** Every temp dir, probe and throwaway app
+  lives under `~/tmp/aio/` (`tempDir()`; an app:
+  `export AIO_APPS_DIR=~/tmp/aio/apps`) — never `/tmp`, never a new
+  `~/.<appId>`. When done: `am stop` it, delete what has no future value
+  (checkouts, bundles, logs, one-off scripts) on every machine used; keep only
+  what is reused (lab scripts, package caches). Only what you made. A suite run
+  fails on a new aio app home in the real home, found by content.
 - **Fail loud, never silent.** The #1 lesson from every field report: the
   framework doing something implicitly and failing quietly is worse than any
   missing feature. A misconfig, a dropped write, an unmet invariant, an

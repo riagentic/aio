@@ -198,7 +198,10 @@ function tmpStrays(sb: Sandbox): { ours: string[]; all: string[] } {
   // fail for someone else's tidy, correct behaviour — a gate that cries wolf
   // gets deleted. What must never appear is this app's unpack, socket or lock.
   const ours = all.filter((n) =>
-    n.includes(APP_ID) || n.startsWith(".mount_") ||
+    // An AppImage mounts at `.mount_<first 6 chars of its file name><rand>`;
+    // a bare `.mount_` was ANY AppImage on the box (measured 2026-10-25: a
+    // user's own one, mid-run, failed this test).
+    n.includes(APP_ID) || n.startsWith(`.mount_${APP_ID.slice(0, 6)}`) ||
     n.startsWith("appimage_extracted_")
   );
   return { ours, all };
