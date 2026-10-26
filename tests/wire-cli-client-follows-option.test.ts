@@ -246,9 +246,9 @@ Deno.test("wire: a server's first frames on connect are 1.0.19's, in 1.0.19's or
     };
     try {
       await until(() => kinds.includes("cfg"), "a cfg frame");
-      // `tt-state` is the dev panel's (this harness runs dev); a production
-      // server sends the other four.
-      assertEquals(kinds, ["proto", "state", "tt-state", "boot", "cfg"]);
+      // `tt-state` (dev) is no longer among them: it greets a UI at its
+      // `type` frame, and this socket — like a `peer()` — sends none.
+      assertEquals(kinds, ["proto", "state", "boot", "cfg"]);
       // `wire` is in it only when the app asked: otherwise the frame is the
       // one 1.0.19 sent.
       assertEquals("wire" in cfg!, "wire" in extra);

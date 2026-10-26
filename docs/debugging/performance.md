@@ -335,7 +335,9 @@ in dev** and 100ms in prod. A reduce runs on the server's single dispatch path,
 so the time it takes is time every connected client's next action waits — dev
 tells you at one frame, while the app is small enough to fix cheaply. Reports
 are throttled to one per action type per 10s, so a hot path won't spam. Override
-either side with `perfBudget`.
+either side with `perfBudget` — it merges over the dev default per field, so
+setting only `effect` or `methods` keeps dev's 16ms `reduce`; set `reduce` to
+change it.
 
 ### Custom budgets
 
@@ -495,7 +497,7 @@ deno task am eval '__aioProfile()'
 ```
 
 ```
-12 component(s) mounted, 431 re-render(s) — timings OFF (call setProfiling(true), or open Redux DevTools)
+12 component(s) mounted, 431 re-render(s) — timings OFF until now: call __aioProfile() again for the ms
   component     renders   ms  signals
   Row               400    -        2  (100 instances)
   Toolbar            30    -        4

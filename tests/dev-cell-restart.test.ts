@@ -9,6 +9,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {
   carriedPort,
+  drainForReload,
   isSupervisedChild,
   relaunchArgs,
   RESTART_EXIT_CODE,
@@ -18,6 +19,8 @@ import {
   supervisorEnv,
 } from "../src/server/dev-restart.ts";
 import { instances } from "../src/server/single-instance-lock.ts";
+import { finishPending, startPending } from "../src/protocol/pending-calls.ts";
+import { trackPending } from "../src/state/method-cancel.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { childEnv } from "./e2e-app-harness.ts";
@@ -591,4 +594,141 @@ Deno.test("dev-restart: the restart exit code is outside the normal error range"
   // 75 = EX_TEMPFAIL. It must not collide with 0/1 or a thrown-error exit,
   // or the supervisor would respawn an app that genuinely failed.
   assertEquals(RESTART_EXIT_CODE, 75);
+});
+
+Deno.test("dev-restart: the reload drain waits for calls in flight, bounded, and names what it cut", async () => {
+  // An async method (its promise) and a worker-cell call (only a count on
+  // this side) — both are work a restart would cut off.
+  let end!: () => void;
+  const body = new Promise<void>((r) => end = r);
+  trackPending(body, "drainprobe", "", { key: "drainprobe:slow" });
+  const n = startPending("drainworker:scan");
+  try {
+    assertEquals(await drainForReload(60), [
+      "drainprobe:slow",
+      "drainworker:scan",
+    ], "the bound passed: both named");
+    setTimeout(() => {
+      end();
+      finishPending("drainworker:scan", n);
+    }, 30);
+    assertEquals(await drainForReload(5000), [], "both ended inside the bound");
+  } finally {
+    end();
+    finishPending("drainworker:scan", n);
+  }
+});
+
+const slowCellSource = (mark: string) =>
+  `import { cell } from "aio";
+// deno-lint-ignore no-explicit-any
+type S = any;
+export const probe = cell("probe", {
+  state: { mark: "${mark}" },
+  methods: {
+    // A call that honours its abort signal, as a fetch with \`s.$signal\`
+    // does — the shape a peer's translation request has.
+    async slow(s: S) {
+      await new Promise<void>((res, rej) => {
+        const t = setTimeout(res, 1500);
+        s.$signal.addEventListener("abort", () => {
+          clearTimeout(t);
+          rej(new Error("aborted"));
+        });
+      });
+      s.mark = "slow-done";
+      return "finished";
+    },
+  },
+});
+`;
+
+Deno.test({
+  name:
+    "dev-restart e2e: a call in flight when a cell file is saved finishes before the restart",
+  async fn() {
+    const appId = "dev-restart-e2e-drain";
+    const dir = await tempDir("aio-dev-restart-drain-");
+    const repo = fromFileUrl(new URL("../", import.meta.url));
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        imports: {
+          "aio": `${spec(repo)}mod.ts`,
+          "aio/": `${spec(repo)}src/`,
+          "immer": "npm:immer@10.2.0",
+          "@std/path": "jsr:@std/path@1.1.2",
+        },
+      }),
+    );
+    await Deno.writeTextFile(
+      join(dir, "app.ts"),
+      `import { aio } from "aio";
+import { probe } from "./cell.ts";
+await aio.run({
+  appId: "${appId}",
+  cells: [probe],
+  client: "server-only",
+  persist: false,
+  routes: {
+    "/mark": () => new Response(probe.mark),
+    "/slow": async () => {
+      try {
+        return new Response(String(await probe.slow()));
+      } catch (e) {
+        return new Response("failed: " + e, { status: 500 });
+      }
+    },
+  },
+});
+`,
+    );
+    await Deno.writeTextFile(join(dir, "cell.ts"), slowCellSource("v1"));
+    const child = new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", join(dir, "app.ts")],
+      cwd: dir,
+      env: devChildEnv(),
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    let reply = "";
+    let after: string | null = null;
+    let text = "";
+    try {
+      const port = await waitFor(
+        () => Promise.resolve(livePortOf(appId)),
+        30_000,
+      );
+      assert(port, "the app never recorded a port");
+      const url = `http://127.0.0.1:${port}`;
+      assertEquals(await waitFor(() => servedMark(url), 30_000), "v1");
+      const call = fetch(`${url}/slow`).then((r) => r.text()).catch((e) =>
+        `failed: ${e}`
+      );
+      // The call is running (it takes 1.5 s) — now the save.
+      await new Promise((r) => setTimeout(r, 300));
+      await Deno.writeTextFile(join(dir, "cell.ts"), slowCellSource("v2"));
+      reply = await call;
+      after = await waitFor(
+        async () => (await servedMark(url)) === "v2" ? "v2" : null,
+        30_000,
+      );
+    } finally {
+      try {
+        child.kill("SIGTERM");
+      } catch { /* already gone */ }
+      const out = await child.output();
+      text = new TextDecoder().decode(out.stdout) +
+        new TextDecoder().decode(out.stderr);
+      await dropTempDir(dir);
+    }
+    assertEquals(
+      reply,
+      "finished",
+      `the in-flight call was cut by the reload:\n${text.slice(-4000)}`,
+    );
+    assertEquals(after, "v2", `the app did not restart:\n${text.slice(-4000)}`);
+    assertStringIncludes(text, "probe:slow");
+    assertStringIncludes(text, "in-flight calls finished");
+  },
 });

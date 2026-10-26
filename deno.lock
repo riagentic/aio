@@ -24,7 +24,7 @@
     "jsr:@std/yaml@1": "1.1.2",
     "jsr:@std/yaml@1.0.9": "1.0.9",
     "npm:esbuild@0.25.12": "0.25.12",
-    "npm:happy-dom@20.14.5": "20.14.5",
+    "npm:happy-dom@21.0.4": "21.0.4",
     "npm:immer@10.2.0": "10.2.0",
     "npm:react-dom@19.1.0": "19.1.0_react@19.1.0",
     "npm:react@19.1.0": "19.1.0"
@@ -237,8 +237,8 @@
       "os": ["win32"],
       "cpu": ["x64"]
     },
-    "@types/node@26.6.4": {
-      "integrity": "sha512-ldVPDCzj7fsaGZrLB0NuHuTvJcsNasysBAqMolr/cgxrLd1xbqxIr3XJiPnHHJUCxj5sNF1vnRj9aWnrVh5Jcg==",
+    "@types/node@26.6.5": {
+      "integrity": "sha512-uMzsv9stDdofIZBx4UGh4Z9ZgXnGC9seRDscilBcTHAeOFk67MZg/k9bWVfO+bk4qZmG+l52hRnLwUiH2LnJTg==",
       "dependencies": [
         "undici-types"
       ]
@@ -294,8 +294,8 @@
       "scripts": true,
       "bin": true
     },
-    "happy-dom@20.14.5": {
-      "integrity": "sha512-x/RzkpWO40bTjIoT30iQtt64FLLmH/iRcUCN2X//bLx7H3ifkdfPXyqsro/OYtqzIAhiLMMA7mmiOR9C3NOKjQ==",
+    "happy-dom@21.0.4": {
+      "integrity": "sha512-tFm+GaLBgo6o0awHnvHaNoraVo27qJ+2tZEtZ+cIa08hXbeitrxAJajLI05hsUy/2/YTKcUjQYzHe5mCcraLBw==",
       "dependencies": [
         "@types/node",
         "@types/whatwg-mimetype",
@@ -491,7 +491,7 @@
       "jsr:@std/testing@1.0.17",
       "jsr:@std/yaml@1.0.9",
       "npm:esbuild@0.25.12",
-      "npm:happy-dom@20.14.5",
+      "npm:happy-dom@21.0.4",
       "npm:immer@10.2.0",
       "npm:react-dom@19.1.0",
       "npm:react@19.1.0"

@@ -277,6 +277,8 @@ Deno.test("tt integration: TT commands via WS protocol", async () => {
       );
       ws.onopen = () => {
         clearTimeout(timer);
+        // A UI says what it is — the time-travel greeting answers that.
+        ws.send(JSON.stringify({ v: 2, t: "type", d: { kind: "browser" } }));
         resolve();
       };
       ws.onerror = () => {
@@ -546,7 +548,8 @@ Deno.test({
     const { root, cleanup } = setupDOM();
     _setDocument(root.ownerDocument);
     const sent: string[] = [];
-    setSendFn((m) => sent.push(m));
+    // The panel's own `sub`/`unsub` is pinned in tt-state-subscribers-only.
+    setSendFn((m) => void (/"cmd":"(un)?sub"/.test(m) || sent.push(m)));
     handleTTMessage(ttJSON([
       { id: 0, type: "__init" },
       { id: 1, type: "INC" },
@@ -661,7 +664,8 @@ Deno.test({
     const { win, doc, cleanup } = setupDOM();
     resetTT();
     const sent: string[] = [];
-    setSendFn((m) => sent.push(m));
+    // The panel's own `sub`/`unsub` is pinned in tt-state-subscribers-only.
+    setSendFn((m) => void (/"cmd":"(un)?sub"/.test(m) || sent.push(m)));
     try {
       handleTTMessage(ttJSON([
         { id: 0, type: "__init" },
@@ -725,7 +729,8 @@ Deno.test({
     const { win, doc, cleanup } = setupDOM();
     resetTT();
     const sent: string[] = [];
-    setSendFn((m) => sent.push(m));
+    // The panel's own `sub`/`unsub` is pinned in tt-state-subscribers-only.
+    setSendFn((m) => void (/"cmd":"(un)?sub"/.test(m) || sent.push(m)));
     try {
       // Single entry: index is both start and end → both nav buttons disabled
       handleTTMessage(ttJSON([{ id: 0, type: "__init" }], 0));

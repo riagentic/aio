@@ -109,10 +109,12 @@ if (p) {
   answer.
 - **Another `--instance`.** An appId is looked up in this app's own instance
   scope: one started with `--instance=agent1` does not see a service running as
-  the default instance (`null`, "not running"). `peer(id, { instance: null })`
-  looks in the default scope, `peer(id, { instance: "svc1" })` in that
-  instance's. An identity (`as`) is proven within one scope only — across scopes
-  it throws; give the service a token instead.
+  the default instance (`null`, "not running" — logged once as a warning naming
+  the fix). `peer(id, { instance: null })` looks in the default scope,
+  `peer(id, { instance: "svc1" })` in that instance's. An identity (`as`) is
+  proven within one scope only — across scopes it throws; give the service a
+  token instead. There is no implicit fallback: `--instance` is isolation, so
+  leaving it is the caller's explicit choice.
 - **`onStatus(up => …)`** fires `true` when the connection delivers the other
   app's state, `false` when it drops (never for your own `close()`) — the moment
   to re-register with a service that restarted. A restarted app usually binds a

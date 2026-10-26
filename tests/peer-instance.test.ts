@@ -49,6 +49,7 @@ const pb = await wait("${b}", { instance: "svc1" });
 out.namedScope = pb ? await pb.call("svc", "bump") : "not found";
 pb?.close();
 out.ownScope = await peer("${a}");
+out.ownScope2 = await peer("${a}");
 try { await peer("${a}", { instance: null, as: "picaller${Deno.pid}" }); out.as = "allowed"; }
 catch (e) { out.as = e.message; }
 try { await peer("${a}", { instance: "../x" }); out.bad = "allowed"; }
@@ -79,7 +80,7 @@ Deno.exit(0);
       cwd: dir,
       env: e,
       stdout,
-      stderr: "null",
+      stderr: stdout,
     }).spawn();
   const sa = spawn(join(dir, "a.ts"), env(null), "null");
   const sb = spawn(
@@ -88,7 +89,7 @@ Deno.exit(0);
     "null",
   );
   try {
-    const { stdout } = await spawn(
+    const { stdout, stderr } = await spawn(
       join(dir, "caller.ts"),
       env(join(home, ".aio-instances", "agent1")),
       "piped",
@@ -100,6 +101,12 @@ Deno.exit(0);
     assertEquals(out.defaultScope, 1);
     assertEquals(out.namedScope, 1);
     assertEquals(out.ownScope, null, "its own scope has no such app");
+    assertEquals(out.ownScope2, null);
+    // …but the miss says where it IS, once (callers poll), never silently.
+    const said = new TextDecoder().decode(stdout) +
+      new TextDecoder().decode(stderr);
+    const hint = `peer("${a}", { instance: null })`;
+    assertEquals(said.split(hint).length - 1, 1, said);
     assert(/proven within one --instance scope/.test(out.as), out.as);
     assert(/--instance needs a simple name/.test(out.bad), out.bad);
   } finally {

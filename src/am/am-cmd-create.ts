@@ -273,7 +273,7 @@ export function frameworkSpecs(source: boolean): {
     Object.assign(imports, {
       "esbuild": "npm:esbuild@^0.25",
       "immer": "npm:immer@^10",
-      "happy-dom": "npm:happy-dom@^20",
+      "happy-dom": "npm:happy-dom@^21",
       "@std/path": "jsr:@std/path@^1",
       "@std/assert": "jsr:@std/assert@^1",
     });

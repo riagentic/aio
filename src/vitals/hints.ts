@@ -43,6 +43,9 @@ export function classifySeverity(
 export function evaluateHints(
   snap: VitalsSnapshot,
   thresholds: VitalThresholds,
+  /** The frozen client is on loopback: no network lies between it and the
+   *  server, so a missed ping is the client's own main thread (rule 3). */
+  loopback = false,
 ): VitalHint | null {
   // Rule 6: Visibility filter — hidden tabs aren't real freezes
   if (snap.render.status === "frozen" && snap.render.visible === false) {
@@ -117,6 +120,22 @@ export function evaluateHints(
     snap.render.status === "healthy" &&
     snap.loop.status === "healthy"
   ) {
+    if (loopback) {
+      return {
+        cause: `Client did not ping in ${
+          Math.round(snap.transport.measured)
+        }ms: its main thread was busy (loopback — not the network)`,
+        evidence: [
+          `transport frozen: ${
+            Math.round(snap.transport.measured)
+          }ms (threshold: ${thresholds.transport.frozen}ms)`,
+          "client on loopback",
+        ],
+        suggestion:
+          "Profile that client: a long render or script blocks its heartbeat.",
+        severity: classifySeverity(1, true, false),
+      };
+    }
     return {
       cause: `Network connection stalled. No pong in ${
         Math.round(snap.transport.measured)

@@ -3,6 +3,7 @@
 
 import { APP_STYLE, UI_ENTRY } from "./app-files.ts";
 import { isServerOnlyFile } from "../entries.ts";
+import { restartPending } from "./dev-restart.ts";
 import { enc } from "../protocol/envelope.ts";
 import {
   basename,
@@ -353,6 +354,11 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     }
   };
 
+  /** The server-graph walks still deciding whether a saved plain module
+   *  restarts the app. A flush waits for them (bounded by the graph budget):
+   *  a burst that restarts must not first send a reload onto the old code. */
+  const classifying = new Set<Promise<void>>();
+
   /** Does `path` run in the server process? Then a browser reload cannot
    *  apply it — see `serverSideChanged`. */
   const judgeServerSide = (path: string): void => {
@@ -370,12 +376,14 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
         // method calls) used to print "reloaded" while every server call
         // kept running the old copy. `*.server.ts` keeps its own warning
         // in `scheduleReload`.
-        void inServerGraph(path).then((hit) => {
+        const walk = inServerGraph(path).then((hit) => {
           // Shut down while the walk ran: a closed server restarts nothing.
           if (hit && !_shutDown) {
             serverSideChanged(path, "server module");
           }
         });
+        classifying.add(walk);
+        void walk.finally(() => classifying.delete(walk));
       }
     } catch { /* unreadable — skip */ }
   };
@@ -657,6 +665,19 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           }
         }
 
+        // Does this burst restart the app? Asked before any reload goes out
+        // (see `classifying`); a walk past the budget leaves the reload as it
+        // was — sent, never held up.
+        if (classifying.size > 0) {
+          let t: ReturnType<typeof setTimeout> | undefined;
+          await whileLive(
+            Promise.race([
+              Promise.allSettled([...classifying]),
+              new Promise((r) => t = setTimeout(r, graphTimeoutMs)),
+            ]).finally(() => clearTimeout(t)),
+          );
+        }
+
         if (graphResult && !graphResult.valid) {
           // Graph is red — send error info to clients, suppress normal reload
           deps.broadcastWs(enc("graph-error", graphResult.errors));
@@ -682,6 +703,17 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
             `✓ import graph fixed — reloaded ${describeChanged(changed)} (${
               Date.now() - burstStartedAt
             }ms)`,
+          );
+        } else if (restartPending()) {
+          // A server-side edit in this burst is restarting the app, which
+          // first lets its calls in flight finish (`dev-restart.ts`). A
+          // reload now would put the new bundle on the OLD cell code for that
+          // wait, then reload again: the relaunch's new boot id reloads
+          // every open page anyway.
+          appCssFlipped = false;
+          log.info(
+            "watch",
+            `reload held for the restart — ${describeChanged(changed)}`,
           );
         } else {
           // The app's CSS toolchain, before the reload — otherwise the browser

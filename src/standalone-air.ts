@@ -21,8 +21,10 @@ import type { Log } from "./diagnostics/logger-api.ts";
 import {
   createDispatch,
   type PerfBudget,
+  perfBudgetFor,
   type PerfCheck,
 } from "./state/dispatch.ts";
+import { isDevMode } from "./state/dev-flag.ts";
 import {
   createAioError,
   reportError as reportAioError,
@@ -1941,7 +1943,9 @@ export function initStandalone<S, A, E>(
     debug: false,
     reportOpts: _reportOpts,
     perfCheck: config.perfCheck,
-    perfBudget: config.perfBudget,
+    // The SAME budget `aio.run` uses: dev's one-frame reduce merged under the
+    // app's own — so the in-process harnesses measure what the dev server does.
+    perfBudget: perfBudgetFor(config.perfBudget, !isDevMode()),
     freezeState: config.freezeState ?? true,
   });
 

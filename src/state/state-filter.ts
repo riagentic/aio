@@ -710,25 +710,32 @@ function objectDepth(path: readonly (string | number)[]): number {
  *  Returns undefined → full-state fallback needed,
  *  [] → nothing to send, PatchEntry[] → filtered patches.
  *
- *  "full" strategy cells (those with uiForUser transforms) trigger a full-state
- *  fallback for the entire broadcast. This is intentional: per-user transforms
- *  need the complete cell state, and the broadcast protocol sends one payload
- *  per client — mixing patches with full-state per-cell is not supported. */
+ *  A "full" strategy cell (`visible.forUser`) has no patch a client could
+ *  apply — the client holds a per-user PROJECTION of the cell, and these ops
+ *  describe the cell itself. Its ops are dropped and the cell is MARKED
+ *  (`{ cell, ops: [], view: true }`, once per cell): the transport sends each
+ *  client the diff of ITS view of that cell against the one it last sent
+ *  (server/view-delta.ts). It used to return undefined here, which made the
+ *  whole round a full-state resend for every client — every cell it reads,
+ *  whenever any `forUser` cell changed. */
 export function filterPatchesByStrategy(
   patches: { cell: string; ops: Patch[] }[],
   strategies: Map<string, CellPatchStrategy>,
   filterFields: Map<string, PatchFilterFields>,
-): { cell: string; ops: Patch[] }[] | undefined {
-  // Pass 1: any patch targeting a "full" strategy cell -> full fallback
+): { cell: string; ops: Patch[]; view?: true }[] | undefined {
+  const result: { cell: string; ops: Patch[]; view?: true }[] = [];
+  const marked = new Set<string>();
   for (const entry of patches) {
-    if (strategies.get(entry.cell) === "full") return undefined;
+    if (strategies.get(entry.cell) !== "full" || marked.has(entry.cell)) {
+      continue;
+    }
+    marked.add(entry.cell);
+    result.push({ cell: entry.cell, ops: [], view: true });
   }
-  // Pass 2: filter per-cell
-  const result: { cell: string; ops: Patch[] }[] = [];
   for (const entry of patches) {
     const strategy = strategies.get(entry.cell);
     if (strategy === undefined) return undefined; // unknown cell -> safety fallback
-    if (strategy === "skip") continue;
+    if (strategy === "skip" || strategy === "full") continue;
     if (strategy === "raw") {
       result.push(entry);
       continue;

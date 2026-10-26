@@ -221,7 +221,7 @@ Options — only when you need control (all optional):
 | `seed`             | —                              | pin machine-dependent state    |
 | `user`             | — (identity unresolved)        | mount an authenticated app     |
 | `fetch`            | the `fetch` that is installed  | answer the component's network |
-| `perfBudget`       | the defaults                   | the app's budgets and ceilings |
+| `perfBudget`       | dev's (16ms reduce)            | the app's, merged over dev's   |
 | `authFeatures`     | all `false`                    | `<SignIn/>` feature adaptation |
 
 ### `settle()` never guesses

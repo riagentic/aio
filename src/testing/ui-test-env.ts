@@ -353,7 +353,7 @@ export function _installViewport(
 
 /** Does this happy-dom fire `hashchange` for `pushState`/`replaceState`?
  *
- *  MEASURED (happy-dom 20.14.5; 17.6.3 does not): its `Location` queues a
+ *  MEASURED (happy-dom 20.14.5, 21.0.4; 17.6.3 does not): `Location` queues a
  *  `hashchange` for EVERY URL write whose fragment differs — the two History
  *  calls included, for which a browser fires nothing (HTML, "URL and history
  *  update steps"). A router that `pushState`s to `/list#top` then hears its
@@ -390,7 +390,7 @@ export function _historyFiresHashchange(hd: AnyDoc): Promise<boolean> {
  *  browser re-rendered. A test of "Back returns to the list" could not pass
  *  against a correct app.
  *
- *  RE-MEASURED (happy-dom 20.14.5): the traversal is same-document now and
+ *  RE-MEASURED (happy-dom 20.14.5, 21.0.4): the traversal is same-document and
  *  `popstate` carries the right state — but it all happens INSIDE `back()`,
  *  where a browser queues a task (code right after `back()` reads the old
  *  URL). Still replaced, for that; `tests/testui-history-traversal.test.tsx`

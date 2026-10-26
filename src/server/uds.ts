@@ -21,6 +21,12 @@ import { writeClientLog } from "./client-log.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { encState, warnBigFullState } from "./server-broadcast.ts";
 import { decidePatchOrFull } from "./patch-or-full.ts";
+import {
+  createViewTally,
+  createViewTracker,
+  viewOps,
+  viewsOf,
+} from "./view-delta.ts";
 import { createLineReader } from "../protocol/line-reader.ts";
 import {
   udsWriteBacklog as _writeBacklog,
@@ -190,7 +196,14 @@ export type UDSClient = {
    *  `server-ws.ts` records as `meta.peer` and `am clients` reports. The UDS
    *  router negotiated the hello and threw it away, so on the desktop path
    *  (where every client lives) nothing knew which build it was talking to. */
-  peer?: { aio?: string; app?: string };
+  peer?: { aio?: string; app?: string; appId?: string };
+  /** An Electron window's main process said so (`type` `electron`) — the
+   *  one kind of UDS client that shows a time-travel panel. */
+  window?: boolean;
+  /** Time travel: the window said it shows the history (`tt-cmd` `sub`) or
+   *  does not (`unsub`). Unsaid: a window keeps receiving it, as before
+   *  `sub` existed; a peer never does. The WS twin is `ClientMeta.ttSub`. */
+  ttSub?: boolean;
   /** The PROVEN aio app on the other end (its identity hello), as the app's
    *  `resolvePeer` names it — the user its calls, views and hooks run as,
    *  exactly as over a TCP socket that carried the same proof. Undefined:
@@ -204,10 +217,7 @@ export type UDSPeerVerdict = { ok: true; user: AioUser | null } | {
   why: string;
 };
 
-type PatchEntry = {
-  cell: string;
-  ops: import("../protocol/patch-ops.ts").WirePatch[];
-};
+type PatchEntry = import("../protocol/broadcast-utils.ts").PatchEntry;
 
 /** A peer is gone: answer the control request still waiting on it NOW, with
  *  the reason. Left alone, the entry ran out `CLIENT_REPLY_TIMEOUT_MS` and
@@ -252,7 +262,13 @@ export type UDSHandle = {
    *  is a plausible number that is wrong. */
   broadcastState: (
     forceOrPatches?: boolean | PatchEntry[],
-  ) => { full: number; patch: number; owed?: boolean };
+  ) => {
+    full: number;
+    patch: number;
+    owed?: boolean;
+    /** `forUser` diffs sent, for `am cost` (`createViewTally`). */
+    viewBytes?: Map<string, Map<string, number>>;
+  };
   /** Pay every client a round was lost for (`needsFull`) its whole state NOW,
    *  without waiting for a round that an idle app never has. `full` counts
    *  the frames sent; `owed` says a debt is still unpaid (its snapshot could
@@ -408,6 +424,30 @@ export function createUDSListener(
   const listener = listenInLockDir(socketPath, peer?.required === true);
   const connSet = new Set<LocalConn>();
   const clientMap = new Map<LocalConn, UDSClient>();
+  // `visible.forUser` cells as per-client diffs — the WS broadcaster's rule
+  // (view-delta.ts). The baseline is stamped with `queuedJson`, which every
+  // whole-state send on this transport rewrites.
+  const _views = createViewTracker();
+  const _viewCellIds = new Set<string>();
+  const _viewCellsFor = (
+    patches: readonly PatchEntry[],
+    client: Pick<UDSClient, "subscriptions">,
+  ) =>
+    filterPatchesBySubs(patches.filter((p) => p.view), client.subscriptions)
+      .map((p) => p.cell);
+  /** Record the baseline a whole-state frame built from `view` leaves. */
+  const _viewsAfterFull = (client: UDSClient, view: unknown) =>
+    _views.set(
+      client,
+      viewsOf(
+        (view ?? {}) as Record<string, unknown>,
+        _viewCellsFor(
+          [..._viewCellIds].map((cell) => ({ cell, ops: [], view: true })),
+          client,
+        ),
+      ),
+      [client.queuedJson],
+    );
   const counter = clientCounter ?? { value: 0 };
   let closed = false;
   // The ONE process allowed on the other end, armed by the app after it spawns
@@ -671,6 +711,7 @@ export function createUDSListener(
             : envKind === "state"
             ? "full"
             : "other",
+          envKind,
         );
       } catch { /* aio-ok: metering must never break a send */ }
     }
@@ -742,6 +783,8 @@ export function createUDSListener(
   function _snapshot(
     client: Pick<UDSClient, "subscriptions" | "user">,
     verdict: SnapshotVerdict,
+    /** Receives the view object the JSON was built from. */
+    out?: { view?: unknown },
   ): string | undefined {
     verdict.attempted = true;
     try {
@@ -763,6 +806,7 @@ export function createUDSListener(
       // oversized cell after the first app's same-named one was reported.
       const snapshot = uiState;
       warnBigFullState(json, () => snapshot, getUIState);
+      if (out) out.view = uiState;
       return json;
     } catch (e) {
       // NOT a log line only. The caller's response to `undefined` is
@@ -822,7 +866,7 @@ export function createUDSListener(
     broadcast: (msg: string) => {
       const tt = msg.startsWith(_TT_FRAME);
       for (const [conn, c] of clientMap) {
-        if (tt && !_ttAllowed(c)) continue;
+        if (tt && (!_ttAllowed(c) || !(c.ttSub ?? c.window))) continue;
         sendTo(conn, msg);
       }
     },
@@ -834,6 +878,8 @@ export function createUDSListener(
       const patches = Array.isArray(forceOrPatches)
         ? forceOrPatches
         : undefined;
+      for (const p of patches ?? []) if (p.view) _viewCellIds.add(p.cell);
+      const viewTally = createViewTally();
 
       // A THROWN ROUND IS A LOST ROUND, and this loop had no catch.
       //
@@ -881,7 +927,7 @@ export function createUDSListener(
               client.subscriptions,
             );
 
-            const allOps = compactPatches(
+            let allOps = compactPatches(
               clientPatches.flatMap((p) =>
                 p.ops.map((op) => ({
                   ...op,
@@ -889,6 +935,29 @@ export function createUDSListener(
                 }))
               ),
             );
+            // `forUser` cells: this client's view diffed against what it
+            // holds (view-delta.ts). Their Immer ops never leave the server,
+            // so appending is order-safe.
+            const built: { view?: unknown } = {};
+            let builtJson: string | undefined;
+            let nextViews: ReturnType<typeof viewOps>["next"] | undefined;
+            let ownViewOps: ReturnType<typeof viewOps>["ops"] = [];
+            const vcells = _viewCellsFor(patches, client);
+            if (vcells.length > 0) {
+              builtJson = _snapshot(client, verdict, built);
+              if (builtJson === undefined) {
+                client.needsFull = true; // a lost round, as below
+                continue;
+              }
+              const r = viewOps(
+                _views.get(client, [client.queuedJson]),
+                built.view as Record<string, unknown>,
+                vcells,
+              );
+              nextViews = r.next;
+              ownViewOps = r.ops;
+              if (r.ops.length > 0) allOps = [...allOps, ...r.ops];
+            }
 
             if (allOps.length > 0) {
               const patchJson = JSON.stringify(allOps);
@@ -902,7 +971,7 @@ export function createUDSListener(
                 patchJson.length,
                 (client.queuedJson ?? client.lastFullJson)?.length,
                 fullThreshold,
-                () => _snapshot(client, verdict),
+                () => builtJson ?? _snapshot(client, verdict, built),
               );
               if (sendFull && fullJson) {
                 debug(
@@ -925,12 +994,20 @@ export function createUDSListener(
                     client.needsFull = false; // paid once it is written
                   });
                 }
+                // Queued, or already held: either way exactly this view.
+                _viewsAfterFull(client, built.view);
               } else {
                 const fj = fullJson;
                 patch++;
+                const before = [client.queuedJson];
                 // The post-patch text when this round measured it; otherwise
                 // undefined — unknown, so nothing dedups against it.
                 client.queuedJson = fj;
+                // The `forUser` baseline moves WITH the frame.
+                if (nextViews) {
+                  _views.set(client, nextViews, [fj]);
+                  viewTally.add(ownViewOps);
+                } else _views.carry(client, before, [fj]);
                 sendTo(
                   conn,
                   encRaw("patches", patchJson),
@@ -953,7 +1030,8 @@ export function createUDSListener(
           }
 
           // Fallback: force-full, trailing flush, or no patches — send full state
-          const json = _snapshot(client, verdict);
+          const built: { view?: unknown } = {};
+          const json = _snapshot(client, verdict, built);
           if (!json) {
             // A snapshot that could not be built is a LOST round for this
             // client, like a thrown one below — and a force round's change (a
@@ -969,7 +1047,10 @@ export function createUDSListener(
           }
           // No change: the peer already holds (or has queued) exactly this.
           // `queuedJson`, not `lastFullJson` — see the threshold path above.
-          if (json === client.queuedJson) continue;
+          if (json === client.queuedJson) {
+            _viewsAfterFull(client, built.view); // it holds exactly this view
+            continue;
+          }
           const j = json;
           full++;
           client.queuedJson = j;
@@ -977,6 +1058,7 @@ export function createUDSListener(
             client.lastFullJson = j;
             client.needsFull = false; // the debt is paid once it is written
           });
+          _viewsAfterFull(client, built.view);
         } catch (e) {
           // This client's round is lost. Say so, and arrange for the NEXT one
           // to carry a whole state rather than a patch that assumes the lost
@@ -1006,7 +1088,12 @@ export function createUDSListener(
       }
       if (failed.length === 0) _broadcastRound.ok();
       _settleSnapshotVerdict(verdict);
-      return { full, patch, owed: _anyOwed() };
+      return {
+        full,
+        patch,
+        owed: _anyOwed(),
+        viewBytes: viewTally.mean(),
+      };
     },
     payDebts: () => {
       let full = 0, owed = false;
@@ -1019,7 +1106,8 @@ export function createUDSListener(
       };
       for (const [conn, client] of clientMap) {
         if (!client.needsFull) continue;
-        const json = _snapshot(client, verdict);
+        const built: { view?: unknown } = {};
+        const json = _snapshot(client, verdict, built);
         if (json === undefined) {
           owed = true; // still owed — the caller retries later
           continue;
@@ -1031,6 +1119,7 @@ export function createUDSListener(
           // Nothing in flight and the peer holds exactly this text: the view
           // healed back to what it already has — nothing is owed at all.
           if (json === client.lastFullJson) client.needsFull = false;
+          _viewsAfterFull(client, built.view);
           continue;
         }
         full++;
@@ -1039,6 +1128,7 @@ export function createUDSListener(
           client.lastFullJson = json;
           client.needsFull = false;
         });
+        _viewsAfterFull(client, built.view);
         debug(
           `uds: sending full state (${json.length}B) — client ` +
             `${client.index} lost a round and the app has not produced ` +
@@ -1183,6 +1273,11 @@ function _handleUDSConn(
   refusalsSaid: Set<string> = new Set(),
 ): Promise<void> {
   const decoder = new TextDecoder();
+  /** One `tt-state` frame to this client, when time travel is on and the
+   *  client may read every user's history (`_ttAllowed`). */
+  const _sendTT = (conn: LocalConn, c: UDSClient): void => {
+    if (tt && _ttAllowed(c)) sendTo(conn, enc("tt-state", tt.getBroadcast()));
+  };
   /** `onConnect` ran for this peer — so `onDisconnect` runs when it goes. */
   let announced = false;
   /** The peer's first frame has been looked at (see `hooks`). */
@@ -1473,16 +1568,6 @@ function _handleUDSConn(
               announced = true;
               _runConnHook("onConnect", hooks.onConnect, user);
             }
-            // Dev: hand the panel its history now — Ctrl+. binds on the first
-            // tt-state frame, so without this the shortcut is inert until the
-            // next recorded action's broadcast. At the FIRST frame, not at
-            // accept: an identity hello decides whether this peer may read it.
-            if (
-              tt && !control && clientMap.has(conn) &&
-              _ttAllowed(clientMap.get(conn))
-            ) {
-              sendTo(conn, enc("tt-state", tt.getBroadcast()));
-            }
           }
           switch (frame.t) {
             case "ping":
@@ -1501,13 +1586,20 @@ function _handleUDSConn(
               if (kind === "control") {
                 _forgetClientDegraded(clientMap.get(conn));
                 clientMap.delete(conn);
-              } else if (
-                kind === "electron" && Array.isArray(t?.caps) &&
-                t.caps.includes("dialog") && clientMap.has(conn)
-              ) {
+              } else if (kind === "electron" && clientMap.has(conn)) {
+                const c = clientMap.get(conn)!;
+                // Dev: hand the panel its history now — Ctrl+. binds on the
+                // first tt-state frame. To a WINDOW only: a `peer()` app on
+                // this socket never shows a panel (aipro §9).
+                if (!c.window) {
+                  c.window = true;
+                  _sendTT(conn, c);
+                }
                 // An Electron MAIN PROCESS that opens native dialogs owned by
                 // its window — pickFile/pickDirectory route to it (#10).
-                _becomeDialogHost();
+                if (Array.isArray(t?.caps) && t.caps.includes("dialog")) {
+                  _becomeDialogHost();
+                }
               }
               continue;
             }
@@ -1521,9 +1613,24 @@ function _handleUDSConn(
                 );
                 continue;
               }
-              if (tt && typeof frame.d === "string") {
-                const cmd = parseTTCommand(frame.d);
+              // A string here, `{cmd}` from a page (`enc("tt-cmd", {cmd})`,
+              // relayed as-is by the Electron main process).
+              const body = typeof frame.d === "string"
+                ? frame.d
+                : (frame.d as { cmd?: unknown } | undefined)?.cmd;
+              const c = clientMap.get(conn);
+              if (tt && c && (body === "sub" || body === "unsub")) {
+                c.ttSub = body === "sub";
+                // What it missed while it was not subscribed.
+                if (c.ttSub) _sendTT(conn, c);
+                continue;
+              }
+              if (tt && typeof body === "string") {
+                const cmd = parseTTCommand(body);
                 if (cmd) {
+                  // A client that drives time travel is shown what it did,
+                  // unless it said otherwise.
+                  if (c) c.ttSub ??= true;
                   tt.onCommand(cmd.cmd, "arg" in cmd ? cmd.arg : undefined);
                 }
               }
@@ -1538,7 +1645,13 @@ function _handleUDSConn(
               const result = negotiateProtocol(protoHello(VERSION), theirs);
               if (result.ok) {
                 const c = clientMap.get(conn);
-                if (c) c.peer = { aio: theirs.ver, app: theirs.app };
+                if (c) {
+                  c.peer = {
+                    aio: theirs.ver,
+                    app: theirs.app,
+                    appId: theirs.appId,
+                  };
+                }
               } else {
                 log.error("uds", `protocol mismatch — ${result.reason}`);
                 // The v2 frame for a v2 peer (`cli-client.ts` routes it),

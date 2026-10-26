@@ -73,7 +73,11 @@ Deno.test("uds time travel: proven non-admin refused, admin + anonymous window s
   try {
     const bob = await open(hello("bob"));
     const alice = await open(hello("alice"));
-    const win = await open(enc("ping"));
+    const win = await open(enc("type", { kind: "electron" }));
+    // A peer is sent no history unless it asks; the admin bar decides then.
+    await until(() => alice.got().includes('"cid":"h-alice","ok":true'));
+    await alice.send(enc("tt-cmd", "sub"));
+    await bob.send(enc("tt-cmd", "sub"));
     await until(() =>
       alice.got().includes('"t":"tt-state"') &&
       win.got().includes('"t":"tt-state"') &&

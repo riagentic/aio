@@ -306,7 +306,7 @@
           "jsr:@std/testing@1.0.17",
           "jsr:@std/yaml@1.0.9",
           "npm:esbuild@0.25.12",
-          "npm:happy-dom@20.14.5",
+          "npm:happy-dom@21.0.4",
           "npm:immer@10.2.0",
           "npm:react-dom@19.1.0",
           "npm:react@19.1.0"

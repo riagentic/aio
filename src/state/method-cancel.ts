@@ -346,6 +346,12 @@ export function _pendingCallPromises(): Promise<unknown>[] {
   return _pendingFor();
 }
 
+/** Framework-internal: the method keys of every async call still finishing
+ *  (body or commit), process-wide — a dev reload names what it cut off. */
+export function _pendingCallKeys(): string[] {
+  return [..._pending.values()].map((v) => v.call?.key ?? (v.prefix || "?"));
+}
+
 /** The pending calls belonging to `cells` of `app` (every call when `cells`
  *  is undefined and `app` is the wildcard — the process-wide view). */
 function _pendingFor(

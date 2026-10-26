@@ -591,6 +591,9 @@ export function _connectCli<S>(
      *  the current one is followed (`peer()` re-reads the lock files, since a
      *  restarted app binds a new port). Undefined: stay on the current URL. */
     retarget?: () => string | undefined;
+    /** The CALLING app's id, said in the hello (`ProtoHello.appId`) so the
+     *  callee's diagnostics can name it. An older server ignores it. */
+    appId?: string;
   },
 ): CliLink<S> {
   assertCliUrl(url);
@@ -1215,7 +1218,10 @@ export function _connectCli<S>(
       pacer = paced;
       // A3: announce our wire-protocol version before anything else.
       paced.push({
-        frame: enc("proto", protoHello(VERSION, stampedAppVersion())),
+        frame: enc("proto", {
+          ...protoHello(VERSION, stampedAppVersion()),
+          ...(opts?.appId ? { appId: opts.appId } : {}),
+        }),
         seq: _seq++,
       });
       stopHeartbeat();
@@ -1858,6 +1864,8 @@ export function _connectCliUDS<S>(
      *  verdict awaited before `ready` — a refusal fails loud, never falls
      *  back to anonymous. */
     proof?: () => Promise<string | undefined>;
+    /** The CALLING app's id, said in the hello — see `_connectCli`. */
+    appId?: string;
   },
 ): CliLink<S> {
   const _failOffline = opts?.offline === "fail";
@@ -2107,7 +2115,12 @@ export function _connectCliUDS<S>(
           });
         }
         writer!.write(
-          encoder.encode(enc("proto", protoHello(VERSION)) + "\n"),
+          encoder.encode(
+            enc("proto", {
+              ...protoHello(VERSION),
+              ...(opts?.appId ? { appId: opts.appId } : {}),
+            }) + "\n",
+          ),
         ).catch(() => {});
 
         wireOmit = undefined; // a new connection is a new answer

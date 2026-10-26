@@ -121,7 +121,7 @@ export function formatProfile(p: ComponentProfile, limit = 15): string[] {
     `${p.totalRenders} re-render(s)` +
     (p.timing
       ? ""
-      : " — timings OFF (call setProfiling(true), or open Redux DevTools)");
+      : " — timings OFF until now: call __aioProfile() again for the ms");
   const lines = [head, `  ${"component".padEnd(width)}  renders   ms  signals`];
   for (const r of p.rows.slice(0, limit)) {
     lines.push(

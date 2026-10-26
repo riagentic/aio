@@ -174,3 +174,22 @@ Deno.test("am cost: the unattributed rate is on the SEND ring's clock, not the r
   assert(line.includes("4.9 KB/s"), line);
   assert(out.includes("more than every cell combined"), out);
 });
+
+Deno.test("am cost: the unattributed line is broken down by envelope kind", () => {
+  const out = renderCost(report({
+    wire: {
+      ...report().wire,
+      bytesByKind: { patch: 180000, full: 19200, other: 49800 },
+      otherByEnv: {
+        ack: { frames: 3, bytes: 800 },
+        "tt-state": { frames: 2, bytes: 49000 },
+      },
+    },
+  }) as never);
+  const lines = out.split("\n");
+  const at = lines.findIndex((l) => l.includes("unattributed"));
+  assert(at >= 0, out);
+  assert(lines[at + 1]!.includes("tt-state"), "largest first:\n" + out);
+  assert(lines[at + 1]!.includes("4.8 KB/s"), lines[at + 1]);
+  assert(lines[at + 2]!.includes("ack"), out);
+});

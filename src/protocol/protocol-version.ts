@@ -115,7 +115,9 @@ export type ProtoHello = {
   /** The SERVER's `appId` — which app this connection is. A page carrying
    *  unsent calls across a reload sends them only to the same app; the
    *  hello is the one frame every transport (WS, UDS) sends first, where an
-   *  Electron shell has no `__aioConfig` yet. Additive within v3. */
+   *  Electron shell has no `__aioConfig` yet. Additive within v3.
+   *  From a `peer()` CLIENT: the calling app's id — a claim for the callee's
+   *  diagnostics (`peer:<app>`), never an identity (the proof header is). */
   appId?: string;
   /** Who the SERVER says this connection is: the user id its auth attached,
    *  `null` for an anonymous one. Read by the reload carry, which sends a

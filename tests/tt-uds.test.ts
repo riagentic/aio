@@ -36,7 +36,9 @@ Deno.test({
       // tt-state is sent at the peer's FIRST frame, not at accept: an identity
       // hello decides whether this peer may read the history (L15). A window
       // always speaks first; so does this test.
-      await conn.write(new TextEncoder().encode(enc("ping", 1) + "\n"));
+      await conn.write(
+        new TextEncoder().encode(enc("type", { kind: "electron" }) + "\n"),
+      );
       // Read greeting lines until tt-state arrives (proto, state, tt-state…),
       // each read bounded: a missing frame is a red test, never a hung suite.
       const buf = new Uint8Array(65536);

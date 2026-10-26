@@ -27,7 +27,7 @@
 // happy-dom fixes this it becomes a no-op rather than a competing
 // implementation.
 //
-// RE-MEASURED (happy-dom 20.14.5, what aio pins now): fixed upstream — the
+// RE-MEASURED (happy-dom 20.14.5 and 21.0.4, what aio pins now): fixed — the
 // proof below finds a working DOM and nothing is patched (the form tests stay
 // green with this file disabled). It stays for the document a CALLER hands
 // in (`testUI(App, { document })`, `testComponent`): that window comes from
@@ -140,7 +140,7 @@ export function repairProxiedSiblings(win: AnyNode): string[] {
 /**
  * Let the test DOM dispatch an `Event` made by the HOST's constructor again.
  *
- * MEASURED (happy-dom 20.14.5; 17.6.3 has no such check): `dispatchEvent`
+ * MEASURED (happy-dom 20.14.5, 21.0.4; 17.6.3 has no such check): `dispatchEvent`
  * throws "parameter 1 is not of type 'Event'" for anything that is not an
  * instance of happy-dom's OWN `Event`. Under the harness `globalThis.Event` is
  * Deno's — `document` and `window` are the test window's, the event

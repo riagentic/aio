@@ -27,10 +27,13 @@ import { log } from "../diagnostics/logger-api.ts";
 export const MAX_SUBS = 1024;
 export const MAX_SUB_LEN = 256;
 
-/** Patch entry — cell name + Immer ops */
+/** Patch entry — cell name + Immer ops. `view`: a `visible.forUser` cell
+ *  changed this round — `ops` is empty, and each client is sent the diff of
+ *  its own view of the cell instead (server/view-delta.ts). */
 export type PatchEntry = {
   cell: string;
   ops: import("./patch-ops.ts").WirePatch[];
+  view?: true;
 };
 
 /** Filter a full state object by client subscriptions. Returns state as-is if subs is null. */

@@ -51,6 +51,9 @@ export type SendSample = {
    *  resends would report "most frames send the whole state" about traffic that
    *  is mostly 40-byte acknowledgements. */
   kind: "patch" | "full" | "other";
+  /** The envelope kind (`tt-state`, `ack`, `chunk`…) of an `other` frame —
+   *  what `wire.otherByEnv` splits `other` by; `?` when not an envelope. */
+  env?: string;
 };
 
 /** Per-key attribution for one broadcast round (computed once, not per client). */
@@ -113,6 +116,8 @@ export type CostReport = {
     byKind: { patch: number; full: number; other: number };
     /** Bytes per kind — `other` is the share no cell accounts for. */
     bytesByKind: { patch: number; full: number; other: number };
+    /** `other`, split by envelope kind — "other: 104 MB" named no sender. */
+    otherByEnv: Record<string, { frames: number; bytes: number }>;
     totalBytes: number;
     frames: number;
   };
@@ -171,7 +176,12 @@ const DEFAULT_ATTRIBUTIONS = 8192;
 const DEFAULT_REDUCES = 2048;
 
 export interface CostMeter {
-  recordSend(bytes: number, clientId: string, kind: SendSample["kind"]): void;
+  recordSend(
+    bytes: number,
+    clientId: string,
+    kind: SendSample["kind"],
+    env?: string,
+  ): void;
   /** Mint the id for one broadcast round. Every attribution for that round
    *  passes it back, so "pushes" counts ROUNDS rather than timestamps. */
   beginRound(): number;
@@ -221,8 +231,14 @@ export function createCostMeter(opts: {
   };
 
   return {
-    recordSend(bytes, clientId, kind) {
-      sends.push({ at: now(), bytes, clientId, kind });
+    recordSend(bytes, clientId, kind, env) {
+      sends.push({
+        at: now(),
+        bytes,
+        clientId,
+        kind,
+        ...(kind === "other" ? { env: env ?? "?" } : {}),
+      });
       if (kind !== "other") {
         life.bytes += bytes;
         life.count++;
@@ -419,6 +435,13 @@ export function createCostMeter(opts: {
         other: sendRows.filter((s) => s.kind === "other")
           .reduce((n, s) => n + s.bytes, 0),
       };
+      const otherByEnv: Record<string, { frames: number; bytes: number }> = {};
+      for (const x of sendRows) {
+        if (x.kind !== "other") continue;
+        const e = otherByEnv[x.env ?? "?"] ??= { frames: 0, bytes: 0 };
+        e.frames++;
+        e.bytes += x.bytes;
+      }
       const pushes = byKind.patch + byKind.full;
 
       return {
@@ -441,6 +464,7 @@ export function createCostMeter(opts: {
           fullResendShare: pushes > 0 ? byKind.full / pushes : 0,
           byKind,
           bytesByKind,
+          otherByEnv,
           totalBytes,
           frames: sendRows.length,
         },

@@ -1595,7 +1595,7 @@ Deno.test({
         "@node-rs/crc32": "npm:@node-rs/crc32@1.10.6",
         // NOT the version aio pins for itself: `deno compile` installs the
         // linked framework's own pin beside this one, mid-compile — after
-        // what stays out of the binary was decided. (With `^20`, as scaffolded,
+        // what stays out of the binary was decided. (With `^21`, as scaffolded,
         // that was true only on days npm had a newer one than the pin.)
         "happy-dom": `npm:happy-dom@${
           aioHappyDom === "20.14.6" ? "20.14.5" : "20.14.6"

@@ -52,7 +52,7 @@ import {
 } from "./server-auth.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 import { isMacPlatform } from "../air/key-chord.ts";
-import type { VitalsSystem } from "../vitals/mod.ts";
+import type { ClientDesc, VitalsSystem } from "../vitals/mod.ts";
 import type { VitalsPing } from "../vitals/transport-probe.ts";
 import { VERSION } from "./aio-cli.ts";
 import {
@@ -382,6 +382,43 @@ export type ClientType =
   | "browser-reload"
   | "unknown";
 
+/** A WS client as a vitals alert names it: id, index, kind, user, and
+ *  whether it is on loopback — where a missed ping is the client's own busy
+ *  main thread, never the network. A `peer()` says `proto` and never `type`. */
+export function describeWsClient(
+  m: Pick<
+    ClientMeta,
+    | "id"
+    | "index"
+    | "clientType"
+    | "protocolVersion"
+    | "peer"
+    | "user"
+    | "request"
+  >,
+): ClientDesc {
+  const kind = m.clientType === "browser" || m.clientType === "electron"
+    ? m.clientType
+    : m.protocolVersion !== undefined
+    ? m.peer?.appId
+      ? `peer:${m.peer.appId}`
+      : `peer${m.peer?.app ? `@${m.peer.app}` : ""}`
+    : m.clientType;
+  const user = m.user?.id ? `, user=${m.user.id}` : "";
+  const ip = m.request?.ip ?? "";
+  // A local reverse proxy is a loopback address too, with a network behind
+  // it: "not the network" is claimed only for a DIRECT loopback client.
+  const h = m.request?.headers;
+  const proxied = !!h &&
+    ["forwarded", "x-forwarded-for", "x-real-ip"].some((k) => h.has(k));
+  return {
+    label: `client ${m.id.slice(0, 8)} (#${m.index}, ${kind}${user}${
+      proxied ? ", via proxy" : ""
+    })`,
+    loopback: !proxied && /^(127\.|::1$|::ffff:127\.)/.test(ip),
+  };
+}
+
 export type ClientMeta = {
   id: string;
   index: number;
@@ -401,6 +438,11 @@ export type ClientMeta = {
    *  connection map — the broadcaster's `tt-state` flush — applies the same
    *  admin bar as `tt-cmd` without a second copy of the auth mode. */
   perUserAuth?: boolean;
+  /** Time travel: the client said it shows the history (`tt-cmd` `sub`) or
+   *  does not (`unsub`). Unsaid: a UI client (`browser`/`electron`) keeps
+   *  receiving it, as before `sub` existed; anything else (a `peer()`, a
+   *  reload socket) never does. Read by server-broadcast.ts `flushTT`. */
+  ttSub?: boolean;
   lastFullJson?: string;
   /** True when `lastFullJson` is only a SIZE memo and no longer describes what
    *  the client holds — a patch moved the client on without re-serializing.
@@ -453,8 +495,9 @@ export type ClientMeta = {
   /** Negotiated wire-protocol version (A3). Undefined until the client's
    *  "proto" hello arrives. */
   protocolVersion?: number;
-  /** The client's own hello: its aio version and app version, when it said. */
-  peer?: { aio?: string; app?: string };
+  /** The client's own hello: its aio version, app version and — a `peer()`
+   *  — the calling app's id, when it said. */
+  peer?: { aio?: string; app?: string; appId?: string };
   /** The SESSION token this socket authenticated with, when it authenticated
    *  with one. A socket outlives the credential that opened it, so the token
    *  is kept and re-checked — see `_revalidate`. Absent for anonymous sockets
@@ -766,6 +809,12 @@ export function createWsManager(deps: WsDeps): WsManager {
   const _fuseShare = new Map<ClientMeta, number>();
 
   const connections = new Map<WebSocket, ClientMeta>();
+  // A frozen client's alert names it (aipro §11) — these ids are ours.
+  deps.vitalsSystem?.setClientDescriber((id) => {
+    for (const m of connections.values()) {
+      if (m.id === id) return describeWsClient(m);
+    }
+  });
   /** Sockets upgraded but not yet open → when they were admitted. A socket
    *  joins `connections` only at `onopen`, so a ceiling that counted
    *  `connections` alone admitted every handshake of a burst: measured, 20
@@ -1379,7 +1428,7 @@ export function createWsManager(deps: WsDeps): WsManager {
             : envKind === "state"
             ? "full"
             : "other";
-          meter.recordSend(bytes, clientId, kind);
+          meter.recordSend(bytes, clientId, kind, envKind);
         } catch { /* metering must never break a send */ }
         // The wrapper's parameter type is the DOM union (which includes
         // SharedArrayBuffer); the underlying send accepts the narrower one.
@@ -1619,19 +1668,6 @@ export function createWsManager(deps: WsDeps): WsManager {
           socket.send(f);
         } catch {
           break; // aio-ok: closing during onopen — its reconnect replays
-        }
-      }
-      // The whole action log — every user's action types and error text — so
-      // under per-user auth it is admin-only, like the `tt-cmd` it drives and
-      // the broadcaster's flush (server-broadcast.ts `flushTT`).
-      if (
-        deps.getTTBroadcast &&
-        !(meta.perUserAuth && !rawStateControlAllowed(meta.user))
-      ) {
-        try {
-          socket.send(enc("tt-state", deps.getTTBroadcast()));
-        } catch (e) {
-          deps.debug(`ws: getTTBroadcast error on connect — ${e}`);
         }
       }
       try {
@@ -2236,7 +2272,15 @@ export function createWsManager(deps: WsDeps): WsManager {
         return;
       case "type": {
         const t = (frame.d as { kind?: string } | undefined)?.kind;
-        if (t === "electron" || t === "browser") meta.clientType = t;
+        if (t === "electron" || t === "browser") {
+          // The time-travel greeting goes to a UI, at its `type` frame rather
+          // than at open: Ctrl+. binds on the first `tt-state`, and a
+          // `peer()` socket — which never says `type` — never shows a panel.
+          if (meta.clientType !== "browser" && meta.clientType !== "electron") {
+            _sendTT(socket, meta);
+          }
+          meta.clientType = t;
+        }
         return;
       }
       case "proto": {
@@ -2279,11 +2323,18 @@ export function createWsManager(deps: WsDeps): WsManager {
         meta.protocolVersion = result.effective;
         // What the client SAID it is — shown by `am clients`, so an operator
         // can see which aio / app build each connection runs.
-        meta.peer = { aio: theirs.ver, app: theirs.app };
+        meta.peer = { aio: theirs.ver, app: theirs.app, appId: theirs.appId };
         return;
       }
       case "tt-cmd":
         if (deps.onTTCommand) {
+          const cmd = (frame.d as { cmd?: string } | undefined)?.cmd;
+          if (cmd === "sub" || cmd === "unsub") {
+            meta.ttSub = cmd === "sub";
+            // What it missed while it was not subscribed.
+            if (meta.ttSub) _sendTT(socket, meta);
+            return;
+          }
           // Raw-state control, on a socket. Same admin bar as /__aio/snapshot
           // and /__aio/trojan/* — see rawStateControlAllowed.
           if (deps.perUserAuth && !rawStateControlAllowed(meta.user)) {
@@ -2300,6 +2351,9 @@ export function createWsManager(deps: WsDeps): WsManager {
             );
             return;
           }
+          // A socket that drives time travel is shown what it did, unless
+          // it said otherwise.
+          meta.ttSub ??= true;
           _handleTTCommand(
             (frame.d as { cmd?: string } | undefined)?.cmd ?? "",
           );
@@ -2573,6 +2627,20 @@ export function createWsManager(deps: WsDeps): WsManager {
       } catch {
         pending.resolve(null);
       }
+    }
+  }
+
+  /** One `tt-state` frame to this socket. The whole action log — every user's
+   *  action types and error text — so under per-user auth it is admin-only,
+   *  like the `tt-cmd` it drives and the broadcaster's flush
+   *  (server-broadcast.ts `flushTT`). */
+  function _sendTT(socket: WebSocket, meta: ClientMeta): void {
+    if (!deps.getTTBroadcast) return;
+    if (meta.perUserAuth && !rawStateControlAllowed(meta.user)) return;
+    try {
+      socket.send(enc("tt-state", deps.getTTBroadcast()));
+    } catch (e) {
+      deps.debug(`ws: getTTBroadcast error — ${e}`);
     }
   }
 

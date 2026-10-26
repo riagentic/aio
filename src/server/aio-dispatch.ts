@@ -526,9 +526,9 @@ export function setupDispatch<S, A, E, App = any>(
       // meaningfully changed. Writing reducers that avoid pointless writes is
       // the RIGHT thing for an app to do; the framework must not punish it.
       //
-      // Patches that exist but are all filtered out by cell strategy still
-      // fall through to full state below — that fallback is what "full"
-      // strategy cells depend on.
+      // A `forUser` ("full"-strategy) cell's ops are replaced by a `view`
+      // marker, and each transport sends every client the diff of its own
+      // view of that cell (server/view-delta.ts).
       if (patches.length === 0) return;
       const validPatches = cellPatchStrategies
         ? filterPatchesByStrategy(
@@ -538,7 +538,7 @@ export function setupDispatch<S, A, E, App = any>(
         )
         : patches;
       // …and NOTHING VISIBLE CHANGED → nothing to send either. `[]` (not
-      // `undefined`, which is the "full"-strategy fallback) means every op was
+      // `undefined`, which is the full-state fallback) means every op was
       // on a `visible: "none"` cell or an excluded field. Broadcast, it became
       // a FORCE round: every client got the whole visible state again (after
       // any patch round the dedup memo is stale), and UDS clears its memo on

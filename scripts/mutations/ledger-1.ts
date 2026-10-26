@@ -1158,9 +1158,10 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "with per-user auth, a socket's connect greeting hands a non-admin the whole time-travel history of every user",
     file: "src/server/server-ws.ts",
-    find: "        !(meta.perUserAuth && !rawStateControlAllowed(meta.user))",
+    find:
+      "    if (meta.perUserAuth && !rawStateControlAllowed(meta.user)) return;",
     replace:
-      "        !(meta.perUserAuth && !rawStateControlAllowed(meta.user) && Date.now() < 0)",
+      "    if (meta.perUserAuth && !rawStateControlAllowed(meta.user) && Date.now() < 0) return;",
     test: "tests/tt-state-per-user-admin-only.test.ts",
     filter:
       "tt-state: a user's action log reaches admin sockets, never another user's — on flush and on connect",

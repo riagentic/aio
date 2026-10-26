@@ -21,7 +21,11 @@
 
 import { basename, dirname, fromFileUrl, join } from "@std/path";
 import { log } from "../diagnostics/logger-api.ts";
+import { count } from "../diagnostics/fmt.ts";
+import { pendingKeys } from "../protocol/pending-calls.ts";
+import { _pendingCallKeys } from "../state/method-cancel.ts";
 import { parentPidOf } from "./process-liveness.ts";
+import { processStopping } from "./shutdown.ts";
 import {
   AppLock,
   instances,
@@ -188,9 +192,43 @@ export async function relaunchArgs(): Promise<string[]> {
   return (await realArgv()) ?? synthesizedArgs();
 }
 
-let _restarting = false;
+/** How long a dev reload lets the calls in flight finish before it restarts.
+ *
+ *  The restart's teardown is the graceful stop's (`shutdown.ts`): it ABORTS
+ *  every running method — right for a stop, wrong for a save. A field report
+ *  lost 22 peer translations to a few saves of a cell file. So the reload
+ *  first waits — new calls still admitted, `onStopping` and the stop itself
+ *  untouched — and only then runs that same stop. Bounded: a save always
+ *  restarts, at most this much later, and says what it cut off. */
+export const RELOAD_DRAIN_MS = 5000;
 
-/** True from the moment a cell-change restart begins in THIS process until it
+/** Every call in flight in this process — async methods still running or
+ *  committing (`method-cancel.ts`), worker-cell calls (`pending-calls.ts`). */
+const inFlight = (): string[] =>
+  [...new Set([...pendingKeys(), ..._pendingCallKeys()])].sort();
+
+/** Wait up to `budgetMs` for every call in flight to finish. Returns the
+ *  calls still running at the bound (`cell:method`), `[]` when all ended. A
+ *  poll, not a promise: a worker cell's call has no promise on this side. */
+export async function drainForReload(budgetMs: number): Promise<string[]> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    const running = inFlight();
+    const left = deadline - Date.now();
+    if (running.length === 0 || left <= 0) return running;
+    // aiol-ok: a dev reload's bounded drain poll — schedule.* is app-side.
+    await new Promise((r) => setTimeout(r, Math.min(left, 25)));
+  }
+}
+
+let _restarting = false;
+/** Set when the restart's TEARDOWN begins — after the drain. While the drain
+ *  waits, the app is still running: a window the user closes then is a user
+ *  closing it (a stop, which cancels the restart), not the restart's own. */
+let _tearingDown = false;
+
+/** True from the moment a cell-change restart's teardown begins (after the
+ *  in-flight drain) in THIS process until it
  *  exits (supervised child) or has become the supervisor — it never goes back
  *  to false. Everything the restart's own teardown ends is EXPECTED while this
  *  is true: the Electron window `shutdown()` kills is the case. Its exit used
@@ -199,7 +237,13 @@ let _restarting = false;
  *  become the supervisor, so the relaunched child followed its dead parent
  *  two seconds later and a cell edit under `--client=electron` ended the dev
  *  session (field report cc §5). */
-export const isRestarting = (): boolean => _restarting;
+export const isRestarting = (): boolean => _tearingDown;
+
+/** True from the moment a save claims a restart — the drain included — until
+ *  the process is gone. The watcher holds the browser reload meanwhile: pages
+ *  reloaded onto the new bundle while the OLD cell code still serves would
+ *  call methods it does not have, and reload a second time on the new boot. */
+export const restartPending = (): boolean => _restarting;
 
 /** What the restarted app must inherit from the one being torn down. */
 export interface RestartCarry {
@@ -423,6 +467,32 @@ export async function restartForCellChange(
   log.info("watch", `${what} changed (${file}) — restarting the app`);
   const hint = scriptedRunHint(Deno.args, isSupervisedChild());
   if (hint) log.info("watch", hint);
+  const running = inFlight();
+  if (running.length > 0) {
+    log.info(
+      "watch",
+      `waiting up to ${RELOAD_DRAIN_MS}ms for ${
+        count(running.length, "call")
+      } in flight to finish (${running.join(", ")})`,
+    );
+    const t0 = Date.now();
+    const cut = await drainForReload(RELOAD_DRAIN_MS);
+    if (cut.length > 0) {
+      log.warn(
+        "watch",
+        `restarting with ${count(cut.length, "call")} still running after ` +
+          `${RELOAD_DRAIN_MS}ms (${cut.join(", ")}) — aborted now, as a stop ` +
+          `aborts them; their callers fail. End them on \`s.$signal\`, or ` +
+          `save when they are done.`,
+      );
+    } else {
+      log.info("watch", `in-flight calls finished in ${Date.now() - t0}ms`);
+    }
+  }
+  // A stop (`am stop`, Ctrl-C, the window closed) during the wait owns the
+  // exit: restarting now would bring back an app that was asked to go away.
+  if (processStopping()) return;
+  _tearingDown = true;
   // Read BEFORE the shutdown releases the listener: afterwards there is no
   // bound port to read.
   const port = carry.port?.();

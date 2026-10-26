@@ -59,8 +59,16 @@ export type VitalsSystem = {
    *  client's rounds, so the moment it recovers it is owed the state those
    *  rounds carried — see `resyncRecovered` in server-broadcast.ts. */
   onClientRecovered: (fn: (clientId: string) => void) => () => void;
+  /** Who a client id is, for the alerts that name one (frozen / recovered):
+   *  set by the transport that owns the ids (server-ws.ts). */
+  setClientDescriber: (
+    fn: (clientId: string) => ClientDesc | undefined,
+  ) => void;
   destroy: () => void;
 };
+
+/** A client as an alert names it. `label`: id, kind, user. */
+export type ClientDesc = { label: string; loopback: boolean };
 
 /** Serializable data exposed via the /__aio/vitals HTTP endpoint. */
 export type VitalsEndpointData = {
@@ -133,6 +141,18 @@ export function createVitalsSystem(
   const hintsEnabled = config.hints !== false;
   const onAlert = config.onVitalAlert;
 
+  let _describer: (id: string) => ClientDesc | undefined = () => undefined;
+  /** The alert's client, or one by its id alone: a frozen client's id used
+   *  to be dropped, and six connected clients left nothing to go on. */
+  const _describe = (id: string): ClientDesc => {
+    try {
+      const d = _describer(id);
+      if (d) return d;
+    } catch (e) {
+      log.error("vitals", `the client describer threw — ${thrownText(e)}`);
+    }
+    return { label: `client ${id.slice(0, 8)}`, loopback: false };
+  };
   /** Who is told a frozen client recovered — see `onClientRecovered`. */
   const _recoveredListeners = new Set<(clientId: string) => void>();
   const loopProbe = createLoopProbe(thresholds);
@@ -146,12 +166,13 @@ export function createVitalsSystem(
     // client unreachable for 0.0s". A diagnostic whose one number can only
     // ever be zero says less than no number at all.
     onClientFrozen: (clientId, unreachableFor) => {
-      void clientId;
       fireAlert(
         "transport",
         "frozen",
         unreachableFor,
         thresholds.transport.frozen,
+        "ms",
+        _describe(clientId),
       );
     },
     onClientRecovered: (clientId) => {
@@ -172,7 +193,7 @@ export function createVitalsSystem(
           );
         }
       }
-      fireAlert("transport", "recovered", 0, 0);
+      fireAlert("transport", "recovered", 0, 0, "ms", _describe(clientId));
     },
   });
 
@@ -222,13 +243,19 @@ export function createVitalsSystem(
     measured: number,
     threshold: number,
     unit: "ms" | "actions" = "ms",
+    client?: ClientDesc,
   ) {
     // NOTE: no early return on "no user callbacks". The diagnostic-bus emit
     // below is what feeds the logger, amui and `am`, so bailing out here made
     // every vitals alert invisible under the DEFAULT config (no onVitalAlert,
     // no reporter) — the exact setup where a freeze most needs to be seen.
     const snap = buildSnapshot();
-    const hint = hintsEnabled ? evaluateHints(snap, thresholds) : null;
+    const evaluated = hintsEnabled
+      ? evaluateHints(snap, thresholds, client?.loopback)
+      : null;
+    const hint = evaluated && client
+      ? { ...evaluated, cause: `${client.label}: ${evaluated.cause}` }
+      : evaluated;
     const alert: VitalAlert = {
       id: generateCorrelationId(),
       layer,
@@ -270,9 +297,9 @@ export function createVitalsSystem(
       type: "vitals-alert",
       severity: status === "frozen" ? "error" : "warning",
       source: "vitals",
-      message: `[${layer}] ${status} — measured: ${+measured.toFixed(
-        1,
-      )}, threshold: ${threshold}`,
+      message: `[${layer}] ${status}${
+        client ? ` — ${client.label}` : ""
+      } — measured: ${+measured.toFixed(1)}, threshold: ${threshold}`,
       hint: hint?.suggestion,
     });
   }
@@ -395,6 +422,9 @@ export function createVitalsSystem(
     onClientRecovered: (fn) => {
       _recoveredListeners.add(fn);
       return () => _recoveredListeners.delete(fn);
+    },
+    setClientDescriber: (fn) => {
+      _describer = fn;
     },
     checkAndAlert,
     getEndpointData: () => ({

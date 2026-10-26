@@ -311,7 +311,7 @@ export async function _buildTestUI(
     } catch (e) {
       throw new Error(
         "testUI: no DOM available — add happy-dom to your deno.json imports " +
-          '("happy-dom": "npm:happy-dom@^20"), or pass { document } yourself',
+          '("happy-dom": "npm:happy-dom@^21"), or pass { document } yourself',
         { cause: e },
       );
     }

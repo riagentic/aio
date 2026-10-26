@@ -92,6 +92,12 @@ export function pendingForCell(prefix: string): number {
   return n;
 }
 
+/** The `cell:method` keys with a call in flight, sorted — what a bounded
+ *  wait names when it gives up. */
+export function pendingKeys(): string[] {
+  return [..._counts.keys()].sort();
+}
+
 /** Subscribe to changes. Returns an unsubscribe. */
 export function onPendingChange(
   fn: (key: string, n: number) => void,

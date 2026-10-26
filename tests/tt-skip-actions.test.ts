@@ -36,7 +36,11 @@ Deno.test({
       }
     };
     await new Promise<void>((res, rej) => {
-      ws.onopen = () => res();
+      ws.onopen = () => {
+        // A UI says what it is — tt-state goes to UIs, never to a peer.
+        ws.send(JSON.stringify({ v: 2, t: "type", d: { kind: "browser" } }));
+        res();
+      };
       ws.onerror = (e) => rej(e);
     });
     try {

@@ -73,13 +73,23 @@ Deno.test("filter+exclude drops excluded, keeps rest", () => {
   ]);
 });
 
-Deno.test("full strategy cell with patches → undefined", () => {
+Deno.test("full strategy cell with patches → a view marker, ops dropped; other cells still patch", () => {
   const patches: PatchEntry[] = [
     { cell: "big", ops: [{ op: "replace", path: ["x"], value: 1 }] },
+    { cell: "counter", ops: [{ op: "replace", path: ["n"], value: 5 }] },
+    { cell: "big", ops: [{ op: "replace", path: ["y"], value: 2 }] },
   ];
-  const strategies = new Map<string, CellPatchStrategy>([["big", "full"]]);
+  const strategies = new Map<string, CellPatchStrategy>([
+    ["big", "full"],
+    ["counter", "raw"],
+  ]);
   const result = filterPatchesByStrategy(patches, strategies, new Map());
-  assertEquals(result, undefined);
+  // The server's ops never leave (the client holds a per-user projection);
+  // one marker per cell tells the transport to diff each client's view.
+  assertEquals(result, [
+    { cell: "big", ops: [], view: true },
+    { cell: "counter", ops: [{ op: "replace", path: ["n"], value: 5 }] },
+  ]);
 });
 
 Deno.test("full cell exists but no patches this tick → other cells pass", () => {

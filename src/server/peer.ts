@@ -161,8 +161,16 @@ export async function peer<S = Record<string, unknown>>(
   target: string,
   opts: PeerOptions = {},
 ): Promise<Peer<S> | null> {
+  // Who is calling, said in the hello on EVERY door for the callee's
+  // diagnostics (`peer:<app>` in a frozen-client alert) — a claim, never an
+  // identity (the proof is): `as`, else the one other app running here.
+  const caller = opts.as ??
+    ((m) => m.length === 1 ? m[0]!.appId : undefined)(
+      AppLock.live().filter((l) => l.appId !== target),
+    );
   const o = {
     offline: opts.offline ?? "fail",
+    ...(caller ? { appId: caller } : {}),
     readyTimeoutMs: opts.readyTimeoutMs ?? 5_000,
     ...(opts.ackTimeoutMs !== undefined
       ? { ackTimeoutMs: opts.ackTimeoutMs }
@@ -231,7 +239,10 @@ export async function peer<S = Record<string, unknown>>(
     http = { base: () => base, headers: tokenHeader, where: () => base };
   } else {
     const live = pickInstance(target, list);
-    if (!live) return null;
+    if (!live) {
+      hintDefaultScope(target, opts.instance);
+      return null;
+    }
     // The port when there is one (it carries a token; the socket does not),
     // the socket only for a socket-only app. A lock written before `host` was
     // recorded: the default loopback bind.
@@ -509,6 +520,28 @@ export async function peer<S = Record<string, unknown>>(
     close,
     [Symbol.dispose]: close,
   };
+}
+
+/** Targets already hinted at — once per target per process (callers poll). */
+const hinted = new Set<string>();
+
+/** `null` from an `--instance` scope while the target runs as the DEFAULT
+ *  instance reads as "not running" — said once, with the opt-in that reaches
+ *  it. Never a silent fallback: crossing scopes leaves the caller's isolation
+ *  and drops its identity, so it stays the caller's explicit choice. */
+function hintDefaultScope(target: string, instance: string | null | undefined) {
+  if (instance !== undefined || !appsDirEnv() || hinted.has(target)) return;
+  const up = liveInstancesUnder("").some((i) =>
+    i.appId === target && i.status === "started" && !i.maintenance
+  );
+  if (!up) return;
+  hinted.add(target);
+  log.warn(
+    "peer",
+    `peer("${target}"): not running in this --instance scope, but running ` +
+      `as the default instance — reach it with ` +
+      `peer("${target}", { instance: null })`,
+  );
 }
 
 /** The ONE started instance of `appId`. Several (two data homes) → throw,

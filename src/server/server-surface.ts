@@ -216,7 +216,7 @@ export async function renderHeadlessSurface(
     return {
       ok: false,
       error:
-        'surface: happy-dom unavailable — add "happy-dom": "npm:happy-dom@^20" to deno.json imports for headless `am surface`',
+        'surface: happy-dom unavailable — add "happy-dom": "npm:happy-dom@^21" to deno.json imports for headless `am surface`',
     };
   }
 

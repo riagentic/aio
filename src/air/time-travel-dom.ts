@@ -13,6 +13,7 @@ let _ttPanel: HTMLElement | null = null;
 let _ttPanelVisible = false;
 let _ttKeyBound = false;
 let _ttKeyHandler: ((e: KeyboardEvent) => void) | null = null;
+let _onOpen: (open: boolean) => void = () => {};
 const _sendTTCmd = (cmd: string): void => _send(cmd);
 
 // ── Panel rendering ────────────────────────────────────────────────────
@@ -194,6 +195,7 @@ function _bindTTKey(): void {
     if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === "Period") {
       e.preventDefault();
       _ttPanelVisible = !_ttPanelVisible;
+      _onOpen(_ttPanelVisible);
       if (_ttPanelVisible) _renderTTPanel();
       if (_ttPanel) _ttPanel.style.display = _ttPanelVisible ? "flex" : "none";
     }
@@ -202,9 +204,14 @@ function _bindTTKey(): void {
 }
 
 /** A `tt-state` arrived: bind Ctrl+. once, and redraw an open panel. */
-export function _showTT(tt: TTMeta, send: (cmd: string) => void): void {
+export function _showTT(
+  tt: TTMeta,
+  send: (cmd: string) => void,
+  onOpen: (open: boolean) => void,
+): void {
   _ttState = tt;
   _send = send;
+  _onOpen = onOpen;
   _bindTTKey();
   if (_ttPanelVisible) _renderTTPanel();
 }

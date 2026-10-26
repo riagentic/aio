@@ -42,9 +42,17 @@ const orders = cell("orders", {
 Each cell declares its own `visible` config
 ([cell visibility](../state/cell-visibility.md)). `include`/`exclude` control
 which keys are sent. `forUser` runs per distinct user per state change —
-memoized on the whole user record, not just its id. A change to a `forUser` cell
-cannot be a patch: it sends each client its **whole** view (every cell it reads,
-not just that one). Never do expensive computation here.
+memoized on the whole user record, not just its id. Never do expensive
+computation here.
+
+A `forUser` cell's own Immer ops never leave the server (the client holds a
+per-user projection, not the cell). Instead, in a round that changed the cell,
+each client is sent the **diff of its own view** of that cell against the view
+it was last sent — ordinary `replace`/`add`/`remove` ops in the same `patches`
+frame as the round's other cells. A client whose view did not change is sent
+nothing; another user's rows never enter the diff, because it is computed from
+this client's view only. The first change after a connect/full frame that the
+server holds no record for sends that one cell's whole slice once.
 
 ## Delta compression
 
@@ -59,7 +67,9 @@ Automatic — no configuration required.
    view is sent instead. The comparison is in **bytes**, not changed keys.
 4. **A lost round** (backpressure, a frozen client, a snapshot that failed)
    makes that client's next frame a full state, never a patch that assumes the
-   skipped one landed. A frozen client that recovers is sent it at once.
+   skipped one landed. A frozen client that recovers is sent it at once. A
+   `forUser` change in a round queued for a slow client is owed as a full state
+   too (its diff is only valid against what the client holds when it is sent).
 
 ### Wire format
 
@@ -277,18 +287,23 @@ cells receives no server cell's deltas.
 
 ### Split cells by who reads them
 
-Subscription filtering, `forUser` full sends and the patch-vs-full comparison
+Subscription filtering, `forUser` view diffs and the patch-vs-full comparison
 all work at the **cell** level. A hot ticker in the same cell as a large, rarely
 read catalog reaches every client that shows either; two cells reach each only
 the clients that read them.
 
-### Keep `forUser` cells quiet
+### What a `forUser` change costs
 
-Every change to a cell with `forUser` sends each client its **whole** view —
-every cell it reads, as a `state` frame — because a per-user projection has no
-patch. Measured: one counter bump in a `forUser` cell re-sent 18 KB, where the
-same bump in a plain cell was a 71 B patch. Keep fast-changing fields out of
-`forUser` cells.
+A change to a `forUser` cell costs the diff of each client's view of THAT cell —
+not a resend. Measured (`tests/foruser-view-delta.test.ts`, 3 clients, a 90 KB
+per-user request list + a 60 KB admin-only pool): one field of one row went from
+179 065 B per broadcast (every client's whole view) to 188 B (two clients whose
+view holds the row; the third is sent nothing). Two costs remain, both per round
+that changes the cell: the server runs `forUser` once per distinct user and
+walks the parts of each view the filter rebuilt (rows taken from state by
+reference are compared by reference, so keep them — `filter`, not `map` into
+copies), and a view that changes wholesale (a re-sorted list, rows rebuilt every
+call) diffs into large ops, which past `fullStateThreshold` go as a full state.
 
 ### Use IDs, not embedded copies
 

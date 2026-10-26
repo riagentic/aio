@@ -4,6 +4,7 @@ import { signal } from "../state/signal.ts";
 import { enc } from "../protocol/envelope.ts";
 import {
   _sendTTCmd,
+  _ttHookOn,
   getTTState,
   subscribeTT,
   type TTMeta,
@@ -15,6 +16,7 @@ let _ttSubbed = false;
 function _ensureTTSub(): void {
   if (_ttSubbed) return;
   _ttSubbed = true;
+  _ttHookOn();
   subscribeTT((t) => _ttSig.set({ ...t }));
   const current = getTTState();
   if (current) _ttSig.set({ ...current });

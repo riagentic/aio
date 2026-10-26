@@ -256,6 +256,18 @@ const DEFAULT_EFFECT_BUDGET = 5;
  *  "feels instant" budget. */
 export const DEV_FRAME_BUDGET_MS = 16;
 
+/** The budget dispatch runs with: the app's own `perfBudget` MERGED over the
+ *  dev default per field — an app that sets only `methods` (or `effect`) keeps
+ *  dev's one-frame `reduce`; an explicit `reduce` wins. Prod: the app's as-is
+ *  (unset fields fall to the 100ms / 5ms defaults). Observe-only either way. */
+export function perfBudgetFor(
+  app: PerfBudget | undefined,
+  prod: boolean,
+): PerfBudget | undefined {
+  if (prod) return app;
+  return { ...app, reduce: app?.reduce ?? DEV_FRAME_BUDGET_MS };
+}
+
 /** Why a paused time-travel refusal is TAGGED.
  *
  *  An async method still running when the developer presses pause has its

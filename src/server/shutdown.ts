@@ -298,6 +298,12 @@ export function _setWatchdogMs(ms: number): () => void {
   };
 }
 
+/** True once `stopProcess` began: the process is on its way out, and
+ *  nothing else (a dev reload's restart) may claim the exit. */
+export function processStopping(): boolean {
+  return _exiting !== null;
+}
+
 /** Stop every app in this process, then END the process — the ONE way an aio
  *  process exits on a signal, a closed desktop window, or `am stop`.
  *

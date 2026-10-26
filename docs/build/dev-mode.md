@@ -275,6 +275,18 @@ on the same port; open tabs notice the new boot ID and reload themselves. The
 process that started the app becomes a thin supervisor and re-launches it, so
 the process depth stays at two no matter how many times you save.
 
+Calls in flight when you save are let finish first. The teardown is the same
+graceful stop as `am stop` (and that stop aborts every running method), so
+before it starts, the restart waits up to 5 s for the async method calls in
+flight in the process — your own, a peer's, a worker cell's — to finish. New
+calls are still accepted while it waits. The log says what it waited for
+(`waiting up to 5000ms for 2 calls in flight to finish (gn:translate)`). A call
+still running at the 5 s bound is aborted, as a stop aborts it, and named in a
+warning; its caller fails. A stop (`am stop`, Ctrl-C, closing the window) during
+the wait wins: the app stops and does not restart. Open pages are not reloaded
+during the wait (`reload held for the restart`), so they never run the new
+bundle against the old cell code; the restarted app reloads them.
+
 A save made while the app is still starting — after its files were loaded,
 before its watcher is up — restarts it as well: the watcher looks once, when it
 starts, for server-side files saved since the process began. A file the app's

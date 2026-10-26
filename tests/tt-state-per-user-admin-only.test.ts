@@ -36,7 +36,11 @@ function openWs(port: number, token: string) {
     onFrame();
   };
   const opened = new Promise<void>((res, rej) => {
-    ws.onopen = () => res();
+    ws.onopen = () => {
+      // A UI says what it is — tt-state goes to UIs, never to a peer.
+      ws.send(JSON.stringify({ v: 2, t: "type", d: { kind: "browser" } }));
+      res();
+    };
     ws.onerror = () => rej(new Error("ws failed to open"));
   });
   const closed = new Promise<void>((res) => (ws.onclose = () => res()));
@@ -108,7 +112,7 @@ Deno.test("tt-state: a user's action log reaches admin sockets, never another us
       await lateCarol.c.waitFor(isTTWithMark, 3000),
       "a late admin's greeting carries the history",
     );
-    await late.bob.waitFor((f) => f.includes('"t":"boot"'), 3000);
+    await late.bob.waitFor(isTT, 600);
     assertEquals(
       late.bob.frames.filter(isTT).length,
       0,

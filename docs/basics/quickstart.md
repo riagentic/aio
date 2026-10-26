@@ -180,7 +180,7 @@ This is the file it writes for `am create my-app` (browser target):
     "aio/ship": "./dep/aio/src/build/ship.ts",
     "esbuild": "npm:esbuild@0.25.12",
     "immer": "npm:immer@10.2.0",
-    "happy-dom": "npm:happy-dom@20.14.5",
+    "happy-dom": "npm:happy-dom@21.0.4",
     "@std/path": "jsr:@std/path@1.1.3",
     "@std/assert": "jsr:@std/assert@1.0.19"
   },

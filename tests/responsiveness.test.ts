@@ -9,7 +9,7 @@
 //     read, and per-client rate slots don't accumulate per connection.
 import { assert, assertEquals } from "@std/assert";
 import { createBlockingPool } from "../src/state/blocking.ts";
-import { DEV_FRAME_BUDGET_MS } from "../src/state/dispatch.ts";
+import { DEV_FRAME_BUDGET_MS, perfBudgetFor } from "../src/state/dispatch.ts";
 import { createLoopProbe } from "../src/vitals/loop-probe.ts";
 import { DEFAULT_THRESHOLDS } from "../src/vitals/types.ts";
 import {
@@ -96,11 +96,42 @@ Deno.test("an await on CPU work does NOT free the thread (why the docs say so)",
 
 Deno.test("dev budget is one frame; prod stays at the 100ms default", () => {
   assertEquals(DEV_FRAME_BUDGET_MS, 16, "one animation frame");
-  // The wiring lives in aio.ts (`prod ? undefined: { reduce: … }`); this pins
-  // the constant it wires, so a future edit can't quietly loosen dev.
+  // aio.ts wires it through `perfBudgetFor`; this pins the constant, so a
+  // future edit can't quietly loosen dev.
   assert(
     DEV_FRAME_BUDGET_MS < 100,
     "dev must be stricter than prod, never looser",
+  );
+});
+
+// aipro §10: an app's `perfBudget` REPLACED the dev default, so following the
+// BUDGET_EFFECT hint (`methods: { … }`) silently moved dev reduce to 100ms.
+Deno.test("an app's perfBudget merges over the dev default per field", async () => {
+  const methods = { "broker:models": { effect: 60 } };
+  assertEquals(perfBudgetFor({ methods }, false), {
+    methods,
+    reduce: DEV_FRAME_BUDGET_MS,
+  });
+  assertEquals(perfBudgetFor({ effect: 50 }, false), {
+    effect: 50,
+    reduce: DEV_FRAME_BUDGET_MS,
+  });
+  assertEquals(perfBudgetFor(undefined, false), {
+    reduce: DEV_FRAME_BUDGET_MS,
+  });
+  assertEquals(
+    perfBudgetFor({ reduce: 40 }, false),
+    { reduce: 40 },
+    "explicit wins",
+  );
+  assertEquals(perfBudgetFor({ methods }, true), { methods }, "prod: as-is");
+  assertEquals(perfBudgetFor(undefined, true), undefined);
+  const src = await Deno.readTextFile(
+    new URL("../src/server/aio.ts", import.meta.url),
+  );
+  assert(
+    /perfBudget: perfBudgetFor\(config\.perfBudget, prod\)/.test(src),
+    "aio.ts wires the app budget through perfBudgetFor",
   );
 });
 

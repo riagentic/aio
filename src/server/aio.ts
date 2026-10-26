@@ -153,7 +153,7 @@ import { adoptHiddenConsole } from "./no-console.ts";
 import { resolveDataDirLegacy } from "./paths.ts";
 import { carriedPort } from "./dev-restart.ts";
 import { describeMigration, migrateLegacyLayout } from "./app-dirs-migrate.ts";
-import { DEV_FRAME_BUDGET_MS } from "../state/dispatch.ts";
+import { perfBudgetFor } from "../state/dispatch.ts";
 import { setupTransport } from "./aio-server.ts";
 import {
   requestRestart,
@@ -3561,9 +3561,9 @@ async function _runPhases<S, A, E>(
       // the allowed direction (observe-only, throttled to one report per action
       // type per 10s) — it teaches the "keep actions instant, move compute
       // off-thread" habit while the app is still small. Prod keeps 100ms so a
-      // deployed app doesn't chatter. Override either with `perfBudget`.
-      perfBudget: config.perfBudget ??
-        (prod ? undefined : { reduce: DEV_FRAME_BUDGET_MS }),
+      // deployed app doesn't chatter. An app's `perfBudget` merges over it per
+      // field (setting `methods` alone keeps the dev reduce budget).
+      perfBudget: perfBudgetFor(config.perfBudget, prod),
       perfLog: (source, type, duration, budget, breakdown) =>
         getLogger()?.perf(source, type, duration, budget, breakdown),
       freezeState: config.freezeState ?? !prod,

@@ -492,6 +492,7 @@ export function createUdsBroadcastController(refs: {
       anyPatchSend: sent.patch > 0,
       force,
       patchesToSend: patches,
+      viewBytes: sent.viewBytes,
       getUIState: refs.getUIState ?? (() => undefined),
     });
   };

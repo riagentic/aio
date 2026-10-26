@@ -355,9 +355,9 @@ Two things the table makes plain:
 - **Patches do not care how big the state is.** A change is sent as the ops it
   made (`$p`), so one field changed in a 12 MB cell is a ~100-byte frame. The
   size is paid in full on **connect / reconnect** (every client gets its whole
-  view first), whenever a patch would be larger than half the view, after a slow
-  client falls behind, and on every change of a `forUser` cell (a per-user view
-  cannot be patched).
+  view first), whenever a patch would be larger than half the view, and after a
+  slow client falls behind. A `forUser` cell's change is the diff of each
+  client's own view of it, not a resend.
 - **Persist rewrites the whole cell** on every debounce window it changed in —
   unless the big array is a bound `db:` table, which is written row by row and
   kept out of the snapshot (so it never counts against the persist lines).
@@ -479,7 +479,7 @@ const orders = cell("orders", {
   state: { all: [] as Order[], stats: { open: 0 } },
   visible: {
     exclude: ["all"], // server-side working set, never on the wire
-    // or per user — note a forUser cell's change is sent WHOLE, never patched:
+    // or per user — each client is sent the diff of its own view:
     // forUser: (s, user) => ({ ...s, all: s.all.filter((o) => o.owner === user?.id) }),
   },
   methods: {/* … */},

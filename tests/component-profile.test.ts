@@ -75,10 +75,14 @@ Deno.test("timings OFF says so, instead of reporting zeros as 'instant'", () => 
   assertEquals(p.timing, false);
   const lines = formatProfile(p);
   assert(lines[0]!.includes("timings OFF"), lines[0]);
+  // aipro §12: it named `setProfiling(true)`, which no page or `am eval` can
+  // reach. The hint names the call that is on the page — and that already
+  // turned the clock on.
   assert(
-    lines[0]!.includes("setProfiling"),
-    `it says how to turn them on: ${lines[0]}`,
+    lines[0]!.includes("call __aioProfile() again"),
+    `it says how to get timings: ${lines[0]}`,
   );
+  assert(!lines[0]!.includes("setProfiling"), lines[0]);
   assert(lines.some((l) => l.includes(" - ")), "…and prints `-`, not `0.0`");
 });
 

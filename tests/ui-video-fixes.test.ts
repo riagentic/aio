@@ -164,7 +164,7 @@ Deno.test({
             "aio/ui": `${spec(REPO)}src/ui/mod.ts`,
             "aio/jsx-runtime": `${spec(REPO)}src/jsx-runtime.ts`,
             "aio/testing": `${spec(REPO)}src/cell-test.ts`,
-            "happy-dom": "npm:happy-dom@20.14.5",
+            "happy-dom": "npm:happy-dom@21.0.4",
             "immer": "npm:immer@10.2.0",
             "@std/path": "jsr:@std/path@1.1.3",
             "@std/assert": "jsr:@std/assert@1.0.19",

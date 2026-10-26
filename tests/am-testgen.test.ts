@@ -48,7 +48,7 @@ async function makeApp(dir: string, appTsx: string): Promise<void> {
         "aio/air": `${REPO}src/air.ts`,
         "aio/testing": `${REPO}src/cell-test.ts`,
         "aio/jsx-runtime": `${REPO}src/jsx-runtime.ts`,
-        "happy-dom": "npm:happy-dom@^20",
+        "happy-dom": "npm:happy-dom@^21",
       },
       compilerOptions: { jsx: "react-jsx", jsxImportSource: "aio" },
     }),

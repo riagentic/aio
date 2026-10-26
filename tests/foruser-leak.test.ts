@@ -41,6 +41,7 @@ import { createMemoizedUIState } from "../src/server/aio-run-helpers.ts";
 import { filterPatchesByStrategy } from "../src/state/state-filter.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 import type { PatchEntry } from "../src/protocol/broadcast-utils.ts";
+import { applyWirePatches, type WirePatch } from "../src/protocol/patch-ops.ts";
 import type { ClientMeta } from "../src/server/server-ws.ts";
 import type { AioUser } from "../src/server/aio-types.ts";
 
@@ -191,8 +192,8 @@ Deno.test("forUser: another user's row never reaches the wire", async () => {
 Deno.test("forUser: indices are never applied against a filtered array", async () => {
   // The corruption half. A raw op says "insert at index 1", but u1's filtered
   // array has ONE element, so applying it verbatim would place the row at the
-  // wrong position (or leave a hole). Under `full` there are no index-bearing
-  // ops on the wire at all — the client is sent whole, already-filtered state.
+  // wrong position (or leave a hole). Under `full` the server's ops never
+  // leave: the client is sent the diff of its OWN filtered view.
   const orders = ordersCell();
   const wiring = composeCellsWiring({
     // deno-lint-ignore no-explicit-any
@@ -244,12 +245,25 @@ Deno.test("forUser: indices are never applied against a filtered array", async (
   await new Promise((r) => setTimeout(r, 40));
   broadcaster.shutdown();
 
+  // The server's raw op (index 2) never goes out: what does is the diff of
+  // u1's OWN view, so applying the frames lands exactly on that view.
   const toU1 = a.sent.join("|");
   assert(
-    !toU1.includes('"$p"') && !toU1.includes('"patches"'),
-    `a forUser cell must not send index-bearing patch frames:\n${toU1}`,
+    !toU1.includes('"path":["orders","items",2]'),
+    `a raw server index reached the wire:\n${toU1}`,
   );
   assert(toU1.includes("mine"), `u1 must receive their own row:\n${toU1}`);
+  let held: unknown = {};
+  for (const f of a.sent) {
+    const m = JSON.parse(f) as { t: string; d: unknown };
+    held = m.t === "state" ? m.d : applyWirePatches(held, m.d as WirePatch[]);
+  }
+  assertEquals(
+    held,
+    JSON.parse(
+      JSON.stringify(wiring.autoGetUIState!(serverState, a.meta.user)),
+    ),
+  );
 });
 
 // ── Channel 2: a filter that THROWS ───────────────────────────────────────

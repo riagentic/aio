@@ -341,3 +341,21 @@ Deno.test("cost: two broadcast rounds in the SAME millisecond count as two pushe
       "and reported 400 B/push — an over-report exactly under load",
   );
 });
+
+Deno.test("cost: `other` is split by envelope kind (aipro §9)", () => {
+  // "other: 104 MB" took a source read to pin on `tt-state`. The meter now
+  // keeps each other-frame's envelope kind and totals them.
+  const { m, tick, now } = meterAt();
+  m.recordSend(240_000, "c0", "other", "tt-state");
+  m.recordSend(240_000, "c1", "other", "tt-state");
+  m.recordSend(40, "c0", "other", "ack");
+  m.recordSend(7, "c0", "other");
+  m.recordSend(1000, "c0", "patch", "patches");
+  tick(1000);
+  const r = m.report({ windowSec: 60, now: now() });
+  assertEquals(r.wire.otherByEnv, {
+    "tt-state": { frames: 2, bytes: 480_000 },
+    ack: { frames: 1, bytes: 40 },
+    "?": { frames: 1, bytes: 7 },
+  });
+});

@@ -280,16 +280,20 @@ automatically and says so, rather than silently replicating it.
 
 The framework picks the optimal broadcast strategy per cell automatically:
 
-| Cell UI config                 | Strategy | What's sent                    |
-| ------------------------------ | -------- | ------------------------------ |
-| `visible: "all"`               | `raw`    | Immer patches (most efficient) |
-| `visible: "none"`              | `skip`   | Nothing                        |
-| `visible: { include/exclude }` | `filter` | Filtered Immer patches         |
-| `visible: { ..., forUser }`    | `full`   | Full filtered state per client |
+| Cell UI config                 | Strategy | What's sent                               |
+| ------------------------------ | -------- | ----------------------------------------- |
+| `visible: "all"`               | `raw`    | Immer patches (most efficient)            |
+| `visible: "none"`              | `skip`   | Nothing                                   |
+| `visible: { include/exclude }` | `filter` | Filtered Immer patches                    |
+| `visible: { ..., forUser }`    | `full`   | Per client: diff of its view vs last sent |
 
-Cells without `forUser` get surgical patch-based updates. Adding `forUser` to a
-cell disables patches for that cell (full state sent each time). Use it only
-when you need per-user transforms.
+Cells without `forUser` get the server's own Immer patches. A `forUser` cell's
+patches never leave the server: each client is sent the diff of its own view of
+the cell against the one it was last sent (nothing, when its view did not
+change), in the same `patches` frame as the round's other cells — see
+[delta](../persistence/delta.md#cell-level-ui-filtering). Its cost is running
+`forUser` once per distinct user per change, so use it only when you need
+per-user transforms.
 
 ## Common Patterns
 

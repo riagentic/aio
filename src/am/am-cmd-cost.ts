@@ -47,6 +47,8 @@ type CostReport = {
     fullResendShare: number;
     byKind: { patch: number; full: number; other: number };
     bytesByKind?: { patch: number; full: number; other: number };
+    /** Absent from a server older than this command. */
+    otherByEnv?: Record<string, { frames: number; bytes: number }>;
     totalBytes: number;
     frames: number;
   };
@@ -178,6 +180,17 @@ export function renderCost(
         padL(fmtRate(otherRate), w.bytes)
       }   acks/diagnostics/time-travel — belongs to no cell`,
     );
+    // …and WHICH of them: "other: 104 MB" took a source read to pin on
+    // `tt-state` (aipro §9). Largest first, each at its share of the rate.
+    const envs = Object.entries(r.wire.otherByEnv ?? {})
+      .sort((a, b) => b[1].bytes - a[1].bytes);
+    for (const [env, e] of envs) {
+      lines.push(
+        `${pad(`  ${env}`, w.cell)}  ${padL(String(e.frames), w.pushes)}  ${
+          padL(fmtRate(otherRate * (e.bytes / bk.other)), w.bytes)
+        }`,
+      );
+    }
     if (otherRate > attributed) {
       lines.push(
         `${pad("", w.cell)}  ${padL("", w.pushes)}  ${padL("", w.bytes)}` +

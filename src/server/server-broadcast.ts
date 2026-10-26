@@ -40,6 +40,12 @@ import { rawStateControlAllowed } from "./server-auth.ts";
 import { overUtf8, utf8Size } from "../protocol/utf8-size.ts";
 import { decidePatchOrFull } from "./patch-or-full.ts";
 import { notDraining } from "../sync/server-handler.ts";
+import {
+  createViewTally,
+  createViewTracker,
+  viewOps,
+  viewsOf,
+} from "./view-delta.ts";
 
 /** Payload stats per client — tracked for vitals/trojan introspection */
 export type PayloadStats = Map<
@@ -188,19 +194,24 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
    *  reason. Pinned by tests/broadcast-degraded-per-round.test.ts. */
   type SnapshotVerdict = { attempted: boolean; failed: boolean; err: unknown };
 
+  /** A client's view as an object and as the JSON a full frame carries —
+   *  one build, so a `forUser` baseline (view-delta.ts) is exactly the view
+   *  the frame was serialized from. */
+  type ViewSnap = { json: string; view: Record<string, unknown> };
+
   /** Get filtered full-state JSON for a client (respects subscriptions).
    *  Records the outcome on `verdict`; the caller settles it once per round. */
   function _getFilteredFullJson(
     meta: ClientMeta,
     verdict: SnapshotVerdict,
-  ): string | undefined {
+  ): ViewSnap | undefined {
     verdict.attempted = true;
     try {
-      const uiState = filterStateBySubs(
+      const view = filterStateBySubs(
         getUIState(meta.user),
         meta.subscriptions,
-      );
-      return JSON.stringify(uiState);
+      ) as Record<string, unknown>;
+      return { json: JSON.stringify(view), view };
     } catch (e) {
       // NOT `debug`: the caller's response to `undefined` is `continue`, i.e.
       // this client silently stops receiving state — permanently, and with
@@ -236,8 +247,11 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
    *  `verdict`; the caller settles it once per pass. */
   function _viewSnapshotter(
     verdict: SnapshotVerdict,
-  ): (meta: ClientMeta) => string | undefined {
-    const fullByView = new Map<string, string | undefined>();
+  ): (meta: ClientMeta) => ViewSnap | undefined {
+    const fullByView = new Map<string, ViewSnap | undefined>();
+    // A user with no memo key is built once per CLIENT per pass — never
+    // twice: the frame and the `forUser` baseline must be the same build.
+    const byClient = new Map<ClientMeta, ViewSnap | undefined>();
     return (meta) => {
       // JSON, not `join(",")`: a subscription path is any client-supplied
       // string, so a joined key made {"a,b"} and {"a","b"} (and {"*"} and no
@@ -263,7 +277,12 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       // answers null for a user it cannot serialize, and then there is no
       // cache — never a shared bucket.
       const userKey = userMemoKey(meta.user);
-      if (userKey === null) return _getFilteredFullJson(meta, verdict);
+      if (userKey === null) {
+        if (!byClient.has(meta)) {
+          byClient.set(meta, _getFilteredFullJson(meta, verdict));
+        }
+        return byClient.get(meta);
+      }
       const key = `${userKey}|${subs}`;
       if (fullByView.has(key)) return fullByView.get(key);
       const json = _getFilteredFullJson(meta, verdict);
@@ -327,6 +346,28 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   const _sentView = (user: AioUser | undefined) => () =>
     getUIState(user) as Record<string, unknown> | undefined;
 
+  // ── `visible.forUser` cells as per-client diffs (view-delta.ts) ─────────
+  /** What each client holds of each `forUser` cell. */
+  const _views = createViewTracker();
+  /** Every `forUser` cell a round has named — the ones a full send records
+   *  a baseline for. */
+  const _viewCellIds = new Set<string>();
+  /** The memo a baseline is stamped with: every whole-state send, from any
+   *  path (server-ws.ts's subs/resync/user change too), rewrites it. */
+  const _token = (m: ClientMeta) => [m.lastFullJson, !!m.lastFullJsonStale];
+  /** The `forUser` cells among `patches` that `meta` reads. */
+  const _viewCellsFor = (patches: readonly PatchEntry[], meta: ClientMeta) =>
+    filterPatchesBySubs(patches.filter((p) => p.view), meta.subscriptions)
+      .map((p) => p.cell);
+  /** Record the baseline a whole-state frame built from `snap` leaves. */
+  function _viewsAfterFull(meta: ClientMeta, snap: ViewSnap | undefined) {
+    const cells = _viewCellsFor(
+      [..._viewCellIds].map((cell) => ({ cell, ops: [], view: true })),
+      meta,
+    );
+    _views.set(meta, viewsOf(snap?.view ?? {}, cells), _token(meta));
+  }
+
   /** `am cost` for a debt payment: the whole slice went, outside any round. */
   function _attributeDebtPaid(user: AioUser | undefined): void {
     if (!costMeter) return;
@@ -380,7 +421,11 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
         failed: false,
         err: undefined,
       };
-      const fullFor = _viewSnapshotter(snapshot);
+      const snapFor = _viewSnapshotter(snapshot);
+      const fullFor = (m: ClientMeta) => snapFor(m)?.json;
+      for (const p of patchesToSend) if (p.view) _viewCellIds.add(p.cell);
+      /** Every client's `forUser` ops, for `am cost` (attributed once). */
+      const viewTally = createViewTally();
       let anyPatchSend = false;
       // One ROUND regardless of client count — the per-client sends below feed
       // payload/bandwidth, but the broadcasts/sec rate diagnoses dispatch
@@ -441,13 +486,36 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
         // Recorded for `am cost`: a full resend is itself a finding, so the kind
         // is tracked where it is DECIDED rather than sniffed off the wire later.
         let sentKind: "patch" | "full" = "full";
+        /** The `forUser` baseline this round's patch leaves, when it has one. */
+        let nextViews: ReturnType<typeof viewOps>["next"] | undefined;
+        let ownViewOps: ReturnType<typeof viewOps>["ops"] = [];
 
         if (!force && !meta.needsFull && patchesToSend.length > 0) {
           // The rounds skipped while it was over the mark go first, in order.
           const fresh = _clientOps(patchesToSend, meta);
-          const allOps = compactPatches(
+          let allOps = compactPatches(
             meta.skipped ? [...meta.skipped.ops, ...fresh] : fresh,
           );
+          // `forUser` cells: the diff of THIS client's view against what it
+          // holds. No op touches them above (their Immer ops never leave the
+          // server), so appending is order-safe.
+          const vcells = _viewCellsFor(patchesToSend, meta);
+          if (vcells.length > 0) {
+            const snap = snapFor(meta);
+            if (!snap) {
+              // Its view could not be built — a lost round, as below.
+              meta.needsFull = true;
+              continue;
+            }
+            const r = viewOps(
+              _views.get(meta, _token(meta)),
+              snap.view,
+              vcells,
+            );
+            nextViews = r.next;
+            ownViewOps = r.ops;
+            if (r.ops.length > 0) allOps = [...allOps, ...r.ops];
+          }
           if (allOps.length > 0) {
             const patchJson = JSON.stringify(allOps);
             // Serialize the full state ONLY when the decision needs it — the
@@ -531,6 +599,8 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
             // It holds exactly this state: a queue kept past here would be
             // replayed on top of it next round (an add the state undid).
             meta.skipped = undefined;
+            // …and so exactly this view: the `forUser` baseline is known.
+            _viewsAfterFull(meta, snapFor(meta));
             continue;
           }
           // Anything that decides to send a whole state says WHY. The
@@ -555,6 +625,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
 
         if (!msgToSend) continue;
         try {
+          const before = _token(meta);
           ws.send(msgToSend);
           // NOTE: bytes are NOT recorded here. The socket itself is metered
           // (server-ws.ts wraps `send`), because frames also reach a client from
@@ -573,6 +644,12 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           if (sentKind === "full") meta.needsFull = false;
           meta.skipped = undefined; // in this frame, or superseded by it
           meta.bpLastSentAt = Date.now();
+          // The `forUser` baseline moves WITH the frame, never apart from it.
+          if (sentKind === "full") _viewsAfterFull(meta, snapFor(meta));
+          else if (nextViews) {
+            _views.set(meta, nextViews, _token(meta));
+            viewTally.add(ownViewOps);
+          } else _views.carry(meta, before, _token(meta));
           // Vitals bookkeeping (gated on a vitals system) — see `_meterSent`.
           _meterSent(meta, msgToSend);
         } catch { /* client disconnecting */ }
@@ -618,6 +695,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
           anyFullSend,
           force,
           patchesToSend,
+          viewBytes: viewTally.mean(),
           getUIState: _sentView(fullSentTo),
         });
       }
@@ -686,7 +764,12 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     force: boolean,
   ): void {
     if (patchesToSend.length === 0 && !force) return;
-    if (!force && !meta.needsFull && meta.lastFullJson !== undefined) {
+    // A `forUser` diff is taken against what the client holds when it is
+    // SENT, so it cannot wait in the queue: owed as a whole state instead.
+    if (
+      !force && !meta.needsFull && meta.lastFullJson !== undefined &&
+      _viewCellsFor(patchesToSend, meta).length === 0
+    ) {
       const ops = _clientOps(patchesToSend, meta);
       if (ops.length === 0) return; // nothing in its view changed
       const bytes = (meta.skipped?.bytes ?? 0) + JSON.stringify(ops).length;
@@ -712,12 +795,14 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       JSON.stringify(compactPatches(meta.skipped.ops)),
     );
     meta.skipped = undefined;
+    const before = _token(meta);
     try {
       socket.send(frame);
     } catch {
       return true; // client disconnecting — the queue dies with the socket
     }
     meta.lastFullJsonStale = true;
+    _views.carry(meta, before, _token(meta)); // no `forUser` op is queued
     meta.bpLastSentAt = Date.now();
     _meterSent(meta, frame);
     return true;
@@ -778,7 +863,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     socket: WebSocket,
     meta: ClientMeta,
     why: string,
-    fullFor: (meta: ClientMeta) => string | undefined,
+    snapFor: (meta: ClientMeta) => ViewSnap | undefined,
     paid: DebtPaid,
   ): boolean {
     if (!meta.needsFull) return true;
@@ -786,11 +871,13 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     // Not draining either: the backlog skip keeps the debt for the next round
     // rather than piling a whole state onto a socket that cannot take it.
     if (socket.bufferedAmount > WS_BUFFER_HIGH_WATER) return false;
-    const json = fullFor(meta);
-    if (json === undefined) return false; // still owed — retried later
+    const snap = snapFor(meta);
+    if (snap === undefined) return false; // still owed — retried later
+    const json = snap.json;
     if (!meta.lastFullJsonStale && json === meta.lastFullJson) {
       meta.needsFull = false; // it already holds exactly this text
       meta.skipped = undefined;
+      _viewsAfterFull(meta, snap);
       return true;
     }
     _warnBigFullState(json, meta);
@@ -805,6 +892,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     meta.needsFull = false;
     meta.skipped = undefined;
     meta.bpLastSentAt = Date.now();
+    _viewsAfterFull(meta, snap);
     // Metered like a round's frame — it IS one, sent outside a round.
     _meterSent(meta, frame);
     if (paid.n++ === 0) paid.user = meta.user;
@@ -855,7 +943,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
       failed: false,
       err: undefined,
     };
-    const fullFor = _viewSnapshotter(verdict);
+    const snapFor = _viewSnapshotter(verdict);
     const paid: DebtPaid = { n: 0 };
     try {
       let any = false;
@@ -888,7 +976,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
               ws,
               meta,
               "was skipped while it could not keep up",
-              fullFor,
+              snapFor,
               paid,
             )
             : !_paySkipped(ws, meta)
@@ -963,6 +1051,12 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
         // bar `tt-cmd` and the dev `diag` frame already answer to. It went to
         // every socket, so bob's frames listed alice's actions.
         if (meta.perUserAuth && !rawStateControlAllowed(meta.user)) continue;
+        // Only to a client that shows it (`ClientMeta.ttSub`): a `peer()`
+        // socket was sent the whole history on every dispatch (aipro §9).
+        if (
+          !(meta.ttSub ??
+            (meta.clientType === "browser" || meta.clientType === "electron"))
+        ) continue;
         // The same two skips the STATE loop makes. This loop made neither, so
         // the one channel that carries the whole history each time was the one
         // channel that kept feeding a client that could not read it — a frozen
@@ -1213,6 +1307,9 @@ export function attributeRound(
     anyFullSend: boolean;
     force: boolean;
     patchesToSend: readonly PatchEntry[];
+    /** `forUser` diffs: cell → key → mean bytes per client sent one
+     *  (`createViewTally`). Their `view` entries carry no ops. */
+    viewBytes?: ReadonlyMap<string, ReadonlyMap<string, number>>;
     getUIState: () => Record<string, unknown> | undefined;
   },
 ): void {
@@ -1247,6 +1344,11 @@ export function attributeRound(
           bytes = utf8Size(JSON.stringify(op.value ?? null) ?? "");
         } catch { /* as above */ }
         costMeter.recordAttribution(entry.cell, String(key), bytes, round);
+      }
+    }
+    for (const [cell, byKey] of what.viewBytes ?? []) {
+      for (const [key, bytes] of byKey) {
+        costMeter.recordAttribution(cell, key, bytes, round);
       }
     }
   }
