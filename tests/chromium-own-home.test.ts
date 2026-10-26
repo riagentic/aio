@@ -229,7 +229,10 @@ Deno.test("AIO_TEST_BROWSER_HOME=own: Windows moves the per-user folders; macOS 
   const said: string[] = [];
   console.warn = (...a: unknown[]) => void said.push(a.join(" "));
   Deno.env.set("AIO_TEST_BROWSER_HOME", "own");
-  const profile = await tempDir("aio-own-home-win-");
+  const dir = await tempDir("aio-own-home-win-");
+  // Off Windows the `\` joins are part of one file name: the folders
+  // browserHomeEnv makes are SIBLINGS of `profile`, so it sits inside `dir`.
+  const profile = `${dir}/p`;
   try {
     const win = browserHomeEnv(profile, "windows");
     const home = `${profile}\\aio-home`;
@@ -248,7 +251,7 @@ Deno.test("AIO_TEST_BROWSER_HOME=own: Windows moves the per-user folders; macOS 
     console.warn = warn;
     if (had === undefined) Deno.env.delete("AIO_TEST_BROWSER_HOME");
     else Deno.env.set("AIO_TEST_BROWSER_HOME", had);
-    await dropTempDir(profile);
+    await dropTempDir(dir);
   }
 });
 
