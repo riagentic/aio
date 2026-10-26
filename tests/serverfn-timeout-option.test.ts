@@ -82,3 +82,22 @@ Deno.test("serverFn timeoutMs: a bad value is refused on both sides", () => {
     }
   }
 });
+
+Deno.test("serverFn timeoutMs: a 30-day window does not overflow the timer and reject at once", async () => {
+  // Real time on purpose: past setTimeout's int32 ceiling the platform fires
+  // in ~1 ms — FakeTime would not reproduce the truncation.
+  _resetSfnClient();
+  silentServer();
+  try {
+    const call = clientServerFn<Api>("t-month", {
+      timeoutMs: 30 * 24 * 3600 * 1000,
+    }).slow();
+    let settled = false;
+    call.then(() => settled = true, () => settled = true);
+    await new Promise((r) => setTimeout(r, 100));
+    assertEquals(settled, false, "a 30-day timeout rejected within 100 ms");
+  } finally {
+    _resetSfnClient();
+    setConnected(false);
+  }
+});

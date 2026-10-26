@@ -222,6 +222,23 @@ export function useForm<T extends Record<string, unknown>>(
     FieldState<any> & { _setError(err: string): void }
   > = {};
 
+  /** An issue the form schema could not attribute to any field. Held in a
+   *  signal so a component that renders it re-renders when it changes. */
+  const formErrorSig: Signal<string | null> = signal<string | null>(null);
+
+  /** Once `validate()` has put a form-level error up, every edit re-asks the
+   *  schema. It was a snapshot: fixing the mismatched field left `formError`
+   *  saying "passwords must match" and `valid` false — and the documented
+   *  `disabled={!form.valid}` submit, the only thing that would call
+   *  `validate()` again, stayed disabled for good. */
+  const recheckFormError = () => {
+    if (!options?.schema || formErrorSig.peek() === null) return;
+    const raw: Record<string, unknown> = {};
+    for (const [n, f] of Object.entries(fieldStates)) raw[n] = f.value;
+    const r = runFormSchema(options.schema, raw);
+    formErrorSig.set(r.ok || r.form.length === 0 ? null : r.form.join("; "));
+  };
+
   for (
     const [name, cfg] of Object.entries(config) as [
       string,
@@ -357,6 +374,7 @@ export function useForm<T extends Record<string, unknown>>(
           errorSig.set(validate(next));
           runAsyncValidation(next);
         }
+        recheckFormError();
       },
       touch() {
         touchedSig.set(true);
@@ -371,6 +389,7 @@ export function useForm<T extends Record<string, unknown>>(
         validatingSig.set(false);
         settledFor = null;
         supersede();
+        recheckFormError();
       },
       _setError(err: string) {
         errorSig.set(err);
@@ -389,10 +408,6 @@ export function useForm<T extends Record<string, unknown>>(
    *  was set, because that is the only branch that dereferenced `this`: the
    *  same call site worked until the day someone added a cross-field rule.
    *  Nothing here needs a receiver, so nothing here has one. */
-  /** An issue the form schema could not attribute to any field. Held in a
-   *  signal so a component that renders it re-renders when it changes. */
-  const formErrorSig: Signal<string | null> = signal<string | null>(null);
-
   const values = (): T => {
     const result: Record<string, unknown> = {};
     for (const [name, f] of Object.entries(fieldStates)) {
@@ -501,6 +516,47 @@ export function useForm<T extends Record<string, unknown>>(
     },
     bind(name: keyof T) {
       const f = fieldStates[name as string]!;
+      // A CHECKBOX's state is `.checked`, not `.value` — `.value` is "on"
+      // whether ticked or not, so a boolean field held "on" after the first
+      // click and could never be false again ("must accept" passed unticked).
+      const onInput = (e: Event) => {
+        const el = e.target as HTMLInputElement;
+        if (el.type === "checkbox") return f.set(el.checked);
+        // A RADIO cannot be bound: the returned `value` overwrites every
+        // radio's own value with the field's, and nothing drives `checked`.
+        // The props are built before the element exists, so the first input
+        // is the earliest this can be said (docs/ui/air-forms.md shows the
+        // radio pattern).
+        if (
+          el.type === "radio" &&
+          ((globalThis as Record<string, unknown>).__aioDev === true ||
+            firstTime("useForm.bind.radio"))
+        ) {
+          console.warn(
+            `[aio] form.bind("${
+              String(name)
+            }") is spread on a radio — bind() ` +
+              `is for text, number and checkbox inputs. Bind each radio as ` +
+              `checked={f.value === "a"} onInput={() => f.set("a")}.`,
+          );
+        }
+        f.set(
+          typeof config[name].initial === "number" &&
+            (el.type === "number" || el.type === "range")
+            ? (el.value === "" ? NaN : Number(el.value))
+            : el.value,
+        );
+      };
+      const onBlur = () => f.touch();
+      // A BOOLEAN field drives the box through `checked`; `value={false}`
+      // was only the attribute text "false". `value` stays off the props so
+      // the box keeps its own. The frozen return type says `value: unknown`,
+      // and `undefined` is an `unknown`.
+      if (typeof config[name].initial === "boolean") {
+        return { checked: f.value, onInput, onBlur } as unknown as ReturnType<
+          FormState<T>["bind"]
+        >;
+      }
       return {
         // A plain VALUE, read HERE — not a live getter.
         //
@@ -525,16 +581,8 @@ export function useForm<T extends Record<string, unknown>>(
         // string or "" (the browser sanitizes), so the parse is exact; an
         // empty field is NaN, as `valueAsNumber` answers. Any other control (a
         // text input) keeps the string it has always stored.
-        onInput: (e: Event) => {
-          const el = e.target as HTMLInputElement;
-          f.set(
-            typeof config[name].initial === "number" &&
-              (el.type === "number" || el.type === "range")
-              ? (el.value === "" ? NaN : Number(el.value))
-              : el.value,
-          );
-        },
-        onBlur: () => f.touch(),
+        onInput,
+        onBlur,
       };
     },
   };

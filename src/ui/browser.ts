@@ -223,10 +223,12 @@ function mountGuest(el: HTMLElement): () => void {
     const guest = m.guest;
     m.guest = null;
     const id = m.props?.keepAlive;
-    if (!guest || !id) return;
+    if (!guest) return;
     // The teardown runs before the renderer removes the element, so the guest
     // is still alive to say where it is.
-    _kept.set(id, { at: currentUrl(guest), src: m.props!.src });
+    if (id) _kept.set(id, { at: currentUrl(guest), src: m.props!.src });
+    // Every activated guest: the wrapper ref swallows the renderer's own
+    // `ref(null)`, so this is the only place the app learns it is gone.
     m.props?.ref?.(null);
   };
 }

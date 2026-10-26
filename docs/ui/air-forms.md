@@ -60,21 +60,43 @@ const LoginForm = () => (
 );
 ```
 
+`bind()` is for text, number and checkbox inputs. A radio group binds each radio
+by hand — `bind()` would write the field's value over every radio's own (it
+warns when spread on one):
+
+```tsx
+const color = form.fields.color;
+const Colors = () => (
+  <>
+    <input
+      type="radio"
+      checked={color.value === "red"}
+      onInput={() => color.set("red")}
+    />
+    <input
+      type="radio"
+      checked={color.value === "blue"}
+      onInput={() => color.set("blue")}
+    />
+  </>
+);
+```
+
 `form.bind(name)` answers `value: unknown`. `bindInput(form, "age")` (from
 `aio/air`) is the same object with the field's type — `value: number` here — for
 when the bound value is used, not only spread.
 
 **FormState\<T\>:**
 
-| Member       | Type                         | Description                            |
-| ------------ | ---------------------------- | -------------------------------------- |
-| `fields`     | `{ [K]: FieldState<T[K]> }`  | Per-field state objects                |
-| `valid`      | `boolean`                    | All fields have no error               |
-| `dirty`      | `boolean`                    | Any field modified from initial        |
-| `values()`   | `T`                          | Get all current values as plain object |
-| `validate()` | `boolean`                    | Touch all, return valid                |
-| `reset()`    | `void`                       | Reset all fields to initial            |
-| `bind(name)` | `{ value, onInput, onBlur }` | Bind props for `<input>`               |
+| Member       | Type                         | Description                                                                                                |
+| ------------ | ---------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `fields`     | `{ [K]: FieldState<T[K]> }`  | Per-field state objects                                                                                    |
+| `valid`      | `boolean`                    | All fields have no error                                                                                   |
+| `dirty`      | `boolean`                    | Any field modified from initial                                                                            |
+| `values()`   | `T`                          | Get all current values as plain object                                                                     |
+| `validate()` | `boolean`                    | Touch all, return valid                                                                                    |
+| `reset()`    | `void`                       | Reset all fields to initial                                                                                |
+| `bind(name)` | `{ value, onInput, onBlur }` | Bind props for `<input>` (text, number, checkbox — a boolean field binds `checked`; not radios, see below) |
 
 **FieldState\<T\>:**
 
@@ -124,7 +146,9 @@ Three things worth knowing:
   `form.fields.email.error`, whichever spelling your library uses (Zod emits
   bare keys, Valibot emits `{ key }` wrappers — both are read). An issue that
   names no field — a cross-field refinement like "passwords must match" —
-  becomes `form.formError`, and makes the form invalid. It is never dropped.
+  becomes `form.formError`, and makes the form invalid. It is never dropped, and
+  it is not stale: once shown, every edit re-checks it, so fixing the field
+  clears it and `valid` turns true without another `validate()`.
 - **A field's own `rules` win.** They are the more specific statement, so a
   field that already has an error keeps its message.
 - **`parsed()` is separate from `values()` on purpose.** `values()` returns `T`,

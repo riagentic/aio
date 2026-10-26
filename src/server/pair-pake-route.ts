@@ -10,6 +10,7 @@ import {
   PIN_TTL_MS,
   pinSentInClear,
 } from "./pairing.ts";
+import { chargeAuthWork, refundAuthWork } from "./server-auth.ts";
 
 export interface PakeRouteDeps {
   /** `pairing: { pake: true }` is on. */
@@ -115,6 +116,11 @@ export async function pakePairRoute(
           "32 bytes, base64",
       });
     }
+    // Message 1 costs no guess but real CPU (an Elligator2 map and two
+    // X25519 ops): metered as auth work, refunded when the exchange pairs.
+    if (!chargeAuthWork(d.clientKey)) {
+      return new Response("Too Many Requests", { status: 429 });
+    }
     const offer = await pakeOffer(
       sid,
       ya,
@@ -125,6 +131,12 @@ export async function pakePairRoute(
     // No active code, this address out of guesses, or a Ya no key can come
     // from. Metered like the plain path's refusal of the same cases, so an
     // address that keeps asking reaches the same 429.
+    if (offer === "busy") {
+      return json(503, {
+        error: "too many PAKE exchanges are open for this pairing code — " +
+          `try again in ${Math.round(PAKE_OFFER_TTL_MS / 1000)}s`,
+      });
+    }
     if (!offer) {
       d.recordFail(d.clientKey, "no usable pairing code");
       return json(401, {
@@ -149,6 +161,7 @@ export async function pakePairRoute(
   }
   const r = pakeConfirm(b.id, ta, d.clientKey, d.token);
   if (r.ok) {
+    refundAuthWork(d.clientKey);
     return json(200, {
       Tb: cpace.b64(r.tb),
       box: cpace.b64(await cpace.seal(r.isk, r.sid, d.profile())),

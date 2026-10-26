@@ -84,9 +84,14 @@ Deno.test("am logs: --since takes a duration or a timestamp", () => {
   assertEquals(parseSince("2h", now), now - 7_200_000);
   assertEquals(parseSince("1d", now), now - 86_400_000);
   assertEquals(parseSince("2026-09-07T03:00:00+02:00"), now);
+  assertEquals(parseSince(" 2026-09-07T01:00:00Z "), now);
+  assert(parseSince("2026-09-07T03:00") !== null, "a local timestamp");
+  assert(parseSince("2026-09-07") !== null, "a date");
   // Not a time → null, so the caller can REFUSE. A filter silently treated as
   // "no filter" turns "I could not read that" into "nothing happened".
-  for (const bad of ["yesterday", "", "15", "m", "soon"]) {
+  // A bare number (a forgotten unit) included: V8's legacy `Date.parse` reads
+  // `5` as 2001 and `90` as 1990 — a filter that silently shows everything.
+  for (const bad of ["yesterday", "", "15", "m", "soon", "5", "90", "1 5"]) {
     assertEquals(parseSince(bad), null, `"${bad}" was accepted as a time`);
   }
 });

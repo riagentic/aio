@@ -146,3 +146,93 @@ Deno.test("zip: crc32 matches the published check value", () => {
   const a = crc32Update(0, new TextEncoder().encode("12345"));
   assertEquals(crc32Update(a, new TextEncoder().encode("6789")), 0xcbf43926);
 });
+
+/** A stored zip of Unix symlink entries `[name, target]`, written by hand:
+ *  no archiver puts a link under another link. */
+function linkZip(links: [string, string][]): Uint8Array {
+  const enc = new TextEncoder();
+  const local: number[] = [];
+  const central: number[] = [];
+  const u16 = (a: number[], n: number) => a.push(n & 0xff, n >>> 8 & 0xff);
+  const u32 = (a: number[], n: number) => {
+    u16(a, n & 0xffff);
+    u16(a, n >>> 16);
+  };
+  for (const [name, target] of links) {
+    const nm = enc.encode(name);
+    const data = enc.encode(target);
+    const crc = crc32Update(0, data);
+    const at = local.length;
+    u32(local, 0x04034b50);
+    for (const n of [10, 0, 0, 0, 0]) u16(local, n);
+    for (const n of [crc, data.length, data.length]) u32(local, n);
+    u16(local, nm.length);
+    u16(local, 0);
+    local.push(...nm, ...data);
+    u32(central, 0x02014b50);
+    for (const n of [3 << 8 | 20, 10, 0, 0, 0, 0]) u16(central, n);
+    for (const n of [crc, data.length, data.length]) u32(central, n);
+    for (const n of [nm.length, 0, 0, 0, 0]) u16(central, n);
+    u32(central, (0o120777 << 16) >>> 0);
+    u32(central, at);
+    central.push(...nm);
+  }
+  const end: number[] = [];
+  u32(end, 0x06054b50);
+  for (const n of [0, 0, links.length, links.length]) u16(end, n);
+  u32(end, central.length);
+  u32(end, local.length);
+  u16(end, 0);
+  return new Uint8Array([...local, ...central, ...end]);
+}
+
+Deno.test({
+  name: "zip: chained symlinks cannot escape the destination",
+  ignore: !unix,
+  async fn() {
+    const tmp = await tempDir("zip-extract-");
+    try {
+      // An entry under an archive link would be created through it.
+      await assertRejects(
+        () =>
+          extractZip(
+            linkZip([["sub/l", ".."], ["sub/l/m", "../.."]]),
+            join(tmp, "a"),
+          ),
+        Error,
+        "is a symlink in the same archive",
+      );
+      // A target that runs through another archive link.
+      await assertRejects(
+        () =>
+          extractZip(
+            linkZip([["sub/x", ".."], ["sub/y", "x/../.."]]),
+            join(tmp, "b"),
+          ),
+        Error,
+        "resolves outside the destination",
+      );
+      // ...even when the escaping target does not exist (yet).
+      await assertRejects(
+        () =>
+          extractZip(
+            linkZip([["d/x", ".."], ["y", "d/x/../../nonexistent"]]),
+            join(tmp, "b2"),
+          ),
+        Error,
+        "resolves outside the destination",
+      );
+      // In-tree chains still unpack.
+      await extractZip(
+        linkZip([["sub/x", ".."], ["sub/y", "x/sub"]]),
+        join(tmp, "c"),
+      );
+      assertEquals(
+        await Deno.realPath(join(tmp, "c", "sub", "y")),
+        await Deno.realPath(join(tmp, "c", "sub")),
+      );
+    } finally {
+      await dropTempDir(tmp);
+    }
+  },
+});

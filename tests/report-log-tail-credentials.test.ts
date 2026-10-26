@@ -8,6 +8,7 @@
 // bug report. `redactUrlToken`'s own doc names the case — "logs are copied
 // into bug reports" — and the report was the one copier that did not call it.
 import { assert, assertEquals } from "@std/assert";
+import { redactLogCredentials } from "../src/diagnostics/redact.ts";
 import { buildReport } from "../src/server/report.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
@@ -46,5 +47,18 @@ Deno.test("report logs: the share-link token and the pair code are masked", asyn
     assert(r.logs![3]!.includes("order 402917 shipped"), "other lines kept");
   } finally {
     await dropTempDir(dir);
+  }
+});
+
+Deno.test("report logs: the whole pair code is masked, 8-digit PAKE code included", () => {
+  for (const pin of ["402917", "48213307"]) {
+    const out = redactLogCredentials(
+      `  pair code: ${pin}  (enter it in the aio client → Add app)`,
+    );
+    assertEquals(
+      out,
+      "  pair code: …  (enter it in the aio client → Add app)",
+      out,
+    );
   }
 });

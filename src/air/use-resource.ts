@@ -187,11 +187,23 @@ type Entry<T> = {
   generation: number;
   /** Holders to notify when this entry changes. */
   readonly watchers: Set<(e: Entry<T>) => void>;
-  closing?: Promise<void>;
+  /** The open (and, if it lands late, its close) — settles when the device
+   *  this entry asked for is free again. */
+  task?: Promise<void>;
 };
 
 // deno-lint-ignore no-explicit-any
 const _open = new Map<string, Entry<any>>();
+
+/** Slot → its async `close` (or its abandoned, still-in-flight `open` plus
+ *  that open's late close) not yet settled. A reopen of the same slot (from
+ *  any holder) waits for it: the device is not free until it settles. */
+const _closing = new Map<string, Promise<void>>();
+
+/** How long a new open waits for the previous resource's open/close to
+ *  settle. Bounded, because an open that never settles (a permission prompt
+ *  nobody answers, a hung device) must not block every later key forever. */
+const SETTLE_WAIT_MS = 5000;
 
 /** @internal Test seam: how many shared resources are open right now. Zero is
  *  the healthy answer once every holder has disposed. */
@@ -304,6 +316,19 @@ function _createResource<T>(
   const keySig = signal<string | number | null>(null);
 
   let held: string | null = null; // the slot id this holder is counted in
+  /** This holder's own last async close, still in flight — `a → b` in one
+   *  holder must not open `b` while `a` is being released. */
+  let closing: Promise<void> | undefined;
+  /** Make the next `acquire` (this holder's, or any holder's of `slot`) wait
+   *  for `p` before it opens. */
+  const pend = (slot: string, p: Promise<void>) => {
+    closing = p;
+    _closing.set(slot, p);
+    void p.then(() => {
+      if (closing === p) closing = undefined;
+      if (_closing.get(slot) === p) _closing.delete(slot);
+    });
+  };
   let onEntry: ((e: Entry<T>) => void) | null = null;
 
   const publish = (e: Entry<T>) => {
@@ -327,18 +352,23 @@ function _createResource<T>(
     // landed; `close` then runs only for a value that exists.
     e.abort.abort();
     _open.delete(slot);
+    // An open still in flight: an `open` that ignores the abort signal
+    // (getUserMedia, a serial port) still holds the device until it lands
+    // and its late close runs — the next open waits for both.
+    if (e.loading && e.task) pend(slot, e.task);
     const cfgClose = getCfg().close;
     if (e.value !== undefined && cfgClose) {
       const [, rawKey] = splitSlot(slot);
       try {
         const out = cfgClose(e.value, rawKey);
         if (out && typeof (out as Promise<void>).then === "function") {
-          e.closing = (out as Promise<void>).catch(() => {
+          const p = (out as Promise<void>).catch(() => {
             // aio-ok: an async `close` that rejects has still released this
             // holder — the slot is already gone from the table. Rethrowing
             // would surface as an unhandled rejection during teardown, from a
             // promise nobody is positioned to await.
           });
+          pend(slot, p);
         }
       } catch {
         // aio-ok: a close that throws must not stop the holder from letting
@@ -365,8 +395,40 @@ function _createResource<T>(
       _open.set(slot, e);
       const entry = e;
       const gen = e.generation;
-      void (async () => {
+      // The old resource first: an async close still in flight for this slot
+      // or this holder is awaited before `open` runs ("Changing the key closes
+      // the old resource before opening the new one"). `loading` stays true
+      // meanwhile. Nothing pending → `open` starts synchronously, as before.
+      const pending = [_closing.get(slot), closing].filter((p) => p);
+      entry.task = (async () => {
         try {
+          if (pending.length > 0) {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const settled = await Promise.race([
+              Promise.all(pending).then(() => true),
+              new Promise<false>((r) => {
+                timer = setTimeout(() => r(false), SETTLE_WAIT_MS);
+              }),
+            ]);
+            clearTimeout(timer);
+            if (!settled) {
+              // Given up on: later opens must not wait on it again.
+              for (const p of pending) {
+                if (closing === p) closing = undefined;
+                if (_closing.get(slot) === p) _closing.delete(slot);
+              }
+              console.warn(
+                `[aio] useResource: the previous open/close before "${raw}"` +
+                  `${scope ? ` (scope "${scope}")` : ""} has not settled ` +
+                  `after ${SETTLE_WAIT_MS} ms — opening anyway. An \`open\` ` +
+                  `or \`close\` that never resolves holds the device; make it ` +
+                  `honour \`signal\` or time out.`,
+              );
+            }
+            // Moved on (or disposed) while waiting — nothing was opened, so
+            // there is nothing to close.
+            if (_open.get(slot) !== entry || entry.generation !== gen) return;
+          }
           const v = await getCfg().open(raw, { signal: entry.abort.signal });
           // Landed late? The slot has moved on (or gone), so this value is
           // nobody's — close it rather than leaking it, and do not install it.
@@ -384,7 +446,12 @@ function _createResource<T>(
           entry.loading = false;
         }
         for (const w of entry.watchers) w(entry);
-      })();
+      })().catch((err) => {
+        // `open`/late-`close` throws are caught above; only a throwing
+        // watcher lands here. Said, not rethrown: a rejected `task` would
+        // fail the next holder's wait on it.
+        console.error("[aio] useResource: updating a holder threw:", err);
+      });
     }
     e.refs++;
     onEntry = publish;

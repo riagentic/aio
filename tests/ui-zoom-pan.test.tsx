@@ -69,6 +69,7 @@ testUI(
         clientX: x,
         clientY: y,
         button: 0,
+        buttons: type === "pointerup" ? 0 : 1,
       });
     node.dispatchEvent(pe("pointerdown", 10, 10));
     node.dispatchEvent(pe("pointermove", 40, 30));
@@ -85,6 +86,53 @@ testUI(
     await ui.settle();
     assertEquals(clicks(), 1);
     assert(box);
+  },
+);
+
+testUI(
+  Diagram,
+  "ZoomPan: a drag released outside the viewport ends (capture, no button, lost capture)",
+  async (ui) => {
+    const w = ui.window;
+    const box = w.document.querySelector(".aio-zoompan")! as HTMLElement & {
+      setPointerCapture(id: number): void;
+    };
+    const node = w.document.querySelector("button")!;
+    const captured: number[] = [];
+    box.setPointerCapture = (id: number) => void captured.push(id);
+    const pe = (type: string, x: number, y: number, buttons: number) =>
+      new w.PointerEvent(type, {
+        bubbles: true,
+        clientX: x,
+        clientY: y,
+        button: 0,
+        buttons,
+        pointerId: 7,
+      });
+    // A press that is only a click is not captured (a captured pointerup
+    // would retarget the click away from the content).
+    node.dispatchEvent(pe("pointerdown", 0, 0, 1));
+    assertEquals(captured, []);
+    node.dispatchEvent(pe("pointermove", 20, 0, 1));
+    assertEquals(captured, [7], "a drag captures its pointer");
+    await ui.settle();
+    seen.set([]);
+    // Released outside: no pointerup reached the viewport. The next move has
+    // no button held, so it must not pan.
+    node.dispatchEvent(pe("pointermove", 60, 0, 0));
+    node.dispatchEvent(pe("pointermove", 90, 0, 1));
+    await ui.settle();
+    assertEquals(seen(), [], "an unpressed move panned (stuck drag)");
+    // Losing the capture ends a drag too.
+    node.dispatchEvent(pe("pointerdown", 0, 0, 1));
+    node.dispatchEvent(pe("pointermove", 20, 0, 1));
+    await ui.settle();
+    seen.set([]);
+    box.dispatchEvent(pe("lostpointercapture", 20, 0, 0));
+    node.dispatchEvent(pe("pointermove", 50, 0, 1));
+    await ui.settle();
+    assertEquals(seen(), [], "a move after lostpointercapture panned");
+    node.dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
   },
 );
 

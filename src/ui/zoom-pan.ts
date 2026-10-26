@@ -152,21 +152,42 @@ export function ZoomPan(props: ZoomPanProps): VNode {
         ),
       );
     };
-    let press: { x: number; y: number; from: ZoomView } | null = null;
+    let press: { x: number; y: number; from: ZoomView; id: number } | null =
+      null;
     let dragged = false;
     const onDown = (e: PointerEvent) => {
       if (e.button !== 0) return;
-      press = { x: e.clientX, y: e.clientY, from: view.peek() };
+      press = {
+        x: e.clientX,
+        y: e.clientY,
+        from: view.peek(),
+        id: e.pointerId,
+      };
       dragged = false;
     };
     const onMove = (e: PointerEvent) => {
-      if (!press) return;
+      if (!press || e.pointerId !== press.id) return;
+      // No primary button: the release was missed (an iframe, the browser
+      // chrome) — the drag is over.
+      if ((e.buttons & 1) === 0) return void (press = null);
       const dx = e.clientX - press.x, dy = e.clientY - press.y;
       if (!dragged && Math.hypot(dx, dy) < DRAG_SLOP) return;
+      if (!dragged) {
+        // Captured once it IS a drag, so a release outside the viewport still
+        // ends it — a mouse is not implicitly captured, and the pan stuck to
+        // the cursor. Not on press: a captured pointerup retargets the click,
+        // and a plain click must still reach the content.
+        el.setPointerCapture?.(e.pointerId);
+      }
       dragged = true;
       set({ ...press.from, x: press.from.x + dx, y: press.from.y + dy });
     };
-    const onUp = () => void (press = null);
+    const onUp = (e: PointerEvent) => {
+      if (el.hasPointerCapture?.(e.pointerId)) {
+        el.releasePointerCapture(e.pointerId);
+      }
+      press = null;
+    };
     // Capture phase, so the content's own click handler never sees the click
     // that ends a drag.
     const onClick = (e: MouseEvent) => {
@@ -180,6 +201,7 @@ export function ZoomPan(props: ZoomPanProps): VNode {
     el.addEventListener("pointermove", onMove);
     el.addEventListener("pointerup", onUp);
     el.addEventListener("pointercancel", onUp);
+    el.addEventListener("lostpointercapture", onUp);
     el.addEventListener("click", onClick, true);
     onCleanup(() => {
       el.removeEventListener("wheel", onWheel);
@@ -187,6 +209,7 @@ export function ZoomPan(props: ZoomPanProps): VNode {
       el.removeEventListener("pointermove", onMove);
       el.removeEventListener("pointerup", onUp);
       el.removeEventListener("pointercancel", onUp);
+      el.removeEventListener("lostpointercapture", onUp);
       el.removeEventListener("click", onClick, true);
     });
   });

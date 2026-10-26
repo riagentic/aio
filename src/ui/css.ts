@@ -140,7 +140,53 @@ function normalize(src: string): string {
  *  classes, as they must be. */
 function normalizeSource(src: string): string {
   const { masked, lits } = maskLiterals(stripComments(src));
-  return unmask(normalize(masked), lits);
+  return unmask(
+    normalize(keepDescendantColon(masked)).replace(/\uE001/g, " "),
+    lits,
+  );
+}
+
+/** In a SELECTOR, the space before `:` is the descendant combinator:
+ *  `& :first-child` is any first-child inside this class, `&:first-child` is
+ *  this class when it is one. `normalize` strips whitespace around every `:`,
+ *  so the two hashed to one class and the later rule silently got the earlier
+ *  one's CSS. Pin that space (as `\uE001`, which `normalize` walks past) in
+ *  non-at-rule preludes only — and only after a compound, never after a
+ *  combinator or `(` — so every key that never meant a descendant keeps its
+ *  old hash. */
+function keepDescendantColon(masked: string): string {
+  return masked.replace(
+    /(?<=^|[{};])[^{};]*(?=\{)/g,
+    (prelude) =>
+      prelude.trim().startsWith("@")
+        ? prelude
+        : prelude.replace(/([^\s>+~,(])\s+(?=:)/g, "$1\uE001"),
+  );
+}
+
+/** A nested block's prelude against `.cls`: each top-level comma item with an
+ *  `&` has it replaced; an item WITHOUT one is a descendant of this class, as
+ *  CSS Nesting reads it (`.icon {}` → `.cls .icon {}`). Passing it through
+ *  verbatim emitted a GLOBAL rule into the page's one shared stylesheet. */
+function scopePrelude(prelude: string, self: string): string {
+  const items: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < prelude.length; i++) {
+    const ch = prelude[i];
+    if (ch === "(" || ch === "[") depth++;
+    else if (ch === ")" || ch === "]") depth--;
+    else if (ch === "," && depth === 0) {
+      items.push(prelude.slice(start, i));
+      start = i + 1;
+    }
+  }
+  items.push(prelude.slice(start));
+  return items.map((it) =>
+    it.includes("&")
+      ? it.split("&").join(self)
+      : it.replace(/^\s*/, (ws) => `${ws}${self} `)
+  ).join(",");
 }
 
 /** Expand a rule body into real CSS for `.cls`.
@@ -148,7 +194,9 @@ function normalizeSource(src: string): string {
  *  Two shapes, which is everything this needs to be useful:
  *  plain declarations, and NESTED blocks introduced by `&` (`&:hover { … }`,
  *  `& .icon { … }`) or by an at-rule (`@media (…) { … }`, whose body is itself
- *  expanded so `&` inside it still means this class).
+ *  expanded so `&` inside it still means this class). A nested selector with
+ *  no `&` is a descendant of this class, as in CSS Nesting (`.icon { … }` is
+ *  `& .icon { … }`).
  *
  *  Hand-written rather than delegated to a CSS parser: a parser is a
  *  dependency and a much larger promise, and the two shapes above are the ones
@@ -163,8 +211,15 @@ export function expandCss(cls: string, rawBody: string): string {
   return unmask(_expand(cls, masked), lits);
 }
 
-/** The scanner, over MASKED text. */
-function _expand(cls: string, body: string): string {
+/** Conditional group at-rules: their body is ordinary rules, so it is scoped
+ *  to the class like the top level. Every other at-rule with a block
+ *  (`@keyframes`, `@font-face`, `@property`, `@page`, …) holds keyframe
+ *  selectors or descriptors — scoping them (`.cls from{…}`) killed the rule. */
+const GROUP_AT = /^@(media|supports|container|layer|scope|starting-style)\b/i;
+
+/** The scanner, over MASKED text. `scoped` false: an at-rule body that is
+ *  emitted as written (normalised), with no class anywhere in it. */
+function _expand(cls: string, body: string, scoped = true): string {
   const self = `.${cls}`;
   const decls: string[] = [];
   const blocks: string[] = [];
@@ -200,9 +255,14 @@ function _expand(cls: string, body: string): string {
         // media query still means this component. Recurses into `_expand`,
         // not `expandCss` — the text is already masked, and masking it twice
         // would renumber markers that the outer call is going to restore.
-        blocks.push(`${prelude}{${_expand(cls, inner)}}`);
+        blocks.push(
+          `${prelude}{${
+            _expand(cls, inner, scoped && GROUP_AT.test(prelude))
+          }}`,
+        );
       } else {
-        blocks.push(`${prelude.split("&").join(self)}{${normalize(inner)}}`);
+        const sel = scoped ? scopePrelude(prelude, self) : prelude;
+        blocks.push(`${sel}{${normalize(inner)}}`);
       }
       continue;
     }
@@ -211,7 +271,11 @@ function _expand(cls: string, body: string): string {
   }
   const flat = normalize(buf);
   if (flat) decls.push(flat);
-  const own = decls.length > 0 ? `${self}{${decls.join(";")}}` : "";
+  const own = decls.length === 0
+    ? ""
+    : scoped
+    ? `${self}{${decls.join(";")}}`
+    : decls.join(";");
   return own + blocks.join("");
 }
 

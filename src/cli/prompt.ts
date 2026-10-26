@@ -157,8 +157,9 @@ export async function password(
         if (ch === "\x03" || ch === "\x04") {
           throw new InputClosedError(question);
         }
-        if (ch === "\x7f" || ch === "\b") value = value.slice(0, -1);
-        else value += ch;
+        if (ch === "\x7f" || ch === "\b") {
+          value = Array.from(value).slice(0, -1).join(""); // a code point, not half a surrogate pair
+        } else value += ch;
       }
       if (end !== -1) {
         if (tail.length > 0) putBackPending(io, tail.slice());

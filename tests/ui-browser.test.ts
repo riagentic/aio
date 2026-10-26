@@ -283,3 +283,38 @@ Deno.test("without keepAlive a remount starts over at src", async () => {
     _clearKept();
   }
 });
+
+// A `ref` holder (Back/Forward/Reload buttons) must learn the guest is gone on
+// EVERY unmount. The wrapper ref swallows the renderer's own `ref(null)`, and
+// the teardown forwarded null only under `keepAlive` — so a plain `<Browser>`
+// left the app holding a destroyed `<webview>`.
+Deno.test("ref gets null on unmount without keepAlive too", async () => {
+  for (const keepAlive of [undefined, "reader"]) {
+    const show = signal(true);
+    const refs: (Element | null)[] = [];
+    const ui = await testUI(() =>
+      h(
+        "div",
+        { id: "host" },
+        show.value
+          ? h(Browser, {
+            src: "https://a.test/",
+            keepAlive,
+            ref: (el: Element | null) => refs.push(el),
+          })
+          : null,
+      )
+    );
+    try {
+      await ui.settle();
+      show.set(false);
+      await ui.settle();
+      assertEquals(refs.length, 2, `keepAlive=${keepAlive}`);
+      assert(refs[0]);
+      assertEquals(refs[1], null, `keepAlive=${keepAlive}: no ref(null)`);
+    } finally {
+      await ui.dispose();
+      _clearKept();
+    }
+  }
+});

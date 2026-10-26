@@ -1533,8 +1533,9 @@ export const LEDGER: readonly Mutation[] = [
       "NavLink drops the author's class attribute and renders only the active class on its own page",
     file: "src/air/router.ts",
     find:
-      ': [rest.class, rest.className].filter(Boolean).join(" ") || undefined;',
-    replace: ': [rest.className].filter(Boolean).join(" ") || undefined;',
+      "const parts = [c, cn, isActive ? activeClass : undefined].filter(Boolean);",
+    replace:
+      "const parts = [cn, isActive ? activeClass : undefined].filter(Boolean);",
     test: "tests/router-link-class-and-onclick.test.ts",
     filter: "NavLink keeps the author's class beside the active one",
   },
@@ -1739,8 +1740,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "Link folds a signal class or className into a static string, losing the documented signal binding",
     file: "src/air/router.ts",
-    find: "const bound = isSignal(rest.class) || isSignal(rest.className);",
-    replace: "const bound = isSignal(rest.class) && isSignal(rest.className);",
+    find: "const cls = !parts.some(isSignal)",
+    replace: "const cls = !parts.some(() => false)",
     test: "tests/router-link-signal-class.test.ts",
     filter: "Link keeps a signal class bound",
   },

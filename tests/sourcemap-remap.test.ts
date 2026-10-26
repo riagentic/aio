@@ -161,3 +161,37 @@ Deno.test({
     }
   },
 });
+
+Deno.test("remapStack: a URL frame is replaced WHOLE — never a half-URL", () => {
+  // Generated line 10, col 1 → src/App.tsx:1:1. Every dev-server frame has a
+  // port, and the old match started after it: `http://localhost:src/App.tsx`.
+  const map = parseSourceMap(
+    JSON.stringify({ sources: ["src/App.tsx"], mappings: ";;;;;;;;;AAAA" }),
+  );
+  const only = /(^|\/)bundle\.js$/;
+  const cases: [string, string][] = [
+    [
+      "at App (http://localhost:8000/bundle.js:10:5)",
+      "at App (src/App.tsx:1:1)",
+    ],
+    ["at App (http://localhost/bundle.js:10:5)", "at App (src/App.tsx:1:1)"],
+    [
+      "at App (http://192.168.1.20:8000/bundle.js:10:5)",
+      "at App (src/App.tsx:1:1)",
+    ],
+    ["App@http://localhost:8000/bundle.js:10:5", "App@src/App.tsx:1:1"],
+    ["at bundle.js:10:5", "at src/App.tsx:1:1"],
+    // A Windows drive letter's colon must not cut the token either.
+    ["at App (file:///C:/x/bundle.js:10:5)", "at App (src/App.tsx:1:1)"],
+    ["at App (C:/x/bundle.js:10:5)", "at App (src/App.tsx:1:1)"],
+    ["App@file:///D:/x/bundle.js:10:5", "App@src/App.tsx:1:1"],
+    // `only` tests the PATH: another file on the same origin is left alone.
+    [
+      "at x (http://localhost:8000/other.js:10:5)",
+      "at x (http://localhost:8000/other.js:10:5)",
+    ],
+  ];
+  for (const [input, want] of cases) {
+    assertEquals(remapStack(input, map, { only }), want, input);
+  }
+});

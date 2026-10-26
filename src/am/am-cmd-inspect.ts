@@ -419,8 +419,10 @@ export function followEvents(
  *  meaning every other log tool has. */
 const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
 
-/** Parse `--since=` — a duration (`15m`, `2h`, `30s`, `1d`) or an absolute
- *  timestamp the runtime can parse. Returns epoch ms, or null when the value
+/** Parse `--since=` — a duration (`15m`, `2h`, `30s`, `1d`) or an ISO-shaped
+ *  timestamp (`2026-09-08`, `2026-09-08T10:00`, `…Z`, `…+02:00`) — only that
+ *  shape reaches `Date.parse`, whose legacy fallback reads a bare `5` as the
+ *  year 2001. Returns epoch ms, or null when the value
  *  is not a time at all (which the caller REFUSES rather than ignoring: a
  *  filter silently treated as "no filter" reads as "nothing happened"). */
 export function parseSince(raw: string, now = Date.now()): number | null {
@@ -430,9 +432,17 @@ export function parseSince(raw: string, now = Date.now()): number | null {
     const unit = { s: 1e3, m: 6e4, h: 3.6e6, d: 8.64e7 }[rel[2]!]!;
     return now - n * unit;
   }
-  const t = Date.parse(raw);
+  const iso = raw.trim();
+  if (!/^\d{4}-\d\d-\d\d(?:[T ][\d:.]+(?:Z|[+-]\d\d:?\d\d)?)?$/.test(iso)) {
+    return null;
+  }
+  const t = Date.parse(iso);
   return Number.isFinite(t) ? t : null;
 }
+
+/** A bare number is a duration with its unit forgotten — say which. */
+const unitHint = (raw: string): string =>
+  /^\d+$/.test(raw.trim()) ? ` — add a unit: ${raw.trim()}m` : "";
 
 /** The `{ts, level, tag}` an aio log event opens with, or null for a line that
  *  is not an event start (a stack frame, a raw write). */
@@ -656,7 +666,7 @@ export async function cmdLog(
       // that costs an afternoon.
       outError(
         `--since=${sinceRaw} is not a time — use a duration (15m, 2h, 30s, ` +
-          `1d) or a timestamp (2026-09-08T10:00)`,
+          `1d) or a timestamp (2026-09-08T10:00)${unitHint(sinceRaw)}`,
         mode,
       );
       Deno.exit(1);
@@ -850,7 +860,7 @@ export async function cmdErrors(
     outError(
       `--since=${sinceRaw} is not a time — use a duration (15m, 2h, 30s, ` +
         `1d), a timestamp (2026-09-08T10:00) or reload (since the last hot ` +
-        `reload)`,
+        `reload)${unitHint(sinceRaw!)}`,
       mode,
     );
     Deno.exit(1);

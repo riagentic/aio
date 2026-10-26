@@ -17,6 +17,7 @@ import {
   serverFnTimeoutMs,
 } from "../protocol/protocol-types.ts";
 import { getConnectedSignal } from "../state-core.ts";
+import { MAX_TIMER_DELAY } from "../state/timer-ceiling.ts";
 
 const _pending = new Map<string, {
   resolve: (v: unknown) => void;
@@ -28,7 +29,8 @@ const _pending = new Map<string, {
   ms: number;
 }>();
 
-/** Start `cid`'s full timeout. */
+/** Start `cid`'s full timeout — capped at the int32 timer ceiling, past which
+ *  `setTimeout` fires in ~1 ms and a "wait 40 days" call rejected at once. */
 function _arm(cid: string, ms: number): ReturnType<typeof setTimeout> {
   return setTimeout(() => {
     const p = _pending.get(cid);
@@ -41,7 +43,7 @@ function _arm(cid: string, ms: number): ReturnType<typeof setTimeout> {
         }s — the server never replied (the function may still be running)`,
       ),
     );
-  }, ms);
+  }, Math.min(ms, MAX_TIMER_DELAY));
 }
 
 // Returns whether the frame actually LEFT. `_sendRaw` has answered that

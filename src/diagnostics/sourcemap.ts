@@ -167,9 +167,11 @@ export function mapPosition(
 
 /** Every `…:LINE:COL` in `text`, rewritten through `map`.
  *
- *  Deliberately shape-agnostic: it rewrites the POSITION and leaves the rest of
- *  the frame — `at fn (`, the URL, the closing paren — exactly as the engine
- *  wrote it, because `Error.stack` is not standardised and a parser that
+ *  Deliberately shape-agnostic: it rewrites the LOCATION — the whole token, a
+ *  `scheme://host:port` prefix included, so `http://localhost:8000/app.js:1:2`
+ *  becomes `src/App.tsx:3:4`, never a half-URL — and leaves the rest of the
+ *  frame — `at fn (`, `fn@`, the closing paren — exactly as the engine wrote
+ *  it, because `Error.stack` is not standardised and a parser that
  *  insisted on V8's shape would silently do nothing in a different engine. A
  *  position that maps to nothing is left alone, so a partially-mapped stack is
  *  still a stack. */
@@ -180,12 +182,15 @@ export function remapStack(
 ): string {
   if (!map) return text;
   return text.replace(
-    /([^\s():]+):(\d+):(\d+)/g,
-    (whole, file: string, l: string, c: string) => {
-      // `only` scopes the rewrite to the bundle's own filename. Without it a
-      // stack that mentions any `name:1:2` — including one already mapped —
-      // would be run through the bundle's map and come out wrong.
-      if (opts.only && !opts.only.test(file)) return whole;
+    // origin (`scheme://host:port`, optional) · path (a Windows drive `C:` —
+    // after `file:///` or bare — may lead it) · line · col
+    /((?:[a-z][a-z0-9+.-]*:\/\/[^\s()/]*)?)((?:\/?[a-z]:(?=[\/\\]))?[^\s():]+):(\d+):(\d+)/gi,
+    (whole, _origin: string, path: string, l: string, c: string) => {
+      // `only` scopes the rewrite to the bundle's own filename (the PATH, not
+      // the origin). Without it a stack that mentions any `name:1:2` —
+      // including one already mapped — would be run through the bundle's map
+      // and come out wrong.
+      if (opts.only && !opts.only.test(path)) return whole;
       const pos = mapPosition(map, Number(l), Number(c));
       if (!pos) return whole;
       return `${pos.source}:${pos.line}:${pos.column}`;

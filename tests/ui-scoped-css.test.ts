@@ -153,3 +153,82 @@ Deno.test("cx joins and skips anything falsy", () => {
   assertEquals(cx("a", false, undefined, null, "c"), "a c");
   assertEquals(cx(), "");
 });
+
+// BH-008: in a selector the space before `:` is the descendant combinator, so
+// `& :first-child` and `&:first-child` are two rules — they hashed to one
+// class, and whichever registered second silently got the first one's CSS.
+Deno.test("css: `& :x` and `&:x` are two classes, each with its own rule", () => {
+  _resetCss();
+  const self = css`
+    &:first-child {
+      color: red;
+    }
+  `;
+  const desc = css`
+    & :first-child {
+      color: red;
+    }
+  `;
+  assert(self !== desc, "a descendant pseudo shared the self pseudo's class");
+  assertStringIncludes(collectCss(), `.${self}:first-child{color:red}`);
+  assertStringIncludes(collectCss(), `.${desc} :first-child{color:red}`);
+  // Whitespace that never meant a descendant still hashes as before.
+  const raw = (s: string) => css(Object.assign([s], { raw: [s] }));
+  assertEquals(raw("&:hover{color:red;}"), "aio-1npofvo");
+  assertEquals(raw("  &:hover {\n color : red ;\n}\n"), "aio-1npofvo");
+  assertEquals(raw("& > :x{a:b;}"), "aio-1sl71ep");
+  assertEquals(raw("&  >  :x {\n a : b;\n}"), "aio-1sl71ep");
+  _resetCss();
+});
+
+// BH-009: a nested selector without `&` is a descendant of the class, as in
+// CSS Nesting — passing it through emitted a GLOBAL rule.
+Deno.test("css: a nested block without `&` stays scoped, per comma item", () => {
+  assertEquals(
+    expandCss("c", ".icon { display: none; }"),
+    ".c .icon{display:none}",
+  );
+  assertEquals(expandCss("c", ":hover { a: b; }"), ".c :hover{a:b}");
+  assertEquals(expandCss("c", "& .a, .b { a: b; }"), ".c .a, .c .b{a:b}");
+  // aio-ok: the expected side is a literal, the checker matches the shared input text
+  assertEquals(
+    expandCss("c", ":is(.a, .b) { a: b; }"),
+    ".c :is(.a, .b){a:b}",
+    "a comma inside parentheses is not an item",
+  );
+  // aio-ok: the expected side is a literal, the checker matches the shared input text
+  assertEquals(
+    expandCss("c", "@media (max-width: 6px) { .i { a: b; } & { c: d; } }"),
+    "@media (max-width: 6px){.c .i{a:b}.c{c:d}}",
+  );
+  assertEquals(
+    expandCss("c", "&:hover, &:focus { a: b; }"),
+    ".c:hover, .c:focus{a:b}",
+  );
+});
+
+// Only conditional group at-rules are scoped inside; `@keyframes` holds
+// keyframe selectors and `@font-face` descriptors — scoped, both are dead.
+Deno.test("css: @keyframes and @font-face bodies are emitted unscoped", () => {
+  assertEquals(
+    expandCss(
+      "c",
+      "@keyframes spin { from { opacity: 0; } to { opacity: 1; } }",
+    ),
+    "@keyframes spin{from{opacity:0}to{opacity:1}}",
+  );
+  assertEquals(
+    expandCss("c", "@-webkit-keyframes s { 0% { a: b; } 100% { a: c; } }"),
+    "@-webkit-keyframes s{0%{a:b}100%{a:c}}",
+  );
+  // aio-ok: the expected side is a literal, the checker matches the shared input text
+  assertEquals(
+    expandCss("c", "@font-face { font-family: X; src: url(x.woff2); }"),
+    "@font-face{font-family:X;src:url(x.woff2)}",
+  );
+  // aio-ok: the expected side is a literal, the checker matches the shared input text
+  assertEquals(
+    expandCss("c", "a: b; @supports (display: grid) { .g { d: e; } }"),
+    ".c{a:b}@supports (display: grid){.c .g{d:e}}",
+  );
+});

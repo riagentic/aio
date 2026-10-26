@@ -25,6 +25,7 @@ import {
   pakeOffer,
   verifyPin,
 } from "../src/server/pairing.ts";
+import { pakePairRoute } from "../src/server/pair-pake-route.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { pairingRefusal, SHAPE_VALUES } from "../src/server/config.ts";
 import { AIO, DRAFT } from "./cpace-vectors.ts";
@@ -198,7 +199,7 @@ Deno.test("pairing: PAKE state machine — consume on success, budgets on failur
     const pin = generatePin(scope, { pake: true });
     const st = await cpace.start(pin, fp, undefined, sid());
     const o = await pakeOffer(st.sid, st.Ya, fp, "10.0.0.1", scope);
-    assert(o);
+    assert(o && o !== "busy");
     const f = await cpace.finish(st, o.Yb, o.ADb);
     assert(f);
     const ok = pakeConfirm(o.id, f.ta, "10.0.0.1", scope);
@@ -220,7 +221,7 @@ Deno.test("pairing: PAKE state machine — consume on success, budgets on failur
     for (let i = 0; i < MAX_WRONG_TOTAL; i++) {
       const g = await cpace.start(wrong, fp, undefined, sid());
       const off = await pakeOffer(g.sid, g.Ya, fp, `10.1.${i}.1`, scope);
-      assert(off, `offer ${i}`);
+      assert(off && off !== "busy", `offer ${i}`);
       const gf = await cpace.finish(g, off.Yb, off.ADb);
       assert(gf);
       assertEquals(pakeConfirm(off.id, gf.ta, `10.1.${i}.1`, scope), {
@@ -231,6 +232,68 @@ Deno.test("pairing: PAKE state machine — consume on success, budgets on failur
     assertEquals(currentPin(scope), null, "the total budget burned the code");
   } finally {
     clearPairing();
+  }
+});
+
+Deno.test("pairing: a flood of message 1s never evicts another address's exchange", async () => {
+  const scope = "scope-flood";
+  const fp = new Uint8Array(0);
+  try {
+    const pin = generatePin(scope, { pake: true });
+    const st = await cpace.start(pin, fp);
+    const o = await pakeOffer(st.sid, st.Ya, fp, "10.0.0.1", scope);
+    assert(o && o !== "busy");
+    // One address: only its own oldest gives way.
+    for (let i = 0; i < 20; i++) {
+      const a = await cpace.start("00000000", fp);
+      assert(await pakeOffer(a.sid, a.Ya, fp, "10.0.0.66", scope));
+    }
+    // Many addresses: past the global cap a new exchange is refused.
+    let busy = 0;
+    for (let i = 0; i < 70; i++) {
+      const a = await cpace.start("00000000", fp);
+      if (await pakeOffer(a.sid, a.Ya, fp, `10.2.${i}.1`, scope) === "busy") {
+        busy++;
+      }
+    }
+    assert(busy > 0, "the global cap refuses");
+    const f = await cpace.finish(st, o.Yb, o.ADb);
+    assert(f);
+    assert(pakeConfirm(o.id, f.ta, "10.0.0.1", scope).ok, "the owner pairs");
+  } finally {
+    clearPairing();
+  }
+});
+
+Deno.test("pairing route: message 1 is metered as auth work — 429 past the budget", async () => {
+  _resetAuthFails();
+  const scope = "scope-meter";
+  try {
+    generatePin(scope, { pake: true });
+    const deps = {
+      pake: true,
+      token: scope,
+      profile: () => "{}",
+      clientKey: "10.3.0.1",
+      budgetExceeded: () => false,
+      recordFail: () => {},
+    };
+    const statuses: number[] = [];
+    for (let i = 0; i < 31; i++) {
+      const a = await cpace.start("00000000", new Uint8Array(0));
+      const r = await pakePairRoute(
+        { cpace: cpace.SUITE, sid: cpace.b64(a.sid), Ya: cpace.b64(a.Ya) },
+        new URL("http://127.0.0.1/__aio/pair"),
+        deps,
+      );
+      statuses.push(r!.status);
+      await r!.body?.cancel();
+    }
+    assertEquals(statuses.slice(0, 30), Array(30).fill(200));
+    assertEquals(statuses[30], 429);
+  } finally {
+    clearPairing();
+    _resetAuthFails();
   }
 });
 

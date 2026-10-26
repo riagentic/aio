@@ -15,7 +15,15 @@
  * Refused, loudly: zip64, encryption, other methods, CRC mismatches, and any
  * entry or link that would land outside the destination ("zip slip").
  */
-import { dirname, isAbsolute, join, normalize, relative } from "@std/path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  normalize,
+  parse,
+  relative,
+  SEPARATOR_PATTERN,
+} from "@std/path";
 
 /** One file, directory or symlink in the archive's central directory. */
 export type ZipEntry = {
@@ -172,6 +180,39 @@ function entryStream(
   throw new Error(`${e.name}: unsupported zip compression method ${e.method}`);
 }
 
+/** Walk `target` from the real directory `dir` one component at a time, as
+ *  the OS resolves it — `..` to the parent, a link followed to its own
+ *  target, a missing component taken as named (so a dangling link counts
+ *  too). Where it lands, or null the moment a step lands `outside`. */
+async function walkInside(
+  outside: (p: string) => boolean,
+  dir: string,
+  target: string,
+  hops = 0,
+): Promise<string | null> {
+  if (hops > 40) throw new Error(`zip symlink chain too deep: ${target}`);
+  let cur = isAbsolute(target) ? parse(target).root : dir;
+  if (outside(cur)) return null;
+  for (const c of target.split(SEPARATOR_PATTERN)) {
+    if (c === "" || c === ".") continue;
+    if (c === "..") cur = dirname(cur);
+    else {
+      const next = join(cur, c);
+      const st = await Deno.lstat(next).catch((err) => {
+        if (err instanceof Deno.errors.NotFound) return null;
+        throw err;
+      });
+      const via = st?.isSymlink
+        ? await walkInside(outside, cur, await Deno.readLink(next), hops + 1)
+        : next;
+      if (via === null) return null;
+      cur = via;
+    }
+    if (outside(cur)) return null;
+  }
+  return cur;
+}
+
 /** Unpack `zip` into `dest` (created if missing). Files are written as they
  *  decompress; each is checked against its CRC and size. */
 export async function extractZip(
@@ -181,11 +222,34 @@ export async function extractZip(
   await Deno.mkdir(dest, { recursive: true });
   const unix = Deno.build.os !== "windows";
   const links: { path: string; target: string }[] = [];
-  for (const e of readZipDirectory(zip)) {
+  const entries = readZipDirectory(zip);
+  // An entry under one of the archive's own links would be created THROUGH
+  // it, wherever it points — so the lexical containment checks below would
+  // not hold (`sub/l → ..` then `sub/l/m → ../..` lands `dest/m → ../..`).
+  const linkPaths = new Set(
+    entries.filter((e) => e.isSymlink && !e.isDir).map((e) =>
+      safeZipPath(dest, e.name)
+    ),
+  );
+  const root = join(dest);
+  for (const e of entries) {
     if (e.flags & 1) {
       throw new Error(`${e.name}: encrypted zip entries are not supported`);
     }
     const path = safeZipPath(dest, e.name);
+    for (
+      let p = dirname(path);
+      p !== root && p !== dirname(p);
+      p = dirname(p)
+    ) {
+      if (linkPaths.has(p)) {
+        throw new Error(
+          `refusing zip entry ${e.name}: its parent ${
+            relative(root, p)
+          } is a symlink in the same archive`,
+        );
+      }
+    }
     if (e.isDir) {
       await Deno.mkdir(path, { recursive: true });
       continue;
@@ -237,7 +301,23 @@ export async function extractZip(
     }
   }
   // Links last, so a link never stands where a later file is written through.
+  const realDest = await Deno.realPath(dest);
+  const outside = (p: string) => {
+    const rel = relative(realDest, normalize(p));
+    return rel.startsWith("..") || isAbsolute(rel);
+  };
   for (const { path, target } of links) {
+    // The same check as above, on the real filesystem this time: the parent
+    // as it actually resolves, and the target from there.
+    const realParent = await Deno.realPath(dirname(path));
+    if (
+      outside(realParent) ||
+      outside(isAbsolute(target) ? target : join(realParent, target))
+    ) {
+      throw new Error(
+        `refusing zip symlink ${path} → ${target}: it points outside the destination`,
+      );
+    }
     await Deno.remove(path).catch(() => {
       // aio-ok(silent-catch): clear whatever stands where the symlink goes —
       // absent is the expected case, and a real failure is reported by the
@@ -254,6 +334,18 @@ export async function extractZip(
               : " (Windows needs Developer Mode or admin rights for symlinks)"
           }`,
         { cause: e },
+      );
+    }
+  }
+  // A target can also run through another of the archive's links
+  // (`x → ..`, then `y → x/../..`, or a dangling `y → x/../../nope`), which
+  // no lexical check sees: walk each one as the OS does, now that all exist.
+  for (const { path, target } of links) {
+    const realParent = await Deno.realPath(dirname(path));
+    if (await walkInside(outside, realParent, target) === null) {
+      await Deno.remove(path);
+      throw new Error(
+        `refusing zip symlink ${path} → ${target}: it resolves outside the destination`,
       );
     }
   }

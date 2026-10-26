@@ -15,3 +15,10 @@ Deno.test("cli password: ^D in raw mode is input closed, never part of the secre
     "s3",
   );
 });
+
+Deno.test("cli password: backspace erases a whole astral character, never half a surrogate pair", async () => {
+  assertEquals(
+    await password("Token", { io: testIO({ input: "a\u{1F600}\x7fb\r" }) }),
+    "ab",
+  );
+});

@@ -66,6 +66,8 @@ interface PairingState {
 
 interface PakeOffer {
   at: number;
+  /** `abuseBucket` of the address that sent message 1. */
+  bucket: string;
   sid: Uint8Array;
   isk: Uint8Array;
   ta: Uint8Array;
@@ -74,9 +76,13 @@ interface PakeOffer {
 
 /** How long a CPace exchange may sit between its two messages (ms). */
 export const PAKE_OFFER_TTL_MS = 30_000;
-/** Open exchanges kept per code; the oldest gives way (a flood of message 1s
- *  costs no guess, so it must not be able to crowd out the owner's). */
-const MAX_OFFERS = 16;
+/** Open exchanges one address (abuse bucket) may hold per code; its own
+ *  oldest gives way. A flood of message 1s costs no guess, so it must never
+ *  evict another address's exchange — the owner's. */
+const MAX_OFFERS_PER_BUCKET = 2;
+/** Open exchanges per code from every address together — a memory bound:
+ *  past it a new exchange is refused, never someone else's evicted. */
+const MAX_OFFERS = 64;
 
 /** The scope used by a caller that names none (unit tests driving the state
  *  machine directly). Every server call site passes its app's key. */
@@ -214,30 +220,34 @@ export function pinSentInClear(
 /** CPace message 1 (cpace.ts): answer it with this app's code, on the
  *  certificate fingerprint `fp` the server serves the request with. Costs no
  *  guess — Yb says nothing about the code. null: no PAKE code is active, the
- *  caller's address is out of guesses, or Ya is an abort case. */
+ *  caller's address is out of guesses, or Ya is an abort case. `"busy"`:
+ *  MAX_OFFERS exchanges from other addresses are open. */
 export async function pakeOffer(
   sid: Uint8Array,
   ya: Uint8Array,
   fp: Uint8Array,
   clientKey?: string,
   scope: string = DEFAULT_SCOPE,
-): Promise<{ id: string; Yb: Uint8Array; ADb: Uint8Array } | null> {
+): Promise<
+  { id: string; Yb: Uint8Array; ADb: Uint8Array } | "busy" | null
+> {
   const s = _live(scope);
   if (!s || !s.pake) return null;
-  if ((s.attempts.get(abuseBucket(clientKey)) ?? 0) >= MAX_ATTEMPTS) {
-    return null;
-  }
+  const bucket = abuseBucket(clientKey);
+  if ((s.attempts.get(bucket) ?? 0) >= MAX_ATTEMPTS) return null;
   const r = await cpace.respond(s.pin, fp, sid, ya);
   if (!r) return null;
+  // Bookkeeping after the await: a concurrent message 1 may have changed it.
   const now = Date.now();
+  const mine: string[] = [];
   for (const [k, o] of s.offers) {
     if (now - o.at > PAKE_OFFER_TTL_MS) s.offers.delete(k);
+    else if (o.bucket === bucket) mine.push(k);
   }
-  while (s.offers.size >= MAX_OFFERS) {
-    s.offers.delete(s.offers.keys().next().value!);
-  }
+  while (mine.length >= MAX_OFFERS_PER_BUCKET) s.offers.delete(mine.shift()!);
+  if (s.offers.size >= MAX_OFFERS) return "busy";
   const id = cpace.b64(crypto.getRandomValues(new Uint8Array(16)));
-  s.offers.set(id, { at: now, sid, isk: r.isk, ta: r.ta, tb: r.tb });
+  s.offers.set(id, { at: now, bucket, sid, isk: r.isk, ta: r.ta, tb: r.tb });
   return { id, Yb: r.Yb, ADb: r.ADb };
 }
 

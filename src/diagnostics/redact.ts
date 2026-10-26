@@ -190,8 +190,9 @@ export function redactUrlToken(text: string): string {
 
 /** The pair code the `--expose` boot banner prints (aio-lifecycle.ts:
  *  `pair code: 123456`) — a live, one-shot credential that pulls the app's
- *  profile (cert + key). */
-const PAIR_CODE = /(pair code:\s*)\d{6}/g;
+ *  profile (cert + key). The whole digit run: the plain code is 6 digits, the
+ *  PAKE code 8 (`PAKE_PIN_DIGITS`). */
+const PAIR_CODE = /(pair code:\s*)\d+/g;
 
 /** Every credential aio itself writes into a log line on purpose — the
  *  share-link token ({@linkcode redactUrlToken}) and the pair code — masked.

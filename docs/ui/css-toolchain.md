@@ -207,9 +207,11 @@ The name is a **hash of the rule**, so:
   counter (`aio-1`, `aio-2`) would depend on module evaluation order, which is
   not the same on both sides.
 
-`&` means this class, including inside an at-rule. No build step: it is a
-function, so it behaves identically in `deno task dev` and in a compiled binary.
-The rule is unlayered, so it beats the generated theme (which lives in
+`&` means this class, including inside an at-rule. A nested selector without `&`
+is a descendant of this class, as in CSS Nesting (`.icon { … }` is
+`& .icon { … }`), so nothing nested escapes into a global rule. No build step:
+it is a function, so it behaves identically in `deno task dev` and in a compiled
+binary. The rule is unlayered, so it beats the generated theme (which lives in
 `@layer aio`) without anyone writing `!important`.
 
 Rendering with `renderToString`? There is no document to inject into on the

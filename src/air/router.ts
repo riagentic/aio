@@ -14,6 +14,7 @@
 import { createContext, onMount, useContext } from "./aio-renderer.ts";
 import { isSignal } from "./signal-binding.ts";
 import { isDevMode } from "../state/dev-flag.ts";
+import { computed } from "../state/signal.ts";
 import { firstTime } from "../protocol/said-once.ts";
 import {
   _isSsrRendering,
@@ -411,22 +412,26 @@ export function Link(
   // `class` is the spelling aio apps write, and it and `className` land on the
   // same attribute — so the active class REPLACED a `class` the author set
   // (`<NavLink class="nav">` rendered `class="active"` on its own page).
-  // Both are folded into one before the active class is added — when both
-  // are strings. A SIGNAL class stays bound, passed through as 1.0.11 did:
-  // folding it wrote its source text as the class, frozen.
-  const bound = isSignal(rest.class) || isSignal(rest.className);
-  const base = bound
-    ? rest.className
-    : [rest.class, rest.className].filter(Boolean).join(" ") || undefined;
-  const cls = isActive && activeClass
-    ? [base, activeClass].filter(Boolean).join(" ")
-    : base;
+  // Both are folded into one before the active class is added. A SIGNAL class
+  // stays bound: alone and inactive it passes through untouched; with
+  // anything to join it becomes a computed. It used to be passed through
+  // alongside `className: cls`, two keys for one attribute — the later
+  // `className` won, so a bound `class` vanished, and an active bound
+  // `className` was string-joined as `[object Function] active`.
+  const { class: c, className: cn, ...attrs } = rest;
+  const parts = [c, cn, isActive ? activeClass : undefined].filter(Boolean);
+  const cls = !parts.some(isSignal)
+    ? parts.join(" ") || undefined
+    : parts.length === 1
+    ? parts[0]
+    : computed(() =>
+      parts.map((p) => isSignal(p) ? p.value : p).filter(Boolean).join(" ")
+    );
   const sty = isActive && activeStyle
     ? { ...rest.style, ...activeStyle }
     : rest.style;
-  const { class: _class, ...attrs } = rest;
   return h("a", {
-    ...(bound ? rest : attrs),
+    ...attrs,
     // Under the route base, as `navigate` resolves it (`_appHref`).
     href: _appHref(to),
     onClick: handleClick,
