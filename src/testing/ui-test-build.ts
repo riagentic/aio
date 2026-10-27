@@ -241,8 +241,10 @@ export async function _buildTestUI(
       // module rides in every app bundle graph — a static "happy-dom" import
       // makes esbuild try to bundle a Node-flavored test DOM into browser/
       // android bundles (51 errors). Opaque = resolved only at test runtime.
-      const spec = "happy-dom";
-      const hd = await import(spec);
+      // Through a function: build.minify folds a `const` specifier back into
+      // a literal one, which deno compile embeds.
+      const load = (spec: string) => import(spec);
+      const hd = await load("happy-dom");
       // Non-about:blank base URL so router code (navigate/Link) has a real
       // origin to resolve against.
       const vw = opts.viewport?.width ?? 1024;

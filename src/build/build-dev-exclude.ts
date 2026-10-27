@@ -659,8 +659,10 @@ export async function withDevExcluded(
     // — and those arrive after the exclude list and the trim were decided:
     // measured, an app on `happy-dom@^20` (20.14.6 that day) built against
     // aio's pinned 20.14.5 carried the whole of it, and its dependencies
-    // through its links, in the FIRST binary and in no later one. So the
-    // later one is built now: once more, with everything on disk.
+    // through its links, in the FIRST binary and in no later one. (That one
+    // was build.minify folding a computed `import(spec)` into a literal —
+    // refused in minify-server.ts now.) So the later one is built now: once
+    // more, with everything on disk.
     if (seen.size === 0) return true;
     const late = [...(await readDenoNmGraph(join(nmDir, ".deno"))).keys()]
       .filter((e) => !seen.has(e)).sort();

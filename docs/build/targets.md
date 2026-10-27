@@ -1244,6 +1244,12 @@ client bundle, which is always minified, and never its map.
     `"#secret"`), and those are exactly what minifying changes; legacy decorator
     metadata needs the types. Keep decorated classes in a module of their own if
     the rest should be minified.
+  - _its computed import of "x" becomes a literal one_ —
+    `const s = "x";
+    import(s)` keeps `x` out of the binary (deno compile
+    embeds only what a literal `import("x")` names), and minifying folds it into
+    exactly that. Pass the specifier through a function instead:
+    `const load = (s: string) => import(s); await load("x")`.
   - _it uses the name `__aioName` itself_ — rename the binding.
   - _esbuild's name helper was not recognised_ — nothing in your code; aio's
     pinned esbuild printed something this version does not know. Report it.

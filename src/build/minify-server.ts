@@ -313,7 +313,29 @@ export async function minifyModule(
       );
     }
   }
+  // A computed specifier is how a module loads something only at run time
+  // and keeps deno compile from embedding it. esbuild folds
+  // `const s = "happy-dom"; import(s)` into `import("happy-dom")`, which deno
+  // compile follows: every minified binary carried the 13 MB test DOM that
+  // only `am surface` loads. A literal import the minifier MADE ships as
+  // written.
+  const had = literalImports(src);
+  const made = [...literalImports(code)].filter((s) => !had.has(s));
+  if (made.length > 0) {
+    throw new Unminifiable(
+      `minified, its computed import of "${made[0]}" becomes a literal one, ` +
+        `and deno compile would embed what it loads only at run time`,
+    );
+  }
   return code;
+}
+
+/** `import("x")` with a literal specifier (quotes or a plain template). */
+const LITERAL_IMPORT = /\bimport\(\s*(["'`])([^"'`$\\]+)\1\s*[,)]/g;
+
+/** The literal specifiers of a module's dynamic imports. Pure. */
+function literalImports(code: string): Set<string> {
+  return new Set([...code.matchAll(LITERAL_IMPORT)].map((m) => m[2]!));
 }
 
 /** Every module `module` reaches, from `deno info --json`. Throws (with deno's

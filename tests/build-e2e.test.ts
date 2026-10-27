@@ -1593,10 +1593,9 @@ Deno.test({
       cfg.imports = {
         ...(cfg.imports ?? {}),
         "@node-rs/crc32": "npm:@node-rs/crc32@1.10.6",
-        // NOT the version aio pins for itself: `deno compile` installs the
-        // linked framework's own pin beside this one, mid-compile — after
-        // what stays out of the binary was decided. (With `^21`, as scaffolded,
-        // that was true only on days npm had a newer one than the pin.)
+        // NOT the version aio pins for itself: a compile that reached aio's
+        // pin (a minified computed import did) installed it beside this one,
+        // mid-compile — after what stays out of the binary was decided.
         "happy-dom": `npm:happy-dom@${
           aioHappyDom === "20.14.6" ? "20.14.5" : "20.14.6"
         }`,
@@ -1661,7 +1660,7 @@ Deno.test({
             isTrimmedFile(f.slice(f.lastIndexOf("/") + 1))
           ).slice(0, 10),
           [],
-          `the ${nth} ${platform} build embeds source maps or package docs`,
+          `the ${nth} ${platform} build embeds source maps or package docs:\n${noise}`,
         );
         return {
           bin,
@@ -1721,9 +1720,11 @@ Deno.test({
         first.natives[0]!,
         foreign === "windows" ? "win32-x64" : "linux-x64-gnu",
       );
-      // The first compile installed aio's own happy-dom late: said, and
-      // built again — so the first binary carries none of it.
-      assertStringIncludes(first.out, "Compiling once more");
+      // aio's own happy-dom is never reached: build.minify folded aio's
+      // computed `import(spec)` into `import("happy-dom")`, the compile
+      // installed aio's pin and embedded all 13 MB of it. Nothing is
+      // installed late, and no binary carries any happy-dom.
+      assertEquals(first.out.includes("Compiling once more"), false);
       assertEquals(
         first.files.filter((f) => f.includes("happy-dom")),
         [],

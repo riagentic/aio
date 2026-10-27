@@ -10,6 +10,11 @@
 
 ### Updates and shipping
 
+- **A minified binary no longer carries happy-dom.** build.minify (on by
+  default) folded aio's own `const spec = "happy-dom"; import(spec)` into
+  `import("happy-dom")`, and deno compile embedded the whole test DOM (13 MB of
+  a Windows `browser` binary: 94 → 85 MB). Any module the minifier would do that
+  to now ships as written, and the build names it.
 - **`updates: { source: "github:OWNER/REPO" }`** — an app updates from its
   GitHub releases: channel `prod` reads the latest release, any other channel
   the release tagged with its name; assets are `am publish`'s files, fetched

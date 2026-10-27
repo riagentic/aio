@@ -7220,14 +7220,23 @@ export const LEDGER_1: readonly Mutation[] = [
   },
   {
     what:
-      "a package the compile itself installs (a linked framework's own pinned happy-dom) is in the FIRST binary and in no later one — the build is not compiled again once it is on disk",
+      "a package the compile itself installs is in the FIRST binary and in no later one — the build is not compiled again once it is on disk",
     file: "src/build/build-dev-exclude.ts",
     find: "    if (late.length === 0) return true;",
     replace: "    if (late.length >= 0) return true;",
-    test: "tests/build-e2e.test.ts",
+    test: "tests/build-late-install.test.ts",
     filter:
-      "artifact: a cross build carries the target's native package only, and the SECOND build carries what the first did",
-    env: { AIO_BUILD_E2E: "1" },
+      "build: a package the compile itself installs is compiled again, trimmed",
+  },
+  {
+    what:
+      "build.minify folds a computed import(spec) into a literal one, and deno compile embeds what the module loads only at run time (aio's happy-dom, 13 MB, in every minified binary)",
+    file: "src/build/minify-server.ts",
+    find: "  if (made.length > 0) {",
+    replace: "  if (made.length < 0) {",
+    test: "tests/build-minify-fallback.test.ts",
+    filter:
+      "minify fallback: a computed import specifier the minifier would make literal ships as written",
   },
   {
     what:

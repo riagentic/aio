@@ -6,11 +6,10 @@ what is OPEN, what is DECIDED (so it is not argued again), and measured facts.
 
 ## 1. State
 
-- Current release: 1.0.24-beta (2026-10-23, tagged and pushed). After it: hunt
-  rounds 1–8 (2026-10-24, `245468e3d..f22a1aeeb`), committed locally, then the
-  round-9 fix-all wave and the NVIDIA X-crash fix (feedback/critical.md), not
-  released; the upgrade guide draft is `untracked/hunt-1025/UPGRADE-DRAFT.md`.
-  What is left is under "Owner decides" and "Known and small".
+- Current release: 1.0.25-beta (2026-10-24, tagged and pushed). 1.0.26-beta is
+  prepared locally (2026-10-27): the bughunter round (review/bughunter.md, 15
+  fixed), the aipro §6–§12 and aio-launcher field reports, happy-dom 21, the
+  launchd stop race. What is left is under "Before the release" and §5.
 - Surface frozen since 2026-09-04: additive only, bugfix-only through beta.
   1.0.0 = a date, once releases have been boring for several weeks — the owner's
   call.

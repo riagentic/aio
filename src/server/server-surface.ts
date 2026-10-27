@@ -205,12 +205,15 @@ export async function renderHeadlessSurface(
   }
 
   // 2. A throwaway DOM. Computed specifier so bundlers never chase happy-dom
-  //    into client builds (same technique as testing/ui-test.ts).
+  //    into client builds (same technique as testing/ui-test.ts) — passed
+  //    through a function, because a `const` one is folded back into
+  //    `import("happy-dom")` by build.minify, and deno compile then embedded
+  //    the whole package in the binary.
   // deno-lint-ignore no-explicit-any
   let win: any;
   try {
-    const spec = "happy-dom";
-    const hd = await import(spec);
+    const load = (spec: string) => import(spec);
+    const hd = await load("happy-dom");
     win = new hd.Window({ url: "http://localhost/" });
   } catch {
     return {

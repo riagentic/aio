@@ -7,7 +7,8 @@
 // `a<b,c>(d??0)` in a `.ts` file is a generic CALL of `a`. Dev returned
 // `[true, true]`; the compiled build threw `a is not a function`.
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { join, normalize, toFileUrl } from "@std/path";
+import { fromFileUrl, join, normalize, toFileUrl } from "@std/path";
+import { walk } from "@std/fs";
 import * as esbuild from "esbuild";
 import {
   KEEP_NAME,
@@ -18,6 +19,8 @@ import {
 import { stopEsbuildService } from "../src/build/esbuild-shared.ts";
 import { HEY } from "../src/diagnostics/fmt.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+
+const REPO_SRC = fromFileUrl(new URL("../src", import.meta.url));
 
 const LIST = `// LIST-COMMENT
 export function both(min: number, value: number, max: number, limit?: number) {
@@ -265,5 +268,41 @@ Deno.test("minify fallback: such a module ships as written with one warning nami
     console.warn = warn;
     await stopEsbuildService(() => esbuild.stop());
     await dropTempDir(base);
+  }
+});
+
+// A computed specifier keeps a run-time-only load out of the binary; esbuild
+// folded `const s = "happy-dom"; import(s)` into `import("happy-dom")`, which
+// deno compile follows — every minified binary carried the 13 MB test DOM.
+Deno.test("minify fallback: a computed import specifier the minifier would make literal ships as written", async () => {
+  const folded =
+    `export async function f() { const spec = "happy-dom"; return await import(spec); }\n`;
+  try {
+    await assertRejects(
+      () => minifyModule(esbuild, "/app/mod.ts", folded),
+      Unminifiable,
+      'computed import of "happy-dom" becomes a literal one',
+    );
+    // A literal the author wrote stays as it was: minified.
+    const literal =
+      `export async function f() { return await import("happy-dom"); }\n`;
+    assert((await minifyModule(esbuild, "/app/mod.ts", literal)).length > 0);
+    // Through a function, the specifier stays computed.
+    const passed =
+      `export async function f() { const load = (s: string) => import(s); return await load("happy-dom"); }\n`;
+    const out = await minifyModule(esbuild, "/app/mod.ts", passed);
+    assert(!out.includes('import("happy-dom")'), out);
+    // No module of aio's own needs the fallback for this reason: every
+    // run-time-only load in src/ stays computed when minified.
+    const made: string[] = [];
+    for await (const e of walk(REPO_SRC, { exts: [".ts", ".tsx"] })) {
+      await minifyModule(esbuild, e.path, await Deno.readTextFile(e.path))
+        .catch((err) => {
+          if (String(err).includes("becomes a literal")) made.push(e.path);
+        });
+    }
+    assertEquals(made, []);
+  } finally {
+    await stopEsbuildService(() => esbuild.stop());
   }
 });
