@@ -13,7 +13,11 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { testCell } from "../src/testing/cell-test.ts";
 import { manager } from "../amui/src/manager.ts";
 import { envelopePayload } from "../src/am/am-cmd-state.ts";
-import { removeLock, writeLock } from "../src/server/single-instance-lock.ts";
+import {
+  readLock,
+  removeLock,
+  writeLock,
+} from "../src/server/single-instance-lock.ts";
 import { isHeldOpenError } from "../src/diagnostics/rename-over.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { _resetInstanceVerify } from "../src/am/am-http.ts";
@@ -374,6 +378,7 @@ await new Promise((r) => setTimeout(r, 60_000));
 `,
     });
     let pid: number | undefined;
+    let failed: unknown;
     try {
       await withRoots(dir, async () => {
         await t.send.discover();
@@ -386,7 +391,19 @@ await new Promise((r) => setTimeout(r, 60_000));
         `a booted app must read as started — got: ${msg}`,
       );
       assert(pid !== undefined, "discovery sees it running");
+    } catch (e) {
+      failed = e;
+      throw e;
     } finally {
+      // A start that read as failed still started the child: found by the
+      // lock it writes, so it is ended either way — left alive, it held the
+      // dir for its whole minute and the refused remove below REPLACED the
+      // failure that said why (seen on Windows).
+      for (const until = Date.now() + 10_000; pid === undefined;) {
+        pid = readLock(appId)?.pid;
+        if (pid !== undefined || Date.now() > until) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
       removeLock(appId);
       if (pid !== undefined) {
         try {
@@ -402,7 +419,11 @@ await new Promise((r) => setTimeout(r, 60_000));
           await Deno.remove(dir, { recursive: true });
           break;
         } catch (e) {
-          if (!isHeldOpenError(e) || Date.now() > until) throw e;
+          if (!isHeldOpenError(e) || Date.now() > until) {
+            // The body's own failure is the one to report.
+            if (failed !== undefined) break;
+            throw e;
+          }
           await new Promise((r) => setTimeout(r, 20));
         }
       }

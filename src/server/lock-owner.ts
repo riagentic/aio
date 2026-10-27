@@ -460,8 +460,12 @@ export async function askToStop(
   const headers: Record<string, string> = {
     "X-AIO": "1",
     "X-Aio-Control": control.key,
-    // So the old app's log says a takeover ended it, not `am stop`.
+    // So the old app's log says a takeover ended it, not `am stop` — and
+    // which process asked (a one-off on Windows CI named no asker at all).
     "X-Aio-Stop-By": "takeover",
+    "X-Aio-Stop-From": `${Deno.pid} ${
+      Deno.mainModule.slice(Deno.mainModule.lastIndexOf("/") + 1)
+    }`,
   };
   const path = "/__aio/trojan/shutdown";
   const send = async (h: Record<string, string>): Promise<number | null> => {

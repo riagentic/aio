@@ -318,6 +318,15 @@ or is small and known.
       11–35). Its taps are not retried. Record the proof at release:
       `AIO_PROOF_RECORD=1 deno task test:android`; WebKit lane green 3/3
       (`AIO_PLAYWRIGHT_DIR`), row not recorded.
+- [x] Windows full suite 2026-10-27 (1.0.26 candidate), seen once, green 3/3
+      alone: `e2e-vitals-clients` — 130 ms after `running`, the app logged "stop
+      requested over the control API (takeover by a new launch)" and no second
+      launch of its unique appId ever logged. A takeover now carries the asker's
+      pid and module (`X-Aio-Stop-From`, said in app.log) and the asker logs it
+      too — the next sighting names who. Same run, fixed: the slow-reader test
+      waited a fixed 7 s that Windows' loopback buffers absorb (now waits for
+      the server's close line); `amui-manager`'s start test left its child alive
+      when the start read as failed, and the refused cleanup hid the failure.
 - [x] Under the mutation gate's load (4 workers, 45 min)
       `tests/test-shards-leftover.test.ts` was red unmutated once and green
       alone (its planted suite was not green); it now prints the shard log and

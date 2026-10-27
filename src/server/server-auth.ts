@@ -338,6 +338,23 @@ export function stopRequester(req?: Request): "am stop" | "takeover" {
     : "am stop";
 }
 
+/** Which process asked a takeover stop — `<pid> <main module>` from the
+ *  optional `X-Aio-Stop-From` header, checked to that shape (it is a claim,
+ *  said in the log, never trusted). `null` when absent or malformed. Pure. */
+export function stopAsker(req?: Request): string | null {
+  const v = req?.headers.get("x-aio-stop-from") ?? "";
+  return /^\d{1,10} [\w.$-]{1,80}$/.test(v) ? v : null;
+}
+
+/** Say who asked a takeover stop, when the asker said. */
+export function sayStopAsker(req?: Request): void {
+  const asker = stopAsker(req);
+  if (asker && stopRequester(req) === "takeover") {
+    const [pid, main] = asker.split(" ");
+    log.info("aio", `the takeover was asked by pid ${pid} (${main})`);
+  }
+}
+
 /** The credentials this process has armed, by appId. One process serves one app
  *  (the single-instance lock guarantees it); a TEST process that boots several
  *  servers arms several, and any of them authorizes — they are all the same

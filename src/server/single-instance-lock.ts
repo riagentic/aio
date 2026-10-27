@@ -1005,6 +1005,11 @@ export class AppLock {
         // Wait out the app's OWN self-kill deadline too (`stopProcess`'s
         // watchdog), not just the phase budget: a takeover that SIGKILLs at
         // 9 s cuts off an app that was about to end itself cleanly at 10 s.
+        log.info(
+          "lock",
+          `${this.appId}: pid ${existing.pid} holds it — asking it to stop ` +
+            `(takeover, from pid ${Deno.pid})`,
+        );
         await stopInstance(existing);
         removeLockIf(this.key, raw!);
         await delay(100);

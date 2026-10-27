@@ -47,6 +47,7 @@ import {
 } from "./server-ws.ts";
 import {
   disarmLocalControl,
+  sayStopAsker,
   stopRequester,
   TROJAN_PREFIX,
 } from "./server-auth.ts";
@@ -1494,6 +1495,7 @@ async function handlePost(
     deps.debug(`[trojan] shutdown requested`);
     const resp = json({ ok: true, msg: "shutting down" });
     const by = stopRequester(req);
+    sayStopAsker(req);
     queueMicrotask(() => trojan.shutdown!(by));
     return resp;
   }

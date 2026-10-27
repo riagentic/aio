@@ -16,6 +16,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { cell } from "../mod.ts";
 import { testServer } from "../src/testing/server-test.ts";
+import { interceptConsole } from "./console-capture.ts";
 
 const ITEM = "z".repeat(1_000_000);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -139,7 +140,8 @@ async function setup(writeBytes: number) {
   });
   const srv = await testServer({
     cells: [notes],
-    budgets: { cellState: "16MB", payload: "16MB" },
+    // Room for the writer while a non-reader is waited out (above).
+    budgets: { cellState: "64MB", payload: "64MB" },
   });
   for (let i = 0; i < 6; i++) await notes.add(ITEM + i);
   await sleep(800); // past the server-write fold
@@ -183,17 +185,32 @@ Deno.test("ws backlog: a peer that reads nothing is still closed 1013 within a b
   const conn = await connect(srv.port);
   const t0 = Date.now();
   try {
-    await sleep(7_000); // reads nothing
-    // …then read it all back, up to the close. 4 s missed it with five
-    // suites on the machine: the backlog in front of the close is megabytes.
-    // The read ends AT the close, so a longer window costs a fast box nothing.
+    // Reads nothing until the server has closed it. The kernel's buffers
+    // are in front of the server's backlog, and Windows' loopback holds many
+    // MB more than Linux': a fixed 7 s wait then read, on Windows, drained
+    // them before the backlog ever grew — no close, a peer that DID read.
+    // The close handshake needs the peer to read, so the server's own line
+    // is what says it happened.
+    const said: string[] = [];
+    const restore = interceptConsole(said);
+    try {
+      while (
+        !said.some((l) => l.includes("is not draining its socket")) &&
+        Date.now() - t0 < 45_000
+      ) await sleep(250);
+    } finally {
+      restore();
+    }
+    const closedAt = Date.now() - t0;
+    stop();
+    assert(closedAt < 45_000, `still not closed after ${closedAt}ms`);
+    // …then read it all back, up to the close behind the backlog.
     const got = await readFor(conn, 1e12, 15_000);
     assertEquals(
       got.close,
       1013,
       `a peer that never reads must be closed (got ${got.close})`,
     );
-    assert(Date.now() - t0 < 25_000, `closed after ${Date.now() - t0}ms`);
   } finally {
     stop();
     try {

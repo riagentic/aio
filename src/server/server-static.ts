@@ -16,6 +16,7 @@ import {
 import {
   LOCAL_CONTROL_HEADER,
   localControlAuthorized,
+  sayStopAsker,
   STOP_REFUSED,
   stopRequester,
   TROJAN_PREFIX,
@@ -1007,6 +1008,7 @@ export async function prodStopAnswer(
   }
   if (!stop) return null;
   const by = stopRequester(req);
+  sayStopAsker(req);
   queueMicrotask(() => void stop(by));
   return Response.json({ ok: true, msg: "shutting down" });
 }

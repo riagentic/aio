@@ -18,7 +18,12 @@
 //
 // The owner, for its part, keeps its record filed: a lock file removed under
 // a running app is put back within one tick.
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertStringIncludes,
+} from "@std/assert";
 import { join, toFileUrl } from "@std/path";
 import {
   _probeDeps,
@@ -1218,6 +1223,8 @@ for (const prod of [false, true]) {
           "stop requested over the control API (takeover by a new launch)",
         );
         assert(!/SIGTERM received/.test(log), log);
+        // It says WHICH process asked — a one-off on Windows named nobody.
+        assertMatch(log, /the takeover was asked by pid \d+ \([\w.$-]+\)/);
         // …and the launch that took over writes its own log from then on.
         const asked = log.indexOf("stop requested over the control API");
         assert(/\bstarted\b/.test(log.slice(asked)), log.slice(asked));
@@ -1330,4 +1337,17 @@ Deno.test({
       removeLock(appId);
     }
   },
+});
+
+Deno.test("stopAsker: the asker is said only in its `<pid> <module>` shape", async () => {
+  const { stopAsker } = await import("../src/server/server-auth.ts");
+  const req = (v?: string) =>
+    new Request("http://x/", {
+      headers: v === undefined ? {} : { "X-Aio-Stop-From": v },
+    });
+  assertEquals(stopAsker(req("4242 app.ts")), "4242 app.ts");
+  assertEquals(stopAsker(req("4242 $deno$test.mjs")), "4242 $deno$test.mjs");
+  for (const bad of [undefined, "", "x app.ts", "1 a b", "1 \u001b[2J"]) {
+    assertEquals(stopAsker(req(bad)), null, String(bad));
+  }
 });
