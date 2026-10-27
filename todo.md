@@ -314,10 +314,13 @@ or is small and known.
       src/am/am-cmd-start.ts); the socket: a client that cannot connect logs the
       path's state per dial and warns after 5 s (`UNREACHABLE_SAY_MS`,
       tests/cli-uds-unreachable-says-why.test.ts) — the next sighting says why.
-- [ ] Android lane: 15/15 on API 35 and API 36, twice each (2026-10-12, load
-      11–35). Its taps are not retried. Record the proof at release:
-      `AIO_PROOF_RECORD=1 deno task test:android`; WebKit lane green 3/3
-      (`AIO_PLAYWRIGHT_DIR`), row not recorded.
+- [x] Android lane: 15/15 on API 35 and API 36, twice each (2026-10-12, load
+      11–35). Proof recorded 2026-10-27: the emulator (API 35, 20 steps) and,
+      for the first time, the phone (Saga, API 34, 20 steps).
+- [ ] WebKit lane (`ios route` proof row, never recorded): green 3/3 before; on
+      2026-10-27 Playwright's WebKit 2215 would not start here — the system
+      lacks `libavif.so.16` and `libjxl.so.0.8`
+      (`sudo npx playwright install-deps webkit`, needs the owner).
 - [x] Windows full suite 2026-10-27 (1.0.26 candidate), seen once, green 3/3
       alone: `e2e-vitals-clients` — 130 ms after `running`, the app logged "stop
       requested over the control API (takeover by a new launch)" and no second
@@ -450,14 +453,15 @@ or is small and known.
 
 ### Before the release
 
-- [ ] One full `check:release` green end to end on Linux; the full suite on the
-      Windows VM and the real Mac at the release commit; `test:onboard` and
-      `test:build`; the three build-lane browser tests edited for
-      `browserHomeEnv`; a cold stub rebuild (`check:release` now says when it
-      was skipped).
-- [ ] Record the proof rows (today: 1 of 16 proven, 5 never recorded, 4 stale,
-      android BEHIND its build path; the Windows rows are BEHIND the stub
-      rebuilt for `.aio-sfx-files`): `deno task update:proof`.
+- [x] One full `check:release` green end to end on Linux (2026-10-27, at
+      e65ca91b7; the GPU-lab gate SKIPPED — the lab is down, its `up` needs
+      sudo); the full suite on the Windows VM (14956 passed, 0 failed) and the
+      macOS 14 VM (15160 passed, 0 failed) at the release code; the stub rebuilt
+      byte-identical.
+- [x] Record the proof rows (2026-10-27): windows native suite, macos native
+      suite, wine, android emulator and device, cli, web. They read STALE until
+      the tag contains them. Not recordable here: `ios route` (above),
+      `windows (real hardware)` (a real laptop), the 72 h soak.
 - [ ] Real OS, new after 1.0.23 (Linux, the w11pro VM, the Mac): the run-time
       splash `show: () => "firstStart"` shows no start splash on a later start
       and still shows the download splash in a throwaway HOME; `hue` recolours
