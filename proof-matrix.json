@@ -1,6 +1,13 @@
 [
   {
     "target": "android",
+    "env": "device",
+    "commit": "72d16f481",
+    "date": "2026-10-27",
+    "detail": "API 34: standalone (dispatch, durable native store — survives an instant kill and a background kill, rotation, light/dark live, android.colorScheme dark and light hold against the system, app.ts options baked — ui.theme/lang/dir reach the phone, persist: false a new install while an install holding state keeps it, a second app keeps its own storage, browser workers (module, classic+nested, three deep, assets mount), nativeFetch past an Origin-refusing API, a foreign iframe can neither read nor write the store, build.splash shown at launch and closed on load not before minMs) + signed release (keystore from the environment, APK + AAB, not debuggable, runs) + client (connect, server dispatch, Back, unreachable, keyed --expose server by pairing code and by share link over http and over self-signed TLS — certificate pinned; wrong code, unknown and changed certificate refused; PAKE pairing (pairing.pake, 8-digit code, Cpace.kt) over TLS)"
+  },
+  {
+    "target": "android",
     "env": "emulator",
     "commit": "8c0f59b46",
     "date": "2026-10-27",
@@ -41,13 +48,13 @@
   {
     "target": "windows",
     "env": "native suite",
-    "commit": "d8dd6e979",
-    "date": "2026-10-23",
-    "detail": "2714 test files in 4 shard(s), 4728s",
-    "how": "deno task test there; read from win-suite.utf8.log",
-    "passed": 14419,
+    "commit": "e65ca91b7",
+    "date": "2026-10-27",
+    "detail": "2903 test files in 4 shard(s), 3303s",
+    "how": "deno task test there; read from suite.log",
+    "passed": 14956,
     "failed": 0,
-    "ignored": 517
+    "ignored": 554
   },
   {
     "target": "windows",
