@@ -9,18 +9,18 @@
   {
     "target": "cli",
     "env": "binary",
-    "commit": "540587fe3",
-    "date": "2026-10-25",
+    "commit": "e65ca91b7",
+    "date": "2026-10-27",
     "detail": "compiled cli-client ↔ compiled server, state printed"
   },
   {
     "target": "macos",
     "env": "native suite",
-    "commit": "540587fe3",
-    "date": "2026-10-25",
-    "detail": "2888 test files in 2 shard(s), 2243s",
-    "how": "deno task test on a real Apple-silicon Mac (macOS 26); read from its suite log",
-    "passed": 15078,
+    "commit": "8c0f59b46",
+    "date": "2026-10-27",
+    "detail": "2903 test files in 2 shard(s), 3043s",
+    "how": "deno task test on a macOS 14 (x86_64) VM; read from its suite log",
+    "passed": 15160,
     "failed": 0,
     "ignored": 350
   },
@@ -34,8 +34,8 @@
   {
     "target": "web",
     "env": "real-browser",
-    "commit": "540587fe3",
-    "date": "2026-10-25",
+    "commit": "e65ca91b7",
+    "date": "2026-10-27",
     "detail": "chromium: surface → trigger → server state converged"
   },
   {
