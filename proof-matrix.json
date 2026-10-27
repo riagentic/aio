@@ -2,8 +2,8 @@
   {
     "target": "android",
     "env": "emulator",
-    "commit": "540587fe3",
-    "date": "2026-10-25",
+    "commit": "8c0f59b46",
+    "date": "2026-10-27",
     "detail": "API 35: standalone (dispatch, durable native store — survives an instant kill and a background kill, rotation, light/dark live, android.colorScheme dark and light hold against the system, app.ts options baked — ui.theme/lang/dir reach the phone, persist: false a new install while an install holding state keeps it, a second app keeps its own storage, browser workers (module, classic+nested, three deep, assets mount), nativeFetch past an Origin-refusing API, a foreign iframe can neither read nor write the store, build.splash shown at launch and closed on load not before minMs) + signed release (keystore from the environment, APK + AAB, not debuggable, runs) + client (connect, server dispatch, a call made offline delivered, Back, unreachable, keyed --expose server by pairing code and by share link over http and over self-signed TLS — certificate pinned; wrong code, unknown and changed certificate refused; PAKE pairing (pairing.pake, 8-digit code, Cpace.kt) over TLS)"
   },
   {
