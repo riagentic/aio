@@ -154,6 +154,8 @@ export async function artifactFromPatch(opts: {
       expectSize: patch.size,
       owner: opts.dataDir,
       keepStaged: true,
+      // The full artifact's rule: an absolute `url` on another host is refused.
+      manifestUrl: opts.manifestUrl,
     });
     if (!got.ok) return { why: got.error };
     const stage = dirname(got.path);

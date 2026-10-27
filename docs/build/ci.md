@@ -18,6 +18,12 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: "2.9" # aio's MIN_DENO — pin the floor you support
+      - name: Install aio at the app's aioVersion, then link it
+        run: |
+          ref=$(sed -n 's/.*"aioVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' deno.json | head -n 1)
+          curl -fsSL "https://raw.githubusercontent.com/riagentic/aio/$ref/install.sh" | AIO_REF="$ref" sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+          ~/.deno/bin/am fix --no-download # dep/aio — before ANY deno command
       - run: deno task fmt --check
       - run: deno task lint # deno lint AND aiol — see below
       - run: deno task check # deno check AND am check — see below
@@ -31,6 +37,12 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: "2.9"
+      - name: Install aio at the app's aioVersion, then link it
+        run: |
+          ref=$(sed -n 's/.*"aioVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' deno.json | head -n 1)
+          curl -fsSL "https://raw.githubusercontent.com/riagentic/aio/$ref/install.sh" | AIO_REF="$ref" sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+          ~/.deno/bin/am fix --no-download # dep/aio — before ANY deno command
       - run: deno task compile
       - uses: actions/upload-artifact@v4
         with:
@@ -38,9 +50,15 @@ jobs:
           path: dist/
 ```
 
-Nothing in it is aio-specific, and that is the point: the scaffolded tasks are
-the interface. What matters is that CI runs `deno task check` and
-`deno task lint` rather than `deno check src/` and `deno lint` directly.
+A fresh checkout has no `dep/aio` (it is a link `am fix` makes, never
+committed). Make it first: a deno command run before it exists drops aio's
+entries from the committed `deno.lock`, and the tree is then dirty (`am fix`
+restores such a lock when it makes the link). A release workflow:
+`deno task ship github` ([updates](../deploy/updates.md)).
+
+Beyond that step nothing in it is aio-specific: the scaffolded tasks are the
+interface. What matters is that CI runs `deno task check` and `deno task lint`
+rather than `deno check src/` and `deno lint` directly.
 
 ## Why `deno task check`, not `deno check`
 

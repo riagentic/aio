@@ -187,6 +187,9 @@ export type TreeFacts = {
   /** The 8-hex content hash of the dirty set; null when the tree is clean.
    *  Without a repo: the hash of the project tree (never null). */
   hash: string | null;
+  /** In a repository: the changed paths the hash covers (relative to the
+   *  project root), so a refusal can name them. */
+  changed?: string[];
 };
 
 /** THE resolver. Pure. */
@@ -738,6 +741,7 @@ export async function readTreeFacts(
   // A repo whose work tree is enormous (`--untracked-files=all` lists every
   // one) is the same unbounded read as a non-repo walk — capped the same way.
   const id = treeIdentity(root, opts.limits, io, content);
+  const changed: string[] = [];
   for (const p of new Set(paths)) {
     // aio-ok: path-split — git output and `rootRel` are both `/`-separated
     const rel = rootRel && p.startsWith(rootRel + "/")
@@ -748,12 +752,14 @@ export async function readTreeFacts(
     // does not track the path. A tracked file is source wherever it lies.
     if (untracked.has(p) && excluded(rel, recorded)) continue;
     await id.add(rel, join(top, p), "deleted");
+    changed.push(rel);
   }
   return {
     repo: true,
     count,
     commit,
     hash: id.seen() === 0 ? null : await id.hash(),
+    changed,
   };
 }
 
@@ -856,7 +862,7 @@ export async function buildVersionFor(
     isOutput?: (rel: string) => boolean;
     limits?: TreeLimits;
   } = {},
-): Promise<{ bv: BuildVersion; fromFleet: boolean }> {
+): Promise<{ bv: BuildVersion; fromFleet: boolean; tree?: TreeFacts }> {
   const env = opts.env ?? Deno.env.get(BUILD_VERSION_ENV);
   if (env) {
     const bv = JSON.parse(env) as BuildVersion;
@@ -893,7 +899,7 @@ export async function buildVersionFor(
       tree = NO_TREE;
     }
   }
-  return { bv: resolveBuildVersion(declared, tree), fromFleet: false };
+  return { bv: resolveBuildVersion(declared, tree), fromFleet: false, tree };
 }
 
 /** The facts of a tree nobody read. */

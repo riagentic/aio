@@ -24,7 +24,7 @@ import { log } from "../diagnostics/logger-api.ts";
 import { count } from "../diagnostics/fmt.ts";
 import { pendingKeys } from "../protocol/pending-calls.ts";
 import { _pendingCallKeys } from "../state/method-cancel.ts";
-import { parentPidOf } from "./process-liveness.ts";
+import { inheritedEnv, parentPidOf } from "./process-liveness.ts";
 import { processStopping } from "./shutdown.ts";
 import {
   AppLock,
@@ -505,7 +505,7 @@ export async function restartForCellChange(
   // one), which files the next child over it. It used to remove the lock, and
   // until that filing (~100 ms on every save) nothing named the app.
   if (self) {
-    const parent = parentPidOf(env("AIO_PARENT_PID"));
+    const parent = parentPidOf(inheritedEnv("AIO_PARENT_PID"));
     const supervisor = isSupervisedChild() && parent ? parent : Deno.pid;
     AppLock.live().find((l) => l.key === slotOf(self))?.handOver(
       placeholderFor(self, supervisor, port),

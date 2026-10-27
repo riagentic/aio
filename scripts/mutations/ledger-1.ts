@@ -7790,4 +7790,38 @@ export const LEDGER_1: readonly Mutation[] = [
     filter:
       "check:home-clean: an aio app home is found by its CONTENT, whatever its name; a look-alike is not",
   },
+  {
+    what:
+      "a launchctl bootout that lands between the loop's fork and `p=$!` never reaches the app; launchd SIGKILLs it later",
+    file: "src/build/build-service.ts",
+    find:
+      '  `  if [ -n "$stop" ] && [ "$sent" != "$p" ]; then sent=$p; term "$p" & t=$!; fi`,',
+    replace: "  `  :`,",
+    test: "tests/build-service-supervisor-files.test.ts",
+    filter:
+      "launchd loop: a SIGTERM between the fork and `p=$!` still reaches the app, once",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "an app leaves AIO_PARENT_PID in its env: every process it starts inherits the watch, and another aio app opened from it dies with the first one's launcher",
+    file: "src/server/process-liveness.ts",
+    find: "        Deno.env.delete(k);",
+    replace: "",
+    test: "tests/parent-pid-not-inherited.test.ts",
+    filter:
+      "AIO_PARENT_PID: a process the app starts does not inherit it; an update's successor still gets it",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "an update's successor loses the launcher's parent watch once the app no longer inherits it from its own env",
+    file: "src/server/updates-apply.ts",
+    find: "    env: inheritedParentEnv(),",
+    replace: "",
+    test: "tests/parent-pid-not-inherited.test.ts",
+    filter:
+      "AIO_PARENT_PID: a process the app starts does not inherit it; an update's successor still gets it",
+    os: ["darwin", "linux"],
+  },
 ];

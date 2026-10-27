@@ -95,7 +95,7 @@ Deno.test("launchd plist: well-formed whatever the title holds", () => {
 /** Run the launchd loop under a real `sh` with a stand-in program. */
 async function runLoop(
   program: string,
-  opts: { termAfterLine?: string } = {},
+  opts: { termAfterLine?: string; inject?: [string, string] } = {},
 ): Promise<{ code: number; out: string }> {
   const dir = await tempDir("aio-launchd-loop-");
   try {
@@ -104,8 +104,14 @@ async function runLoop(
     await Deno.chmod(bin, 0o755);
     // `sleep 5` between restarts is the plist's ThrottleInterval twin; a test
     // must not wait for it, and must not change what the loop decides.
-    const loop = LAUNCHD_LOOP.replace("sleep 5", "sleep 0");
+    let loop = LAUNCHD_LOOP.replace("sleep 5", "sleep 0");
     assert(loop !== LAUNCHD_LOOP);
+    if (opts.inject) {
+      const [find, put] = opts.inject;
+      const next = loop.replace(find, () => put); // a `$$` in it is literal
+      assert(next !== loop, `no ${opts.inject[0]} in the loop`);
+      loop = next;
+    }
     const p = new Deno.Command("/bin/sh", {
       args: ["-c", loop, "aio-supervise", bin, join(dir, "count")],
       stdout: "piped",
@@ -391,4 +397,64 @@ Deno.test("build: the systemd unit keeps the 1.0.19 contract — AIO_SUPERVISED=
   } finally {
     await dropTempDir(dir);
   }
+});
+
+// The two windows a `launchctl bootout` can land in, hit on purpose: the loop
+// signals itself there (a trap runs between two commands, so this is exactly
+// "the signal arrived at that point").
+Deno.test({
+  name:
+    "launchd loop: a SIGTERM between the fork and `p=$!` still reaches the app, once",
+  ignore: Deno.build.os === "windows", // the loop is /bin/sh text for macOS
+  async fn() {
+    const r = await runLoop(
+      `trap 'echo stopping; exit 0' TERM
+echo up
+while :; do sleep 0.05; done`,
+      { inject: ['"$@" & p=$!', '"$@" & kill -TERM $$; p=$!'] },
+    );
+    // Before the app's own trap the stop kills it outright; after, it is a
+    // clean stop. Either way it arrives — a lost one hung here for 10 s.
+    const out = r.out.trim();
+    assert(out === "" || out === "up\nstopping", out);
+    assertEquals(r.code, 0);
+  },
+});
+
+Deno.test({
+  name:
+    "launchd loop: a SIGTERM during the pause between runs ends the loop — no restart",
+  ignore: Deno.build.os === "windows", // the loop is /bin/sh text for macOS
+  async fn() {
+    // Run 1 exits 7 (a crash); the stop lands in the pause before run 2.
+    const r = await runLoop(
+      `n=$(cat "$1" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$1"; echo "run $n"; exit 7`,
+      { inject: ["sleep 0", "kill -TERM $$; sleep 0"] },
+    );
+    assertEquals(r.out.trim().split("\n"), ["run 1"]);
+    assertEquals(r.code, 0);
+  },
+});
+
+Deno.test({
+  name:
+    "launchd loop: a `stop` variable in the environment is not a stop — the app starts",
+  ignore: Deno.build.os === "windows", // the loop is /bin/sh text for macOS
+  async fn() {
+    const loop = LAUNCHD_LOOP.replace("sleep 5", "sleep 0");
+    const o = await new Deno.Command("/bin/sh", {
+      args: [
+        "-c",
+        loop,
+        "aio-supervise",
+        "/bin/sh",
+        "-c",
+        "echo ran; exit 143",
+      ],
+      env: { stop: "1", sent: "x" },
+      stdout: "piped",
+    }).output();
+    assertEquals(new TextDecoder().decode(o.stdout).trim(), "ran");
+    assertEquals(o.code, 0);
+  },
 });

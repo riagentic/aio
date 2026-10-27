@@ -245,3 +245,66 @@ Deno.test("fleet: a lower version, a renamed applicationId and removed app files
     await dropTempDir(dir);
   }
 });
+
+// The fleet build's dirty test excluded only its out dir, while a
+// single-target build and `am publish`'s pre-check also excluded an artifact a
+// single-target build left in the ROOT — so the pre-check passed and the
+// fleet then built `-dirty.*`, refused after minutes. One rule now.
+Deno.test("fleet: an artifact a single-target build left in the root is not a dirty tree", async () => {
+  const dir = await tempDir("aio-fleet-root-artifact-");
+  const orig = { log: console.log, warn: console.warn, error: console.error };
+  const origCwd = Deno.cwd();
+  const origArgs = Deno.args;
+  const git = (...args: string[]) =>
+    new Deno.Command("git", {
+      args,
+      cwd: dir,
+      env: {
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.invalid",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.invalid",
+      },
+      stdout: "null",
+      stderr: "null",
+    }).output();
+  try {
+    const stub = join(dir, "stub-build.ts");
+    await Deno.writeTextFile(stub, STUB);
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ title: "myapp", build: { targets: ["android"] } }),
+    );
+    await Deno.writeTextFile(join(dir, ".gitignore"), "dist/\n*.apk\n");
+    await Deno.mkdir(join(dir, "src"));
+    await Deno.writeTextFile(join(dir, "src", "app.ts"), "export {};\n");
+    await git("init", "-q");
+    await git("add", "-A");
+    await git("commit", "-qm", "init");
+    // A previous single-target build's artifact, untracked, not ignored.
+    await Deno.writeTextFile(join(dir, "myapp-linux-x64.zip"), "zip");
+    Object.defineProperty(Deno, "args", {
+      value: [`--build-spec=${stub}`],
+      configurable: true,
+    });
+    Deno.chdir(dir);
+    const lines: string[] = [];
+    console.log = console.warn = console.error = (...a: unknown[]) =>
+      void lines.push(a.map(String).join(" "));
+    const code = await buildAll();
+    Object.assign(console, orig);
+    assertEquals(code, 0, lines.join("\n"));
+    const m = JSON.parse(
+      await Deno.readTextFile(join(dir, "dist", "manifest.json")),
+    );
+    assert(!String(m.version).includes("dirty"), m.version);
+  } finally {
+    Object.assign(console, orig);
+    Object.defineProperty(Deno, "args", {
+      value: origArgs,
+      configurable: true,
+    });
+    Deno.chdir(origCwd);
+    await dropTempDir(dir);
+  }
+});

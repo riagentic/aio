@@ -378,7 +378,9 @@ const SCENARIOS: Record<string, Scenario> = {
     prepare: (w) => Promise.resolve({ cwd: w.app }),
   },
   publish: {
-    argv: () => ["publish"],
+    // `--allow-dirty`: the fixture is not a commit, and the refusal of a dirty
+    // tree now comes BEFORE the build — this row is about the build failing.
+    argv: () => ["publish", "--allow-dirty"],
     names: /build failed — nothing was published/,
     why: "FAILED SIDE EFFECT: its build step fails — before sign/upload",
     prepare: (w) => Promise.resolve({ cwd: w.app }),

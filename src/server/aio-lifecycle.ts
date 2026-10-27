@@ -2,7 +2,7 @@
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
 import { keepServerOf, windowSizeOf } from "./config-sources.ts";
-import { parentPidOf } from "./process-liveness.ts";
+import { inheritedEnv, parentPidOf } from "./process-liveness.ts";
 import {
   contentSecurityPolicy,
   cspNonce,
@@ -715,7 +715,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // itself — gracefully, every phase — when that pid is gone. Opt-in, same in
   // dev and prod, observe-only until the parent actually disappears.
   if (!libraryMode && !_parentWatched) {
-    const rawParent = Deno.env.get("AIO_PARENT_PID");
+    const rawParent = inheritedEnv("AIO_PARENT_PID");
     const parentPid = parentPidOf(rawParent);
     // Set but unusable: the launcher asked for "die with me" and would not
     // get it — an orphan that keeps serving, with nothing said.

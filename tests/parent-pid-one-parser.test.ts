@@ -9,7 +9,7 @@ import { fromFileUrl } from "@std/path";
 import { parentPidOf } from "../src/server/process-liveness.ts";
 
 const SERVER = fromFileUrl(new URL("../src/server/", import.meta.url));
-const READ = /(?:env|Deno\.env\.get)\("AIO_PARENT_PID"\)/;
+const READ = /(?:env|Deno\.env\.get|inheritedEnv)\("AIO_PARENT_PID"\)/;
 
 Deno.test("AIO_PARENT_PID: every server read goes through parentPidOf", async () => {
   const bad: string[] = [];

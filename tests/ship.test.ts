@@ -378,56 +378,187 @@ Deno.test("shipApp: scans THE app dir (from the entry) and refuses an unmeasured
   }
 });
 
+type WfStep = {
+  name?: string;
+  uses?: string;
+  run?: string;
+  with?: Record<string, unknown>;
+  env?: Record<string, string>;
+};
+type WfJob = { steps: WfStep[]; needs?: string; environment?: unknown };
+async function wfJobs(y: string): Promise<Record<string, WfJob>> {
+  const { parse } = await import("@std/yaml");
+  return (parse(y) as { jobs: Record<string, WfJob> }).jobs;
+}
+
 Deno.test("ship github: the workflow publishes into the layout the updater reads", async () => {
   const { githubWorkflow } = await import("../src/build/ship.ts");
   const yml = githubWorkflow({ name: "wallet", channel: "prod" });
 
-  // Valid YAML with both halves of the pipeline — a workflow that does not
-  // parse is a release process that fails on the day you need it.
-  const { parse } = await import("@std/yaml");
-  const doc = parse(yml) as { jobs: Record<string, unknown>; on: unknown };
-  assertEquals(Object.keys(doc.jobs), ["build", "publish"]);
-
-  // The layout is the part aio owns; it must match what the client fetches.
-  assert(yml.includes("out/prod"), "publishes under the channel directory");
-  // The manifest name is produced by `aio ship --channel-dir`, never re-spelled
-  // here: a second spelling of <os>-<arch>.json is the exact defect this
-  // workflow used to carry.
-  assert(yml.includes("--channel-dir=out"));
-  assert(
-    !yml.includes("Deno.build.os"),
-    "the workflow must not re-derive the manifest file name",
+  // Valid YAML — a workflow that does not parse is a release process that
+  // fails on the day you need it. ONE build job on one Linux runner: `am
+  // publish` cross-builds every target (aio-launcher §5: three runners ran
+  // `deno task compile` with no aio installed).
+  const jobs = await wfJobs(yml);
+  assertEquals(Object.keys(jobs), ["release", "pages"]);
+  const steps = jobs.release!.steps;
+  const runs = steps.map((s) => s.run ?? "").join("\n");
+  // A fresh checkout, in order: full history (the build number is the
+  // commit count) → aio at the app's pin → the link → the publish.
+  assertEquals(
+    steps.find((s) => s.uses?.startsWith("actions/checkout"))!.with
+      ?.["fetch-depth"],
+    0,
   );
-  // Reachable for a consuming app, not just inside this repo.
-  assert(yml.includes("jsr:@riagentic/aio/ship"));
-  // Signing key comes from a secret, never the repo.
+  const at = (needle: string) => runs.indexOf(needle);
+  assert(at("AIO_REF=") >= 0 && at("AIO_REF=") < at("am fix --no-download"));
+  assert(
+    at("am fix --no-download") < at("am publish --channel=prod --dir=out"),
+  );
+  // No deno command before the link: it would prune the committed deno.lock.
+  assert(!/(^|[;&|(]\s*)deno\s/m.test(runs.slice(0, at("am fix"))), runs);
+  // The layout is `am publish`'s; nothing here re-spells a file name or
+  // finds an artifact by time.
+  assert(!yml.includes("-newer") && !yml.includes("deno task compile"));
+  // The key only when the secret is set.
   assert(yml.includes("secrets.AIO_SIGNING_KEY"));
-  // Pages, because a GitHub Release asset list is FLAT and can never answer
-  // <base>/<channel>/<os>-<arch>.json.
-  assert(yml.includes("actions/deploy-pages"));
-  assert(yml.includes("pages: write") && yml.includes("id-token: write"));
+  assert(runs.includes('if [ -n "${AIO_SIGNING_KEY:-}" ]'));
+  // The tag's release is a DRAFT until every file is on it, then published.
+  assert(at("--draft") < at('gh release upload "$tag" out/prod/*'), runs);
   assert(
-    yml.includes("https://OWNER.github.io/REPO"),
-    "recommends a base URL that actually serves directories",
+    at('gh release upload "$tag" out/prod/*') < at("--draft=false"),
+    runs,
   );
-  assert(
-    !yml.includes('releases/latest/download"'),
-    "never recommends a release download URL as the update base",
-  );
-  // A draft release has no public download path — the attached binaries are
-  // for humans, so they still must not be a draft.
-  assert(yml.includes("draft: false"));
-  // Three platforms, and one failing must not hide the others.
-  for (const os of ["ubuntu-latest", "macos-latest", "windows-latest"]) {
-    assert(yml.includes(os), `builds on ${os}`);
-  }
-  assert(yml.includes("fail-fast: false"));
-
+  assert(!runs.includes("--prerelease"), "prod's release must be `latest`");
+  // Pages by default — deployed by a job of its own AFTER the release: the
+  // github-pages environment refuses a tag until a rule allows it, and that
+  // must not take the release files down with it.
+  assert(yml.includes("https://OWNER.github.io/REPO"));
+  assert(yml.includes("add a tag rule `v*`"), "the environment rule is said");
+  assertEquals(jobs.pages!.needs, "release");
+  assert(jobs.pages!.steps.some((s) => s.uses === "actions/deploy-pages@v4"));
+  assert(!steps.some((s) => s.uses?.startsWith("actions/deploy-pages")));
+  assertEquals(jobs.release!.environment, undefined);
+  const { githubReleaseWorkflow } = await import("../src/build/ship.ts");
+  assertEquals(githubReleaseWorkflow({ name: "wallet", channel: "prod" }), yml);
   assert(
     githubWorkflow({ name: "w" }).includes("out/prod"),
     "defaults to prod",
   );
-  assert(githubWorkflow({ name: "w", channel: "test" }).includes("out/test"));
+});
+
+// `--no-pages` on a channel other than prod (review of aio-launcher §1): the
+// app on `beta` reads `releases/download/beta/…`, so the files must ALSO go to
+// the release tagged `beta` — attached only to `v1.2.3`, the app 404'd for
+// good. The version's release is a prerelease, so `latest` (prod) skips it.
+Deno.test("ship github --no-pages: a non-prod channel refreshes the release tagged with its name", async () => {
+  const { githubReleaseWorkflow } = await import("../src/build/ship.ts");
+  const yml = githubReleaseWorkflow({
+    name: "w",
+    channel: "beta",
+    pages: false,
+  });
+  const jobs = await wfJobs(yml);
+  assertEquals(Object.keys(jobs), ["release"]);
+  assert(!yml.includes("deploy-pages") && !yml.includes("pages: write"));
+  assert(yml.includes('source: "github:OWNER/REPO", channel: "beta"'), yml);
+  const runs = jobs.release!.steps.map((s) => s.run ?? "").join("\n");
+  assert(runs.includes("--generate-notes --prerelease"), runs);
+  assert(runs.includes("gh release create beta --prerelease"), runs);
+  // Files first, the manifests last.
+  const files = runs.indexOf("xargs -0 -r gh release upload beta --clobber");
+  const manifests = runs.indexOf("gh release upload beta out/beta/*.json");
+  assert(files >= 0 && files < manifests, runs);
+  // prod with --no-pages needs no channel release: `latest` is it.
+  const prod = githubReleaseWorkflow({ name: "w", pages: false });
+  assert(prod.includes('updates: "github:OWNER/REPO"'));
+  assert(!prod.includes("gh release create prod"));
+});
+
+/** Run one step's `run` script under bash with `env`; its exit code. */
+async function runStep(
+  yml: string,
+  name: string,
+  env: Record<string, string>,
+): Promise<number> {
+  const step = (await wfJobs(yml)).release!.steps.find((s) => s.name === name);
+  assert(step?.run, `no step "${name}"`);
+  const o = await new Deno.Command("bash", {
+    args: ["-c", step.run],
+    clearEnv: true,
+    env: { PATH: Deno.env.get("PATH") ?? "", ...env },
+    stdout: "null",
+    stderr: "null",
+  }).output();
+  return o.code;
+}
+
+Deno.test({
+  name:
+    "ship github: only a v* tag publishes, and an unsigned release fails unless chosen",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const { githubReleaseWorkflow } = await import("../src/build/ship.ts");
+    const yml = githubReleaseWorkflow({ name: "w" });
+    // workflow_dispatch on a branch deployed that branch to prod.
+    const tag = "Publish only from a v* tag";
+    assertEquals(await runStep(yml, tag, { GITHUB_REF: "refs/heads/main" }), 1);
+    assertEquals(
+      await runStep(yml, tag, { GITHUB_REF: "refs/tags/v1.2.3" }),
+      0,
+    );
+    // No key: every app with the default `allowUnsigned: false` refused the
+    // release while CI was green.
+    const unsigned = "Refuse an unsigned release unless chosen";
+    assertEquals(await runStep(yml, unsigned, {}), 1);
+    assertEquals(
+      await runStep(yml, unsigned, { AIO_ALLOW_UNSIGNED: "true" }),
+      0,
+    );
+    assertEquals(await runStep(yml, unsigned, { AIO_SIGNING_KEY: "{}" }), 0);
+    assert(yml.includes("vars.AIO_ALLOW_UNSIGNED"));
+    assert(yml.includes("allowUnsigned"));
+    // Both guards run before anything is built.
+    const names = (await wfJobs(yml)).release!.steps.map((s) => s.name ?? "");
+    assert(names.indexOf(unsigned) < names.indexOf("Link the framework"));
+    assertEquals(names[0], tag);
+  },
+});
+
+// The pin is read by the workflow's own shell line — run it.
+Deno.test({
+  name:
+    "ship github: the install step reads the aioVersion of deno.json or deno.jsonc",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const { githubWorkflow } = await import("../src/build/ship.ts");
+    const line = githubWorkflow({ name: "w" }).split("\n").find((l) =>
+      l.trim().startsWith('ref=""; for f in')
+    )!.trim();
+    const dir = await tempDir("ship-gh-ref-");
+    try {
+      const read = async () => {
+        const o = await new Deno.Command("bash", {
+          args: ["-c", `set -euo pipefail; ${line}; printf %s "$ref"`],
+          cwd: dir,
+          stdout: "piped",
+        }).output();
+        return new TextDecoder().decode(o.stdout);
+      };
+      await Deno.writeTextFile(
+        join(dir, "deno.jsonc"),
+        `{\n  // the app\n  "aioVersion": "v1.0.26-beta"\n}\n`,
+      );
+      assertEquals(await read(), "v1.0.26-beta");
+      await Deno.writeTextFile(
+        join(dir, "deno.json"),
+        `{\n  "name": "w",\n  "aioVersion": "v1.0.25-beta",\n  "tasks": {}\n}\n`,
+      );
+      assertEquals(await read(), "v1.0.25-beta", "deno.json first");
+    } finally {
+      await dropTempDir(dir);
+    }
+  },
 });
 
 // The recommendation printed by ship.ts and the classifier the app boots with
@@ -947,8 +1078,10 @@ Deno.test("publishInstructions: the copy lines name the file the client asks for
   assert(text.includes("test/"), text);
   assert(text.includes("linux-x86_64.json"), text);
   assert(text.includes("cp app.bin out/test/"), text);
-  // The trap itself, stated: a release asset list cannot serve this layout.
-  assert(text.includes("FLAT"), text);
+  // A release's flat assets are a source of their own (aio-launcher §1) —
+  // the note that said they "cannot serve this" steered people away from it.
+  assert(text.includes('updates: "github:OWNER/REPO"'), text);
+  assert(!text.includes("cannot serve"), text);
 });
 
 Deno.test("publishInstructions: the cp lines name the files where they ARE, and --channel-dir needs only the artifact", async () => {
@@ -1813,4 +1946,100 @@ Deno.test("publishInstructions: files in dist/ are said to be emptied by the nex
     !publishInstructions(m, "app", { staged: true, channelDir: "/srv/rel" })
       .includes("EMPTIES"),
   );
+});
+
+/** Run the release step with a stand-in `gh` and `git` on PATH: `gh release
+ *  view` answers `exists`, `git tag -l` lists `tags`. The gh calls it made. */
+async function releaseStepCalls(
+  yml: string,
+  opts: { tag: string; exists: boolean; tags: string[] },
+): Promise<string[]> {
+  const step = (await wfJobs(yml)).release!.steps.find((s) =>
+    s.name === "Attach the files to the tag's release, then publish it"
+  );
+  assert(step?.run);
+  const dir = await tempDir("ship-gh-release-");
+  try {
+    const bin = join(dir, "bin");
+    await Deno.mkdir(bin);
+    await Deno.mkdir(join(dir, "out", "prod"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "out", "prod", "linux-x86_64.json"),
+      "{}",
+    );
+    await Deno.writeTextFile(join(dir, "out", "prod", "app-1"), "x");
+    const log = join(dir, "calls");
+    await Deno.writeTextFile(
+      join(bin, "gh"),
+      `#!/bin/sh\necho "$*" >> "${log}"\n[ "$1 $2" = "release view" ] && exit ${
+        opts.exists ? 0 : 1
+      }\nexit 0\n`,
+    );
+    await Deno.writeTextFile(
+      join(bin, "git"),
+      `#!/bin/sh\nprintf '%s\\n' ${opts.tags.join(" ")}\n`,
+    );
+    await Deno.chmod(join(bin, "gh"), 0o755);
+    await Deno.chmod(join(bin, "git"), 0o755);
+    const o = await new Deno.Command("bash", {
+      args: ["-c", step.run],
+      cwd: dir,
+      clearEnv: true,
+      env: {
+        PATH: `${bin}:${Deno.env.get("PATH") ?? ""}`,
+        GITHUB_REF_NAME: opts.tag,
+      },
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assertEquals(o.code, 0, new TextDecoder().decode(o.stderr));
+    return (await Deno.readTextFile(log)).trim().split("\n");
+  } finally {
+    await dropTempDir(dir);
+  }
+}
+
+// Review of the release step: a hotfix for an older line (v1.1.5 after
+// v1.2.0) was published as GitHub's "latest", so `github:` prod moved new
+// installs BACK; and a rerun set a public release to draft, dropping "latest"
+// to the release before it while files uploaded.
+Deno.test({
+  name:
+    "ship github: only the highest version becomes latest, and a rerun keeps a public release public",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const { githubReleaseWorkflow } = await import("../src/build/ship.ts");
+    const yml = githubReleaseWorkflow({ name: "w" });
+    const tags = ["v1.1.4", "v1.2.0", "v1.1.5", "v1.3.0-rc.1"];
+    const hotfix = await releaseStepCalls(yml, {
+      tag: "v1.1.5",
+      exists: false,
+      tags,
+    });
+    assert(
+      hotfix.at(-1) === "release edit v1.1.5 --draft=false --latest=false",
+      hotfix.join("\n"),
+    );
+    const newest = await releaseStepCalls(yml, {
+      tag: "v1.2.0",
+      exists: false,
+      tags,
+    });
+    assertEquals(
+      newest.at(-1),
+      "release edit v1.2.0 --draft=false --latest=true",
+    );
+    // The manifest goes up after the file.
+    const up = newest.filter((c) => c.startsWith("release upload"));
+    assert(up.at(-1)!.endsWith(".json --clobber"), up.join("\n"));
+    const rerun = await releaseStepCalls(yml, {
+      tag: "v1.2.0",
+      exists: true,
+      tags,
+    });
+    assert(
+      !rerun.some((c) => c.includes("--draft")),
+      `a public release was set back to draft: ${rerun.join("\n")}`,
+    );
+  },
 });

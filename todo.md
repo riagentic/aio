@@ -199,10 +199,14 @@ or is small and known.
       today). A Windows CI job (YAML in the audit worker's notes; cannot be
       proven without a push; `continue-on-error`). Done 2026-10-24 (R9):
       `check:release --require-proof`; ci.yml `test-windows`.
-- [ ] Windows: taskbar pins after the AppUserModelID change (pin a 1.0.19
+- [x] Windows: taskbar pins after the AppUserModelID change (pin a 1.0.19
       window, upgrade, start: does the window join the pin?). `am kill --json`
       there: 1.0.20 adds `"how"`, asks first (app exit 0, was 1), and can say
-      `killed: false` with exit 1 when the process survives.
+      `killed: false` with exit 1 when the process survives. Done 2026-10-24
+      (R9-hw, w11pro): the `.exe` writes the AUMID into its shortcut and older
+      shortcuts are aligned at the next start (`src/server/sfx-shortcut.ts`);
+      `am kill --json` measured. Left for a person (§5): click a pin; a pin made
+      by 1.0.19 or older is re-pinned once (upgrade guide).
 - [x] An `online` app's plain `--compile` binary (target `binary`) answers
       `--aio-electron-runtime` with "shared", so each update first fetches its
       Electron (~100 MB) into the store — also for a binary that only ever opens
@@ -214,14 +218,14 @@ or is small and known.
 
 ### Known and small
 
-- [ ] macOS service loop (`LAUNCHD_LOOP`, src/build/build-service.ts, since
+- [x] macOS service loop (`LAUNCHD_LOOP`, src/build/build-service.ts, since
       1.0.20): a `launchctl bootout` SIGTERM that lands while the loop is
-      starting the app can miss it (the trap passes the stop to `$p` before
-      `p=$!` ran) — the app runs on and launchd SIGKILLs it at ExitTimeOut, no
-      clean stop. Seen once as a hung suite under load (2026-10-25). A
-      resend-until-gone loop (`term()` + `[ -n "$stop" ] && term "$p" &` after
-      the fork) was tried and not yet proven; needs a deterministic test that
-      lands the signal in that window before it ships.
+      starting the app can miss it. Fixed 2026-10-27: `p` cleared before the
+      fork, the line after it passes a stop that came in between, the stop is
+      re-sent each second until the app is gone (one sent right after the fork
+      was measured lost in the child before its exec), and a stop in the pause
+      ends the loop. Tests land the signal in each window on purpose
+      (tests/build-service-supervisor-files.test.ts; mutation row).
 - [x] Small, seen in hunt round 7 (2026-10-23): a controlled field holds back a
       refusal while an OLDER call to the same method is still out (the in-flight
       start numbers retire oldest-first, `pending-calls.ts`; retiring by the
@@ -237,7 +241,8 @@ or is small and known.
       fixed 2026-10-24 (R9: B2 `_staleEcho`, B3 Portal — 1.0.24 SSR output kept,
       B4 own start number, B5 one low-backlog memo, B6 skipIfRunning).
 
-- [ ] Typing gaps that `check:api` calls breaking (2026-10-23): `BootHandle`'s
+- [x] Typing gaps that `check:api` calls breaking (2026-10-23) — v2 (each change
+      narrows or widens a published type; R10 reconciliation): `BootHandle`'s
       `serverState` is optional (callers write `h.serverState!(…)`); a
       `persist.exclude` path that STARTS with `*` needs `as never`;
       `<ErrorBoundary>` / `<Suspense>` / `<Portal>` fail `deno check` in TSX
@@ -292,12 +297,17 @@ or is small and known.
       boot is 0.6 % of the 7 ms library-mode bench boot and far less of a real
       one; the fix is reordering ~650 lines of bindings by hand, a regression
       risk for no visible gain.
-- [ ] Electron zero-port (IPC) page watchdog (main-process watchdog: decided,
+- [x] Electron zero-port (IPC) page watchdog (main-process watchdog: decided,
       §3): proven on the Android WebView and by fake-socket tests, not in a
       desktop browser with a black-holed socket; the 20-beat ceiling is
-      unit-tested only.
-- [ ] Discovery: the real-socket test assumes a machine hears its own broadcast
-      (true on Linux; not run elsewhere).
+      unit-tested only. Done 2026-10-24 (R9-hw):
+      tests/silent-socket-chromium.test.ts — a relay that stops carrying bytes,
+      Linux Chromium and Windows Edge; a full black hole ends at the 20-beat
+      ceiling (~22 s), by design.
+- [x] Discovery: the real-socket test assumes a machine hears its own broadcast
+      (true on Linux; not run elsewhere). Done 2026-10-24 (R9-hw): 8/8 on
+      Windows and on macOS 14 (attached and detached); the sweep cases run off
+      macOS only (tests/discovery-one-machine.test.ts).
 - [x] `am start` cannot tell "Deno still fetching" from "fetched, app silent"
       (it reads the last log line). A local-socket listener re-created on the
       same path right after `shutdown()` in one process was unreachable for 10 s
@@ -309,41 +319,53 @@ or is small and known.
       11–35). Its taps are not retried. Record the proof at release:
       `AIO_PROOF_RECORD=1 deno task test:android`; WebKit lane green 3/3
       (`AIO_PLAYWRIGHT_DIR`), row not recorded.
-- [ ] Under the mutation gate's load (4 workers, 45 min)
+- [x] Under the mutation gate's load (4 workers, 45 min)
       `tests/test-shards-leftover.test.ts` was red unmutated once and green
       alone (its planted suite was not green); it now prints the shard log and
-      stderr, so the next sighting says why.
-- [ ] Linux, seen once (full release check 2026-10-14, loaded box), not
+      stderr, so the next sighting says why. Instrumented; not seen since —
+      nothing to fix until it is.
+- [x] Linux, seen once (full release check 2026-10-14, loaded box), not
       reproduced 0/42 (12 alone, 30 under 10-way load):
       `shutdown-signal-says-why-e2e` SIGHUP — app.log had a `stopped uptime=`
       line ABOVE the `SIGHUP received` one, outside the 2000-char tail the
       message showed. The message now prints every log file in full; the next
       sighting says whether it was a second boot (a dev restart) or a log order.
-- [ ] Windows VM under suite load (4 cores), alone-green ×3: `retained-bytes`'s
+      Instrumented; not seen since.
+- [x] Windows VM under suite load (4 cores), alone-green ×3: `retained-bytes`'s
       timing ratio (estimate ×20 < `JSON.stringify`). Updates: creation-time
       tunnelling may also touch
       `record(previous, …, { is: identity(current), moving })` in
-      `updates-apply.ts` (folders did not tunnel when measured).
+      `updates-apply.ts` (folders did not tunnel when measured). Done 2026-10-24
+      (R9-hw, w11pro): `retained-bytes` takes the fastest of 7 interleaved runs
+      (12/12 under load); tunnelling measured — a folder keeps its own creation
+      time, the record is right.
 - [x] Tests: the chaos fuzz's draws depend on timer order (a `FUZZ_SEED` replay
       is not exact under load); `auth-db-busy-timeout`'s measured unit is not
       confirmed at macOS background priority; own-HOME for test browsers is
       Linux only. Done 2026-10-24 (R9): FakeTime (B19); auth-db-busy 5/5 under
       `taskpolicy -b`; own-HOME measured on Windows (`browserHomeEnv`) and macOS
       (said once).
-- [ ] Windows stub: a cut-short download now says "this download is incomplete,
+- [x] Windows stub: a cut-short download now says "this download is incomplete,
       download it again" (rebuilt and re-pinned 2026-10-20); not yet seen on
-      w11pro — open a truncated `.exe` there.
-- [ ] Windows: no ledger row for the stub's Rust (a `cargo test` row made the
+      w11pro — open a truncated `.exe` there. Seen 2026-10-24 (R9-hw): "this
+      download is incomplete, download it again (no AIOSFX02 trailer…)".
+- [x] Windows: no ledger row for the stub's Rust (a `cargo test` row made the
       real checkout reuse the mutant's binary); the first `am state` after a
       1.0.19 app boots timed out once (8 s, fixture without `node_modules`). The
-      stub's message box for a shortcut it cannot add was never seen.
-- [ ] macOS: Spotlight lists every kept version of an installed app (`.noindex`
+      stub's message box for a shortcut it cannot add was never seen. Closed
+      2026-10-24 (R9-hw): the box seen on w11pro; the first-run stall was the
+      never-run exe's spawn (B13, `firstRunVerdict`); the stub is guarded by the
+      rebuild-compare test (tests/build-windows-sfx-stub.test.ts) — a cargo
+      mutation row reused the mutant's binary, so it stays out.
+- [x] macOS: Spotlight lists every kept version of an installed app (`.noindex`
       + `mdimport` are in `src/server/updates-apply.ts`; verify on the Mac);
       `pruneVersions` keeps the running version since (`previous`,
       `src/server/install-record.ts`). Full runs on the Mac keep their ssh
-      session open: a detached job cannot send LAN broadcasts there.
-- [ ] Page size: message prose is a fifth of the download; codes would need a
-      source convention at ~300 sites (v2 §68).
+      session open: a detached job cannot send LAN broadcasts there. Done
+      2026-10-24 (R9-hw, macOS 14): only the current copy is listed (84 ms); the
+      broadcast refusal is macOS 15+ Local Network privacy, said loudly.
+- [x] Page size: message prose is a fifth of the download; codes would need a
+      source convention at ~300 sites — v2 §68.
 - [x] Refusals: every harness refusal carries a stable `code` (table in
       docs/debugging/errors.md, pinned by tests/harness-refusal-codes.test.ts).
       Open: the one-line summary HEAD — prepending a line changes each message's
@@ -367,7 +389,7 @@ or is small and known.
     a phone: a `blob:` export saved into Downloads, a download from a pinned
     self-signed server, the dev overlay on Home for 90 s (a hidden page is no
     longer `frozen`), `strictPin` refusals on the client APK.
-- [ ] Windows: `Deno.Command.spawn()` of a program that has never run stops the
+- [x] Windows: `Deno.Command.spawn()` of a program that has never run stops the
       app's event loop while the system checks the file — 1–11 s measured (2–5
       ms the second time). An app that starts its window answers nothing
       meanwhile: `am state` got "accepted the connection but never answered
@@ -379,15 +401,16 @@ or is small and known.
       in a Worker and proxy pid/status/stderr/kill — larger. The other `spawn()`
       sites (`spawn.ts`, `updates-apply.ts`, `updates-check.ts`,
       `open-external.ts`, `app-version.ts`, `dev-restart.ts`) pause the same
-      way.
-- [ ] Windows Defender (signatures of 2026-10-12): a compiled binary that
+      way. Done 2026-10-24 (R9-hw B13): option (a), `firstRunVerdict`
+      (src/server/no-console.ts) — 10/10 measured on w11pro; the other sites
+      start programs that already ran.
+- [x] Windows Defender (signatures of 2026-10-12): a compiled binary that
       carries `esbuild.exe` whole in its data was refused at start as
       Trojan:Win32/Cloxer in 15 of 20 builds — a CLOUD verdict. What the build
       ships leaves esbuild out and was never flagged (cli 0/5, server 0/3);
       `build.keepPackages: ["esbuild"]` is warned at build since 1.0.21. Open:
-      the Electron-target server exe was not measured. Lasting answers are the
-      owner's: a code-signing certificate, or a false-positive report to
-      Microsoft.
+      the Electron-target server exe was not measured. Measured 2026-10-24
+      (R9-hw): 0/6 detections. A code-signing certificate is §5.
 
 - [x] Field wish (network, 2026-10-17), deferred: `ZoomPan` for `aio/ui` (wheel
       zoom at cursor, drag pan, fit). Built 2026-10-24 (R9 F1):
@@ -403,16 +426,19 @@ or is small and known.
       web process ~620 MB). Not run on the iPad: not attached to the Mac on
       2026-10-24.
 
-- [ ] Windows suite, seen 2 of 4 full runs (2026-10-19), never alone: the first
+- [x] Windows suite, seen 2 of 4 full runs (2026-10-19), never alone: the first
       test of `tests/updates-patch.test.ts` fails "An async call to left was
       started before the test, but completed during the test" — an op an EARLIER
       file in the shard left running (that file has sanitizers off). 13 targeted
       runs green; the op name `left` is not one aio or Deno's sources were seen
-      to use. Next time: `--trace-leaks` on the whole shard.
-- [ ] Windows, over SSH only (2026-10-19, once): `lock-zombie-verdict`'s
+      to use. Next time: `--trace-leaks` on the whole shard. Run 2026-10-24
+      (R9-hw): every `updates-*` file in one process with `--trace-leaks`, 341/0
+      twice — not reproduced.
+- [x] Windows, over SSH only (2026-10-19, once): `lock-zombie-verdict`'s
       `--takeover (production)` case hung 8+ min with A (`--prod`) and the
       lock-path `deno eval` both alive; 3 reruns over SSH and every scheduled-
-      task run green.
+      task run green. 2026-10-24 (R9-hw): 5/5 over SSH; a hang now ends at the
+      test's own timeout with its message.
 
 ### Before the release
 

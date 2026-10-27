@@ -174,6 +174,7 @@ export const SHIP_BOOL_FLAGS = [
   "--stdout",
   "--force",
   "--allow-dirty",
+  "--no-pages",
 ] as const;
 
 /** Every `--flag=value` `aio ship` understands. */

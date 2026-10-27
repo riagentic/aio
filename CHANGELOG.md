@@ -1,5 +1,91 @@
 # Changelog
 
+## v1.0.26-beta — updates from GitHub releases, per-client diffs for `forUser` cells, and the bughunter and field-report fixes (2026-10-27)
+
+> **Nothing is removed or renamed, and no option changes meaning.** New:
+> `updates: { source: "github:OWNER/REPO" }`, `ship github --no-pages`. A few
+> behaviours change because they were wrong — see
+> [the upgrade guide](docs/upgrade/from-1.0.25-beta-to-1.0.26-beta.md). An app
+> upgrades with `am pin` and `am fix` and no edit by hand.
+
+### Updates and shipping
+
+- **`updates: { source: "github:OWNER/REPO" }`** — an app updates from its
+  GitHub releases: channel `prod` reads the latest release, any other channel
+  the release tagged with its name; assets are `am publish`'s files, fetched
+  through GitHub's redirect to its asset host. Signing rules are unchanged; a
+  manifest signed for another channel is refused.
+- A newer version skipped because it is a prerelease says so once, with the
+  switch (`updates: { prerelease: true }`) — it looked the same as "up to date".
+- An AppImage started with `--appimage-extract-and-run` no longer shuts itself
+  down 2 s after an update: the relaunched app watched the replaced runtime's
+  pid.
+- **`ship github`** writes a workflow an aio app can run: checkout with history
+  (the build number is the commit count), aio installed at `aioVersion`,
+  `am fix --no-download`, `am publish` on one Linux runner, the files attached
+  to the release; the signing key only when the secret is set. `--no-pages`
+  drops Pages and points the app at `github:OWNER/REPO`. `docs/build/ci.md`'s
+  example had the same gap and is fixed.
+- `am publish` checks for a dirty tree BEFORE building and names the changed
+  files (it refused a `-dirty` version after building every target).
+- `am fix` puts back a committed `deno.lock` that a deno command run before
+  `dep/aio` existed had pruned — the "M deno.lock" on a fresh CI runner — and
+  says so; a lock with any other change is left alone.
+- macOS service (`server` binary under launchd): a `launchctl bootout` that
+  landed while the loop was starting the app was lost, and launchd killed the
+  app later with no clean stop; a stop in the pause between runs started it
+  again. Both closed; the stop is re-sent until the app is gone.
+
+### Server and transport
+
+- **A `visible.forUser` cell no longer turns every broadcast into a full
+  resend**: each client gets the diff of its own view in the same `$p` frame,
+  and nothing when its view did not change (measured 179 KB → 188 B per
+  broadcast; WS and the local socket). `am cost` attributes the bytes per cell.
+- Time travel: `tt-state` goes only to UI sockets that asked for it (the panel,
+  `useTimeTravel`), never to `peer()` sockets; the desktop window's undo/redo
+  buttons work again. `am cost` breaks unattributed bytes down by envelope.
+- A frozen-client vitals alert names the client (id, kind, `peer:<app>`, user);
+  a loopback client is reported as a busy main thread, not the network. A
+  `peer()` hello carries its `appId`.
+- Dev reload: in-flight calls finish first (≤ 5 s); a stop or window close
+  during the wait wins; the page reloads once, after the restart.
+- An app's `perfBudget` merges over the dev default (server and in-process).
+- `peer()` from an `--instance` that misses a default-instance target hints
+  `{ instance: null }` once.
+- Pairing (PAKE): a flood of first messages can no longer evict another
+  address's exchange — offers are capped per address and in total (`503`
+  "busy"), and the first message is charged as auth work.
+- Zip extraction resolves links component by component; chained, dangling,
+  through-link and absolute-target escapes are refused.
+- Diagnostics: a pair code is redacted whole (8-digit PAKE codes too); a URL
+  stack frame is source-mapped whole (ports, `file:///C:/`).
+
+### UI
+
+- `css`: `& :x` and `&:x` are two classes; a nested selector without `&` is
+  scoped to the class (it was emitted global); `@keyframes` and `@font-face`
+  bodies are emitted unscoped (scoped, they were dead).
+- `useForm`: a form-level schema error clears on edit; `bind()` drives a
+  checkbox by `checked` and warns on a radio (the docs show the pattern).
+- `useResource`: the next open waits (bounded, 5 s) for the previous open/close
+  to settle.
+- `Link`/`NavLink`: a signal `class`/`className` stays bound, as one class prop.
+- `ZoomPan`: a drag released outside the viewport ends. `<Browser>`: `ref` gets
+  `null` on unmount without `keepAlive` too.
+- `serverFn` `timeoutMs` above the timer ceiling is clamped; a password prompt's
+  backspace erases a whole emoji.
+
+### App manager and tests
+
+- `am logs`/`am errors --since 5` (no unit) is refused with the fix (`5m`).
+- happy-dom 21.0.4 (GHSA-834v-8h66-3h79); `am fix` hints `^21`.
+- The suite fails on a new aio app home in the real home, found by its content;
+  scaffolds and the agent brief keep throwaway apps under
+  `AIO_APPS_DIR=~/tmp/aio/apps`.
+- README: [AIO APPS LAUNCHER](https://github.com/riagentic/aio-launcher)
+  installs, updates and opens the open-source aio apps.
+
 ## v1.0.25-beta — an aio window can no longer take the desktop down, PIN pairing by PAKE, a read-only production probe, and eight hunt rounds of fixes (2026-10-24)
 
 > **Nothing is removed or renamed, and no option changes meaning.** Everything

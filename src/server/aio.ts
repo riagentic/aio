@@ -1,5 +1,6 @@
 import { checkPeerTypes } from "./peer-describe.ts";
 import { produce } from "immer";
+import { inheritedParentEnv } from "./process-liveness.ts";
 import {
   bakedElectronClient,
   bakedElectronRuntime,
@@ -524,6 +525,7 @@ async function _runPhases<S, A, E>(
   // launched with its predecessor's pid and waits here — BEFORE the lock is
   // taken, and before anything else can fail for a reason that is really just
   // this race.
+  inheritedParentEnv(); // before anything the app starts can inherit it
   await awaitPredecessor(Deno.args);
 
   const appId = resolveAppId(config.appId);

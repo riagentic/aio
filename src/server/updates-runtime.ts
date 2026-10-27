@@ -181,6 +181,11 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
   // a freshly-fetched one: re-fetching between the user seeing a version and
   // agreeing to it would install something they were never shown.
   let offered: ShipManifest | null = null;
+  /** Where each fetched manifest's relative URLs resolve (`base` of the
+   *  fetch: the tag's own folder behind a `github:` "latest" redirect). */
+  const bases = new WeakMap<ShipManifest, string>();
+  /** The prerelease last said to be skipped — said once, not every poll. */
+  let saidSkipped: string | null = null;
   // The release the DATA GATE refused, kept for the one-way door
   // (`apply({ acceptDataLoss: true })`). Same rule as `offered`: the operator
   // installs the release they were shown the blockers for.
@@ -303,6 +308,18 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     return w.ok ? null : w.error;
   }
 
+  /** Said once per release per process: left unsaid, a skipped prerelease
+   *  reads exactly like "up to date" (a field report lost a debugging round). */
+  function saySkipped(version: string): void {
+    if (saidSkipped === version) return;
+    saidSkipped = version;
+    log.info(
+      "updates",
+      `skipped ${version} — a prerelease; channel "${channel}" follows ` +
+        `releases only (updates: { prerelease: true } to follow them)`,
+    );
+  }
+
   async function checkManifest(opts: CheckOptions): Promise<CheckResult> {
     const trust = readTrust(deps.dataDir);
     // Sent only for the verdict it was cached under — see `etagCurrentFor`.
@@ -323,10 +340,12 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     );
     if (got.kind === "error") return { kind: "error", error: got.error };
     if (got.kind === "not-modified") {
+      if (cachedFor?.skipped) saySkipped(cachedFor.skipped);
       return { kind: "current", reason: `${deps.appVersion} is the latest` };
     }
 
     const m = got.manifest;
+    bases.set(m, got.base);
     const expect = expectations();
     const claims = await verifyManifestClaims(m, expect);
     if (!claims.ok) {
@@ -402,7 +421,8 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // otherwise switch its updates off the moment it said so.
       prerelease: followsPrereleases(config, deps.appVersion),
       source: config.source,
-      artifactUrl: artifactUrl(url, m),
+      // What apply downloads: the tag-specific URL for a `github:` release.
+      artifactUrl: artifactUrl(bases.get(m) ?? url, m),
       // Without this the cell's "Not now" lasted exactly one poll: the cell
       // persisted the dismissal and `decide` honoured it, but nothing carried
       // the one to the other.
@@ -443,10 +463,18 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     // not be cached either: the release is still there, the user just said no,
     // and caching that answer turns the next honest check into a 304 that
     // reports "you are the latest" — false, and permanent.
+    if (d.kind === "current" && d.skippedPrerelease) {
+      saySkipped(d.skippedPrerelease);
+    }
     if (d.kind === "current") {
       cacheCurrentEtag(deps.dataDir, got.etag, {
         dismissed: d.reason.includes("was dismissed"),
-        for: { version: deps.appVersion, url, prerelease: pre },
+        for: {
+          version: deps.appVersion,
+          url,
+          prerelease: pre,
+          ...(d.skippedPrerelease ? { skipped: d.skippedPrerelease } : {}),
+        },
       });
     }
     if (d.kind === "incompatible") {
@@ -677,7 +705,8 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       (await verifyDownload(download, m, expectations())).ok;
     if (!kept) claim(deps.dataDir, download, "file");
     if (isDirectory) claim(deps.dataDir, staged, "dir");
-    const url = artifactUrl(manifestUrl(config.source, channel, platform), m);
+    const base = bases.get(m) ?? manifestUrl(config.source, channel, platform);
+    const url = artifactUrl(base, m);
 
     if (kept) {
       log.info(
@@ -702,7 +731,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
           made(deps.dataDir, staged);
           const got = await treeFromPatch({
             manifest: m,
-            manifestUrl: manifestUrl(config.source, channel, platform),
+            manifestUrl: base,
             installed: current,
             installedSha256: readTrust(deps.dataDir).installedSha256,
             staged,
@@ -721,7 +750,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     // line — ends in the whole release being downloaded, as before.
     const fromPatch = kept || isDirectory ? null : await artifactFromPatch({
       manifest: m,
-      manifestUrl: manifestUrl(config.source, channel, platform),
+      manifestUrl: base,
       installed: current,
       dataDir: deps.dataDir,
     });

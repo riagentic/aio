@@ -118,7 +118,7 @@ Deno.test("dev supervisor: the child is told who its parent is", async () => {
   const lifecycle = await Deno.readTextFile(
     join(AIO_ROOT, "src/server/aio-lifecycle.ts"),
   );
-  assertStringIncludes(lifecycle, 'Deno.env.get("AIO_PARENT_PID")');
+  assertStringIncludes(lifecycle, 'inheritedEnv("AIO_PARENT_PID")');
 });
 
 Deno.test("dev supervisor: a restart STORM is throttled, not spun", () => {

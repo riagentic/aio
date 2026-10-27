@@ -351,6 +351,8 @@ import {
 } from "./build/build-shape.ts";
 import { iosArtifactName } from "./build/build-ios.ts";
 import { smokeBuild, type SmokeMode, smokeMode } from "./build/smoke.ts";
+import { rootArtifactIsOutput } from "./build/root-artifact.ts";
+import { projectAppId } from "./server/app-id.ts";
 import { webArtifactName } from "./build/build-web.ts";
 import { BUILD_NOTES_ENV, readSummaryNotes } from "./build/build-say.ts";
 import {
@@ -1228,7 +1230,13 @@ export async function buildAll(): Promise<number> {
       // — every later build was `-dirty.<hash>`, churning forever and blocking
       // publish, with no source change. `outDir` is the same value the rest of
       // the fleet writes to and the guard checks.
-      { out: outDir },
+      {
+        out: outDir,
+        // The same rule as a single-target build and `am publish`'s
+        // pre-check: an artifact a single-target build left in the root is
+        // an output, not a change.
+        isOutput: rootArtifactIsOutput(projectAppId(root, denoJson)),
+      },
     )).bv;
   } catch (e) {
     console.error(`${C.red}${e instanceof Error ? e.message : e}${C.r}`);

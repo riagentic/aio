@@ -49,3 +49,62 @@ Deno.test({
     }
   },
 });
+
+// An update's successor inherits the old process's environment — the OLD
+// runtime's pid, which exits with the old process: the relaunched app shut
+// down 2 s after "confirmed healthy" (field report, aio-launcher §2).
+Deno.test({
+  name:
+    "AppRun: an update's successor watches its OWN runtime, not the old one that exits; a launcher's pid is kept",
+  ignore: Deno.build.os === "windows",
+  fn: async () => {
+    const tmp = await tempDir("apprun-relaunch-");
+    try {
+      const dir = join(tmp, "appimage_extracted_cafe");
+      await Deno.mkdir(dir, { recursive: true });
+      const out = join(tmp, "out");
+      await Deno.writeTextFile(join(dir, "AppRun"), _appRun("notes"));
+      // First run: start the successor the way an update does (a new runtime
+      // process running AppRun with the relaunch flag), then exit — and the
+      // old runtime with it. The successor reports whether the pid it
+      // watches is still there once the old one is gone.
+      await Deno.writeTextFile(
+        join(dir, "notes"),
+        `#!/bin/sh
+case "$*" in
+*--__aio-relaunch-after=*)
+  sleep 0.5
+  if kill -0 "$AIO_PARENT_PID" 2>/dev/null; then r=up; else r=gone; fi
+  echo "$r \${AIO_PARENT_PID_FROM:-}" > "$OUT" ;;
+*) sh -c '"$0" "$@"; :' "$(dirname "$0")/AppRun" --__aio-relaunch-after=$$ & ;;
+esac
+`,
+      );
+      await Deno.chmod(join(dir, "AppRun"), 0o755);
+      await Deno.chmod(join(dir, "notes"), 0o755);
+      const result = async (env: Record<string, string>) => {
+        await Deno.remove(out).catch(() => {});
+        // `; :` keeps the shell as AppRun's parent — the runtime, extracted.
+        await new Deno.Command("/bin/sh", {
+          args: ["-c", '"$0"; :', join(dir, "AppRun")],
+          env: { PATH: "/usr/bin:/bin", OUT: out, ...env },
+          clearEnv: true,
+        }).output();
+        for (let i = 0; i < 100; i++) {
+          const got = await Deno.readTextFile(out).catch(() => "");
+          if (got.endsWith("\n")) return got.trim();
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        throw new Error("the successor never reported");
+      };
+      assertEquals(await result({}), "up");
+      // A launcher's pid (this process, alive) is marked and kept.
+      assertEquals(
+        await result({ AIO_PARENT_PID: String(Deno.pid) }),
+        "up launcher",
+      );
+    } finally {
+      await dropTempDir(tmp);
+    }
+  },
+});

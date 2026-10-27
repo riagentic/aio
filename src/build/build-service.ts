@@ -111,16 +111,31 @@ function xmlText(s: string): string {
  *  die at once and launchd would kill the app behind it.
  *  @internal exported for its test */
 export const LAUNCHD_LOOP = [
-  `trap 'stop=1; kill -TERM "$p" 2>/dev/null' TERM INT`,
-  `while :; do`,
-  `  "$@" & p=$!`,
+  // The stop is sent again each second until the app is gone: one sent right
+  // after the fork can reach the child before it runs the app, and is lost
+  // there (aio joins a repeated signal to the first exit). A signal can land
+  // between the fork and `p=$!`: the trap then sees no pid (`p` is cleared
+  // before each fork) and the line after the fork starts the sender — once
+  // (`sent`). One that lands in `sleep` ends the loop, no restart. The sender
+  // (`t`) is ended once the app is reaped, so it never signals a reused pid;
+  // every variable starts empty — one inherited from the environment is not
+  // a stop.
+  `term() { while kill -TERM "$1" 2>/dev/null; do sleep 1; done; }`,
+  `stop= sent= t= p=`,
+  `trap 'stop=1; if [ -n "$p" ]; then sent=$p; term "$p" & t=$!; fi' TERM INT`,
+  `while [ -z "$stop" ]; do`,
+  `  p=; "$@" & p=$!`,
+  `  if [ -n "$stop" ] && [ "$sent" != "$p" ]; then sent=$p; term "$p" & t=$!; fi`,
   `  wait "$p"; c=$?`,
   // A trapped signal interrupts `wait`: wait again for the app's real exit.
   `  while kill -0 "$p" 2>/dev/null; do wait "$p"; c=$?; done`,
+  // Gone: a later signal must not reach a pid the system gave to another.
+  `  [ -n "$t" ] && kill "$t" 2>/dev/null; t= p=`,
   `  [ -n "$stop" ] && exit 0`,
   `  [ "$c" -eq 143 ] && exit 0`,
   `  sleep 5`,
   `done`,
+  `exit 0`,
 ].join("\n");
 
 /** A launchd agent for a `server` binary built for macOS — the systemd unit's

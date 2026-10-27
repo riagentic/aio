@@ -26,6 +26,8 @@ import type { GlobalFlags } from "./am-types.ts";
 import { hostPlatform, PLATFORMS } from "../build/platforms.ts";
 import { detectMode, fail, out, sayErr } from "./am-output.ts";
 import { readDenoJson } from "../server/deno-json.ts";
+import { buildVersionFor, unpublishableReason } from "../server/app-version.ts";
+import { rootArtifactIsOutput } from "../build/root-artifact.ts";
 import {
   apartFrom,
   appDirsOf,
@@ -48,7 +50,10 @@ import {
 import { fileSha256, MB } from "../server/updates-check.ts";
 import { unpackArchive } from "../server/updates-apply.ts";
 import { makeTreePatch } from "../server/updates-tree.ts";
-import { appIdFromConfig } from "../server/single-instance-lock.ts";
+import {
+  appIdFromConfig,
+  projectAppId,
+} from "../server/single-instance-lock.ts";
 import { readSfxTrailerOfFile } from "../build/sfx-trailer.ts";
 import { count } from "../diagnostics/fmt.ts";
 import { resolveEntryPath } from "../server/paths.ts";
@@ -509,6 +514,39 @@ export async function cmdPublish(
 
   // ── 1. build ──
   if (!args.includes("--no-build")) {
+    // A version the build would name `-dirty.*` is refused below — after
+    // every target was built (minutes on a CI runner), and naming no file (a
+    // field report). Asked first, of the decider the build itself uses.
+    if (!args.includes("--allow-dirty") && !flag("version")) {
+      let pre: Awaited<ReturnType<typeof buildVersionFor>> | null = null;
+      try {
+        // The build's own exclusions: its out dir, and an artifact a
+        // single-target build left in the root (an app's `build` task may be
+        // one) — otherwise this refuses where the build passes.
+        pre = await buildVersionFor(root, cfg.version, {
+          out: distDir,
+          isOutput: rootArtifactIsOutput(
+            projectAppId(root, cfg),
+          ),
+        });
+      } catch {
+        // aio-ok: an unreadable version is the build's to refuse, in its words.
+      }
+      const why = pre && unpublishableReason(pre.bv.version);
+      if (why) {
+        const changed = pre?.tree?.changed ?? [];
+        fail(
+          `am publish: ${why}. Nothing was built.` +
+            (changed.length
+              ? `\n  changed: ${changed.slice(0, 10).join(", ")}` +
+                (changed.length > 10
+                  ? ` … and ${changed.length - 10} more`
+                  : "")
+              : ""),
+          mode,
+        );
+      }
+    }
     const ok = await run(
       "deno",
       ["task", "build", ...(targetsArg ? [`--targets=${targetsArg}`] : [])],
@@ -1036,6 +1074,9 @@ export async function cmdPublish(
       : []),
     `  serve ${rel(outDir)}/ at a URL, then point the app at its BASE:`,
     `    updates: "https://…"      # NOT …/${channel}/, and not a file`,
+    `  or attach ${rel(outDir)}/${channel}/* to a GitHub release (flat):`,
+    `    updates: "github:OWNER/REPO"   # prod = the latest release; another`,
+    `                                   # channel = the release tagged with it`,
     ``,
   ];
   out(lines.join("\n"), mode);

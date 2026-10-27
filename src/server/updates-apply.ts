@@ -15,6 +15,7 @@
 //   • A failed boot after an update rolls itself back, because the case that
 //     most needs a rollback (an unattended service) has nobody to run one — and
 //     a rollback that FAILS keeps its marker and says so on every boot.
+import { inheritedParentEnv } from "./process-liveness.ts";
 import {
   basename,
   dirname,
@@ -2578,6 +2579,9 @@ export function relaunchOptions(
     stdin: "null",
     stdout: stdio,
     stderr: stdio,
+    // A launcher's watch rides on to the successor, as it did while the app
+    // still inherited it (the app took it out of its own env).
+    env: inheritedParentEnv(),
     ...outlivingParent(os),
   };
 }

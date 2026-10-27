@@ -275,6 +275,41 @@ export async function descendantPids(pid: number): Promise<number[]> {
   return out;
 }
 
+/** The parent-watch variables a launcher hands an app. */
+const PARENT_ENV = ["AIO_PARENT_PID", "AIO_PARENT_PID_FROM"] as const;
+let _parentEnv: Record<string, string> | null = null;
+
+/** `AIO_PARENT_PID` / `AIO_PARENT_PID_FROM` as this process was started with
+ *  them. The first call (early in the boot) takes both out of the process env,
+ *  so nothing the app starts inherits a watch meant for the app: another aio
+ *  AppImage opened from inside one took the first one's runtime pid and died
+ *  with it. A child that should watch a parent is handed one explicitly (the
+ *  dev restart, the Electron window, an update's relaunch, the build smoke). */
+export function inheritedParentEnv(): Record<string, string> {
+  if (_parentEnv === null) {
+    const got: Record<string, string> = {};
+    try {
+      for (const k of PARENT_ENV) {
+        const v = Deno.env.get(k);
+        if (v === undefined) continue;
+        got[k] = v;
+        Deno.env.delete(k);
+      }
+    } catch {
+      // aio-ok: no env permission — nothing to read, nothing to pass on.
+    }
+    _parentEnv = got;
+  }
+  return { ..._parentEnv };
+}
+
+/** One of {@linkcode inheritedParentEnv}'s variables. */
+export function inheritedEnv(
+  name: typeof PARENT_ENV[number],
+): string | undefined {
+  return inheritedParentEnv()[name];
+}
+
 /** Parse `AIO_PARENT_PID`: decimal digits, integer > 0, else absent.
  *
  *  Same vocabulary as `--port` / `AIO_PORT` (`intArg` / `envPort`): `Number()`

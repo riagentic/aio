@@ -318,9 +318,11 @@ inside the signed core ([signing](../deploy/signing.md)).
   published build must be reproducible from a commit
 ```
 
-`--allow-dirty` is the explicit override, and it is logged. `am publish`
-publishes the version `dist/manifest.json` recorded — the one the artifacts are
-named with — never a re-derivation from the tree as it is now.
+`--allow-dirty` is the explicit override, and it is logged. `am publish` asks
+first, before it builds anything, and names up to ten changed files
+(`changed: src/app.ts, deno.lock`). It publishes the version
+`dist/manifest.json` recorded — the one the artifacts are named with — never a
+re-derivation from the tree as it is now.
 
 ## The one decider
 

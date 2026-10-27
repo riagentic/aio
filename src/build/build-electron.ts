@@ -595,9 +595,22 @@ ${
  *  So the app watches the runtime: `AIO_PARENT_PID`, unless a launcher set
  *  its own — the app then stops, every phase, within ~2 s of the runtime
  *  going. The runtime's extracted copy stays behind in `$TMPDIR` (its own
- *  cleanup never runs once it is killed). @internal */
+ *  cleanup never runs once it is killed).
+ *
+ *  An update's successor (`--__aio-relaunch-after=`) inherits the OLD
+ *  process's environment, so it inherited the OLD runtime's pid — which exits
+ *  with the old process — and shut down 2 s after "confirmed healthy" (a field
+ *  report). A pid this line took from the runtime is replaced by the new
+ *  runtime's; a launcher's own (`AIO_PARENT_PID_FROM=launcher`, marked the
+ *  first time through) is kept. An older build marked nothing: its runtime pid
+ *  is replaced too. @internal */
 export const APPIMAGE_EXTRACTED_PARENT =
-  `case "$HERE" in */appimage_extracted_*) export AIO_PARENT_PID="\${AIO_PARENT_PID:-$PPID}" ;; esac\n`;
+  `case "$HERE" in */appimage_extracted_*)
+  case " $* " in *" --__aio-relaunch-after="*) [ "\${AIO_PARENT_PID_FROM:-}" = launcher ] || unset AIO_PARENT_PID ;; esac
+  [ -n "\${AIO_PARENT_PID:-}" ] && export AIO_PARENT_PID_FROM="\${AIO_PARENT_PID_FROM:-launcher}"
+  export AIO_PARENT_PID="\${AIO_PARENT_PID:-$PPID}" ;;
+esac
+`;
 
 /** The AppImage's `AppRun`. A shared-runtime package carries no `electron/`,
  *  so it exports no `ELECTRON_PATH` at one — and clears one it inherited (an

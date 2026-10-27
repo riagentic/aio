@@ -69,7 +69,14 @@ export type TrustStore = {
    *  it was the latest while a newer release sat in the manifest. A cached
    *  tag is sent only when both still match; one without this (written
    *  before it existed) is not sent at all, so the next check refetches. */
-  etagCurrentFor?: { version: string; url: string; prerelease?: boolean };
+  etagCurrentFor?: {
+    version: string;
+    url: string;
+    prerelease?: boolean;
+    /** The prerelease that verdict skipped: a 304 answers it again, and a
+     *  new process says so once (a 304 alone read as "up to date"). */
+    skipped?: string;
+  };
   /** The commit this build was made from — a git source's "current version". */
   commit?: string;
   /** The SHA-256 of the artifact this install is RUNNING, as verified at the
@@ -309,6 +316,12 @@ export type ManifestFetch =
      *  transport does not authenticate its host, else the last one. What
      *  `pinKey` is handed as `from`. */
     pinFrom: string;
+    /** What a relative `url` in the manifest resolves against: the last
+     *  redirect hop on the requested URL's own origin. A `github:` source's
+     *  `releases/latest/download/…` moves on to the tag's own
+     *  `releases/download/<tag>/…`, so the artifact is the OFFERED release's
+     *  even when a newer one lands before `apply`. Never another origin. */
+    base: string;
   }
   | {
     kind: "error";
@@ -631,6 +644,8 @@ export async function fetchManifest(
     // leg carried — the URL judged was not the one that served the body.
     let at = url;
     let pinFrom = url;
+    let base = url;
+    let leftOrigin = false;
     let res: Response;
     for (let hop = 0;; hop++) {
       res = await fetch(at, {
@@ -651,6 +666,10 @@ export async function fetchManifest(
       }
       at = new URL(next, at).href;
       if (transportAuthenticatesHost(pinFrom)) pinFrom = at;
+      // Only while every hop so far stayed on the requested origin: a detour
+      // through another host must not choose where relative URLs land.
+      if (!sameOrigin(at, url)) leftOrigin = true;
+      else if (!leftOrigin) base = at;
     }
     answered = true;
     if (res.status === 304) {
@@ -686,7 +705,7 @@ export async function fetchManifest(
     // a relative `url` is always same-origin. An ABSOLUTE one need not be —
     // and a signed manifest authenticates its own contents, not a third host
     // it happens to name.
-    const artifact = new URL(parsed.manifest.url ?? "", url).href;
+    const artifact = new URL(parsed.manifest.url ?? "", base).href;
     if (!opts?.allowCrossOrigin && !sameOrigin(artifact, url)) {
       return {
         kind: "error",
@@ -704,6 +723,7 @@ export async function fetchManifest(
       etag: res.headers.get("etag") ?? undefined,
       pinnable: transportAuthenticatesHost(pinFrom),
       pinFrom,
+      base,
     };
   } catch (e) {
     const msg = fetchFailure(e, url, timeoutMs);

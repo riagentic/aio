@@ -1637,3 +1637,96 @@ Deno.test("am publish: every flag it reads passes am's own flag gate", async () 
   assert(read.has("--no-zip") && read.has("--patch-from"), [...read].join());
   assertEquals(unknownFlags("publish", [...read]), []);
 });
+
+// A dirty tree was refused only AFTER `deno task build` had built every
+// target (2 min on a CI runner), and the refusal named no file
+// (aio-launcher §4). Asked first now, of the build's own version decider.
+Deno.test("am publish: a dirty tree is refused BEFORE the build, naming the changed files", async () => {
+  const orig = Deno.cwd();
+  const dir = await project([{ target: "browser", file: "notes" }]);
+  const git = (...args: string[]) =>
+    new Deno.Command("git", {
+      args,
+      cwd: dir,
+      env: {
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.invalid",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.invalid",
+      },
+      stdout: "null",
+      stderr: "null",
+    }).output();
+  try {
+    const cfg = JSON.parse(await Deno.readTextFile(join(dir, "deno.json")));
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ ...cfg, version: "2.1" }),
+    );
+    await git("init", "-q");
+    await git("add", "-A");
+    await git("commit", "-qm", "init");
+    await Deno.writeTextFile(join(dir, "src", "app.ts"), `fetch("y");`);
+    Deno.chdir(dir);
+    const r = await publishExit(["--dir=release"]);
+    assertEquals(r.code, 1);
+    const err = (JSON.parse(r.out.at(-1)!) as { error: string }).error;
+    assertStringIncludes(err, "dirty-tree build");
+    assertStringIncludes(err, "Nothing was built");
+    assertStringIncludes(err, "src/app.ts");
+  } finally {
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// The pre-check asks the build's version decider with the build's OWN
+// exclusions: an artifact a single-target build left in the project root is
+// output, not a change (`rootArtifactIsOutput`) — without it, an app whose
+// `build` task is a single-target build was refused where the build passed.
+Deno.test("am publish: a previous build's artifact in the root is not a dirty tree; any other new file is", async () => {
+  const orig = Deno.cwd();
+  const dir = await project([{ target: "browser", file: "notes" }]);
+  const git = (...args: string[]) =>
+    new Deno.Command("git", {
+      args,
+      cwd: dir,
+      env: {
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.invalid",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.invalid",
+      },
+      stdout: "null",
+      stderr: "null",
+    }).output();
+  const error = async () => {
+    const r = await publishExit(["--dir=release"]);
+    assertEquals(r.code, 1);
+    return (JSON.parse(r.out.at(-1)!) as { error: string }).error;
+  };
+  try {
+    const cfg = JSON.parse(await Deno.readTextFile(join(dir, "deno.json")));
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ ...cfg, version: "2.1" }),
+    );
+    await git("init", "-q");
+    await git("add", "-A");
+    await git("commit", "-qm", "init");
+    await Deno.writeTextFile(join(dir, "notes-linux-x64.zip"), "zip");
+    Deno.chdir(dir);
+    // Past the pre-check: the fixture has no `build` task, so the build fails.
+    const built = await error();
+    assert(!built.includes("dirty-tree build"), built);
+    // The control: the same check DOES refuse an ordinary new file.
+    await Deno.writeTextFile(join(dir, "scratch.txt"), "x");
+    const dirty = await error();
+    assertStringIncludes(dirty, "dirty-tree build");
+    assertStringIncludes(dirty, "scratch.txt");
+    assert(!dirty.includes("notes-linux-x64.zip"), dirty);
+  } finally {
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true });
+  }
+});

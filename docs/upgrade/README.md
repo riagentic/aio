@@ -76,6 +76,10 @@ that can go red") and lists them in the order they would fail:
   to change in an app; desktop windows open 64 px inside the screen edge (a
   window as big as the screen opens maximized), a few misread inputs are refused
   by name, and `pairing: { pake: true }` is a new opt-in.
+- [1.0.25-beta → **1.0.26-beta**](from-1.0.25-beta-to-1.0.26-beta.md) — nothing
+  to change in an app; tests move to happy-dom 21 (external CSS and iframes off
+  by default), a nested `css` selector without `&` is scoped, and
+  `updates: { source: "github:OWNER/REPO" }` is new.
 - [1.0.23-beta → **1.0.24-beta**](from-1.0.23-beta-to-1.0.24-beta.md) — nothing
   to change in an app; a few tests that passed for the wrong reason can go red
   (`ui.advance`, async predicates, `testComponent`).

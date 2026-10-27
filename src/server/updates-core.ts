@@ -45,9 +45,13 @@ export type UpdatesConfig = {
    *  - `https://releases.example.com/wallet` — published artifacts
    *  - `file:///mnt/releases/wallet` — a share, a volume, a USB stick
    *  - `https://github.com/you/app` — the repository itself
+   *  - `github:you/app` — the repository's GitHub releases (`am publish`'s
+   *    files attached to a release)
    *
    *  `<channel>` is interpreted by the source: a directory under a manifest
-   *  source, a branch or tag under a git source. */
+   *  source, a branch or tag under a git source, a release under `github:`
+   *  (`prod` = the latest release, any other channel = the release tagged with
+   *  its name). */
   source: string;
   /** Override the inferred source kind. Inference is refused rather than
    *  guessed when a URL could plausibly be either. */
@@ -240,6 +244,17 @@ export function classifySource(
   source: string,
   explicit?: UpdateSourceKind,
 ): UpdateSourceKind {
+  if (source.startsWith("github:")) {
+    if (!GITHUB_SOURCE.test(source) || explicit === "git") {
+      throw new Error(
+        `[updates] "${source}" is not a GitHub release source — write ` +
+          `github:OWNER/REPO (its releases, a manifest source), or ` +
+          `https://github.com/OWNER/REPO with kind: "git" to rebuild from ` +
+          `the repository.`,
+      );
+    }
+    return "manifest";
+  }
   if (explicit) return explicit;
   if (/^git[+@]/.test(source) || /^ssh:\/\//.test(source)) return "git";
   if (/\.git\/?$/.test(source)) return "git";
@@ -266,6 +281,38 @@ export function classifySource(
     );
   }
   return "manifest";
+}
+
+/** `github:OWNER/REPO` — a repository's GitHub releases, read as a manifest
+ *  source: the release assets are `am publish`'s files, flat. `_` in the
+ *  owner: Enterprise Managed Users (`name_shortcode`). */
+const GITHUB_SOURCE = /^github:([A-Za-z0-9_-]+)\/([A-Za-z0-9._-]+)$/;
+
+/** Where `github:` sources live. @internal — a test points it at a local
+ *  server. */
+export const _githubHost = { base: "https://github.com" };
+
+/** The release folder a `github:` source reads for `channel`, or null for any
+ *  other source. `prod` is the latest release (GitHub's `latest`: newest, not
+ *  a draft, not a prerelease); any other channel is the release TAGGED with
+ *  the channel's name. Its assets are reached by name; GitHub redirects each to
+ *  its asset host, and the downloads follow that redirect. */
+function githubReleaseDir(source: string, channel: string): string | null {
+  const m = GITHUB_SOURCE.exec(source);
+  if (!m) return null;
+  const at = channel === "prod"
+    ? "latest/download"
+    : `download/${encodeURIComponent(channel)}`;
+  return `${_githubHost.base}/${m[1]}/${m[2]}/releases/${at}`;
+}
+
+/** Where a person finds `channel`'s releases — named in messages that send
+ *  them to fetch one by hand. */
+export function channelLocation(source: string, channel: string): string {
+  const m = GITHUB_SOURCE.exec(source);
+  return m
+    ? `${_githubHost.base}/${m[1]}/${m[2]}/releases`
+    : `${source}/${channel}/`;
 }
 
 /** Turn `check` into a poll interval, refusing what cannot be one.
@@ -365,9 +412,10 @@ export function manifestUrl(
   channel: string,
   platform: { os: string; arch: string },
 ): string {
-  return `${
-    source.replace(/\/+$/, "")
-  }/${channel}/${platform.os}-${platform.arch}.json`;
+  const file = `${platform.os}-${platform.arch}.json`;
+  const github = githubReleaseDir(source, channel);
+  if (github) return `${github}/${file}`;
+  return `${source.replace(/\/+$/, "")}/${channel}/${file}`;
 }
 
 /** Resolve a manifest's `url` against the manifest's own location, so a release
@@ -789,7 +837,13 @@ export function markedDataContract(output: string): string | null {
 
 /** Why a fetched manifest is not something to offer. */
 export type UpdateDecision =
-  | { kind: "current"; reason: string }
+  | {
+    kind: "current";
+    reason: string;
+    /** A newer release left out because it is a prerelease this install does
+     *  not follow — the checker says so once (it would read as up to date). */
+    skippedPrerelease?: string;
+  }
   | {
     kind: "offer";
     version: string;
@@ -993,6 +1047,7 @@ export function decide(opts: {
       kind: "current",
       reason: `${m.version} is a prerelease — set ` +
         `updates: { prerelease: true } to follow it`,
+      skippedPrerelease: m.version,
     };
   }
 
@@ -1088,7 +1143,7 @@ export function decide(opts: {
           `this install is ${current}. Install ${m.minFrom} first, from ` +
           `${
             opts.source
-              ? `${opts.source}/${m.channel}/`
+              ? channelLocation(opts.source, m.channel)
               : "the location this app publishes releases to"
           } (the same channel this update came from — a stepping-stone release ` +
           `is kept there for exactly this), then update again.`,

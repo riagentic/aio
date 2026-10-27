@@ -260,3 +260,30 @@ Deno.test("app-decided exit: every main-script template carries it, after the cr
     new Function(src); // parses
   }
 });
+
+// Read once, then removed from the window's env: anything Electron starts
+// (`shell.openPath` → another aio AppImage) inherited the server's pid, and
+// died with this app.
+Deno.test("electron: the window's parent watch takes AIO_PARENT_PID out of its env", () => {
+  const env: Record<string, string> = {
+    AIO_PARENT_PID: "4242",
+    AIO_PARENT_PID_FROM: "launcher",
+    KEEP: "1",
+  };
+  const process = {
+    env,
+    kill: () => true,
+    removeAllListeners: () => {},
+    on: () => {},
+  };
+  const run = new Function(
+    "process",
+    "app",
+    "__aioLeave",
+    "setInterval",
+    `${tmplParentWatch()}\nreturn __aioParent;`,
+  );
+  const parent = run(process, { on: () => {} }, () => {}, () => ({}));
+  assertEquals(parent, 4242, "the watch still reads the pid");
+  assertEquals(env, { KEEP: "1" });
+});

@@ -34,6 +34,7 @@ import { MAX_TIMER_DELAY } from "../state/timer-ceiling.ts";
  *  would invite somebody to route around the refusal below. */
 let _aioInstalled: UpdatesRuntime | null = null;
 import {
+  channelLocation,
   compareVersions,
   DEFAULT_KEEP_OLD,
   isComparableVersion,
@@ -1299,7 +1300,8 @@ function pinnedChannel(
       `It outranks what this app now resolves to ("${unpinned.channel}").` +
       (unpinned.kind === "manifest" && saved === "main"
         ? ` "main" is the default of a GIT source; a manifest source is asked ` +
-          `${unpinned.source}/main/…, which is rarely published.`
+          `${channelLocation(unpinned.source, "main")} …, which is rarely ` +
+          `published.`
         : "") +
       ` To follow "${unpinned.channel}": remove "channel" from that file. To ` +
       `keep "${saved}" and silence this: updates.setChannel("${saved}").`,

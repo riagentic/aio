@@ -46,7 +46,23 @@ requests). Copy the artifact and the second file into
 and removes both manifests.
 
 `deno task ship github --channel=prod` writes a GitHub Actions workflow that
-does all of it on three platforms and publishes to GitHub Pages.
+does all of it on one Linux runner (`am publish` cross-builds every target),
+attaches the channel to the release and, unless `--no-pages`, publishes it to
+GitHub Pages. What it guards:
+
+- It publishes only from a `v*` tag; run by hand on a branch, it fails and says
+  so (it used to deploy that branch to `prod`).
+- Without the `AIO_SIGNING_KEY` secret it FAILS: an app refuses an unsigned
+  release unless it sets `updates: { allowUnsigned: true }`. For such apps set
+  the repository variable `AIO_ALLOW_UNSIGNED` to `true`.
+- The tag's release is a draft until every file is attached, then published.
+  With `--no-pages` and a channel other than `prod`, the files also go to the
+  release TAGGED with the channel (a GitHub prerelease, files first and the
+  manifests last) — what `github:OWNER/REPO` reads on that channel.
+- Pages deploys in a job of its own, after the release. GitHub's `github-pages`
+  environment lets only the default branch deploy until you add a rule: Settings
+  → Environments → github-pages → Deployment branches and tags → a tag rule
+  `v*`. Without it the Pages job fails; the release files are attached already.
 
 ## Keys
 

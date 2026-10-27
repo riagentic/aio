@@ -100,17 +100,55 @@ directory for published artifacts, a git ref for a repository.
 | ---------------------------------- | -------------------------- | -------------------- |
 | `https://releases.example.com/app` | a newer semver             | download + swap      |
 | `file:///mnt/releases/app`         | a newer semver             | download + swap      |
+| `github:you/app`                   | a newer semver             | download + swap      |
 | `https://github.com/you/app`       | the ref moved              | re-run the installer |
 
 A **manifest source** is two static files per channel on any host that serves
-directories — S3, nginx, a Pages site, a mounted share, a USB stick. Not a
-GitHub Release: its assets are flat, so `<channel>/` cannot exist there
-(`deno task ship github` writes a workflow that publishes to Pages instead):
+directories — S3, nginx, a Pages site, a mounted share, a USB stick:
 
 ```
 <source>/<channel>/<os>-<arch>.json    the manifest
 <source>/<channel>/<artifact>          the binary / AppImage
 ```
+
+A **GitHub release source** (`github:OWNER/REPO`) is a manifest source whose
+channel is a release, for an app hosted on GitHub alone — no Pages, no second
+host. Attach every file `am publish --dir=out` wrote to `out/<channel>/` to the
+release, names unchanged (GitHub renames an asset whose name has a space or
+other unusual characters, and the manifest names it by its file name):
+
+| Channel                | Release read                                                                              |
+| ---------------------- | ----------------------------------------------------------------------------------------- |
+| `prod`                 | the latest release (`releases/latest/download/…` — newest, not a draft, not a prerelease) |
+| any other, e.g. `beta` | the release whose TAG is the channel's name (`releases/download/beta/…`)                  |
+
+GitHub answers each asset with a redirect to its asset host; the download
+follows it. A manifest that names its artifact on another host by an absolute
+URL is still refused. The manifest is signed and checked exactly as on any other
+host. `latest/download/…` first redirects to the tag's own
+`releases/download/<tag>/…` on github.com; the artifact is resolved against
+THAT, so `apply` installs the release that was offered even when a newer one is
+published in between.
+
+GitHub's "latest" never includes a release marked **prerelease** on GitHub, so
+`prod` cannot see one — `updates: { prerelease: true }` on `prod` follows a
+prerelease VERSION (`2.0.0-rc.1`) published as a normal release, nothing more.
+To ship prereleases through GitHub, give them a channel: `beta` reads the
+release tagged `beta`, which `ship github --no-pages --channel=beta` creates (as
+a GitHub prerelease) and refreshes with each build; the version's own release is
+marked prerelease too, so `prod` never offers it.
+
+`deno task ship github` writes the workflow that publishes this way — see
+[signing](signing.md). It publishes only from a `v*` tag, attaches the files to
+a draft release and publishes it once every file is on it, and FAILS without the
+`AIO_SIGNING_KEY` secret (an app refuses an unsigned release unless it sets
+`allowUnsigned: true`; set the repository variable `AIO_ALLOW_UNSIGNED` to
+`true` for those). Only the highest `v*` version becomes GitHub's "latest": a
+hotfix tag for an older line (`v1.1.5` after `v1.2.0`) is published without
+moving `prod` back. A rerun on a release that is already public keeps it public
+and replaces its files, the manifests last — while a manifest is replaced a
+client can get one "no release at this channel" answer, and its next check reads
+the new one (the channel release on `--no-pages` is refreshed the same way).
 
 A **git source** is for apps installed by the one-line runner, where the
 repository is the source of truth. aio detects new commits on the followed ref
@@ -341,21 +379,30 @@ deno run -A jsr:@riagentic/aio/ship github --channel=prod
 # → .github/workflows/release.yml
 ```
 
-That writes a workflow which builds on Linux, macOS and Windows, signs each
-artifact, and publishes the channel layout above to **GitHub Pages**. Put the
-output of `ship keygen` in the repo secret `AIO_SIGNING_KEY`, enable Pages once
+That writes a workflow which, on a `v*` tag, runs on ONE Linux runner: checkout
+with full history (the build number is the commit count) → install aio at
+`deno.json`'s `aioVersion` (read without deno: a deno command run before
+`dep/aio` exists drops aio's entries from the committed `deno.lock`) →
+`am fix --no-download` → `am publish --dir=out`, which cross-builds every target
+and stages `out/<channel>/` → attach `out/<channel>/*` to the release. The
+signing key is used when the repo secret `AIO_SIGNING_KEY` holds the output of
+`ship keygen --stdout`; without it the release is unsigned and `am publish` says
+so.
+
+By default it also deploys `out/` to **GitHub Pages** — enable Pages once
 (Settings → Pages → Source: GitHub Actions), then point the app at the site:
 
 ```ts
 updates: "https://OWNER.github.io/REPO";
 ```
 
-**Not** a release download URL. A client asks for
-`<base>/<channel>/<os>-<arch>.json`; GitHub Release assets are a FLAT list with
-no directories, so `.../releases/latest/download/prod/linux-x86_64.json` cannot
-exist and never will. Pointing an app there produces a permanent, silent "no
-updates available". Any host that serves a directory tree works — Pages, S3, R2,
-nginx, a mounted share.
+`ship github --no-pages` leaves Pages out (Pages allows 100 MB per file): the
+release's own assets are the source, `updates: "github:OWNER/REPO"`.
+
+**Not** a release download URL as a plain `https://` source: a client asks for
+`<base>/<channel>/<os>-<arch>.json`, and GitHub Release assets are a FLAT list
+with no directories, so `.../releases/latest/download/prod/linux-x86_64.json`
+cannot exist. To read releases, write `updates: "github:OWNER/REPO"` (above).
 
 It is emitted, not integrated: the layout is the part aio owns, and a workflow
 file does the rest natively without the framework depending on a forge's API.
@@ -812,19 +859,24 @@ update is needed.
 
 ## Configuration reference
 
-| Option          | Default            | Meaning                                         |
-| --------------- | ------------------ | ----------------------------------------------- |
-| `source`        | —                  | Release location or repository URL              |
-| `auto`          | `false`            | Install without asking (services)               |
-| `check`         | `true`             | `false` = manual only · a number = interval ms  |
-| `channel`       | the artifact stamp | Directory (manifest) or ref (git)               |
-| `key`           | trust on first use | Pin the signing key explicitly                  |
-| `keys`          | —                  | Extra accepted keys, for a rotation             |
-| `canApply`      | —                  | `() => boolean` — may an update land RIGHT NOW? |
-| `allowUnsigned` | `false`            | Accept unsigned releases                        |
-| `kind`          | inferred           | `"manifest"` or `"git"` when a URL is ambiguous |
-| `prerelease`    | `dev` only         | Follow `2.1.0-rc.1`-style versions              |
-| `keepOld`       | `1`                | Old versions kept in `old/` (integer >= 1)      |
+| Option          | Default            | Meaning                                                  |
+| --------------- | ------------------ | -------------------------------------------------------- |
+| `source`        | —                  | Release location, `github:OWNER/REPO`, or repository URL |
+| `auto`          | `false`            | Install without asking (services)                        |
+| `check`         | `true`             | `false` = manual only · a number = interval ms           |
+| `channel`       | the artifact stamp | Directory (manifest) or ref (git)                        |
+| `key`           | trust on first use | Pin the signing key explicitly                           |
+| `keys`          | —                  | Extra accepted keys, for a rotation                      |
+| `canApply`      | —                  | `() => boolean` — may an update land RIGHT NOW?          |
+| `allowUnsigned` | `false`            | Accept unsigned releases                                 |
+| `kind`          | inferred           | `"manifest"` or `"git"` when a URL is ambiguous          |
+| `prerelease`    | `dev` only         | Follow `2.1.0-rc.1`-style versions                       |
+| `keepOld`       | `1`                | Old versions kept in `old/` (integer >= 1)               |
+
+A newer release left out because it is a prerelease is said once in the log —
+`skipped 2.1.0-rc.1 — a prerelease; channel "prod" follows releases only
+(updates: { prerelease: true } to follow them)`
+— not taken for "up to date".
 
 ### `canApply` — the one hook that cannot be defaulted
 

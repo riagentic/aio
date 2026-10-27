@@ -680,6 +680,7 @@ where no exec bit exists, "executable" is what Windows runs by its name: `.exe`,
 | `--channel-dir=DIR`        | Also write `DIR/<channel>/<os>-<arch>.json` — the layout an update client fetches                            |
 | `--allow-dirty`            | publish a `-dirty`/`-nogit` build anyway — logged; a published build should be reproducible from a commit    |
 | `--github`                 | `ship github`: write a GitHub release workflow                                                               |
+| `--no-pages`               | `ship github`: attach the release only, no GitHub Pages deploy (`updates: "github:OWNER/REPO"`)              |
 | `--stdout`                 | `ship keygen --stdout`: print the key pair for a CI secret instead of writing a file                         |
 | `--force`                  | `ship keygen`: overwrite an existing key / write one inside a git tree anyway                                |
 
@@ -1408,8 +1409,11 @@ not changed; aio already refuses those three when it starts Electron itself.
 
 **Building on each OS in CI.** Nothing builds on a pushed tag until the project
 has a workflow that does. `deno task ship github --channel=prod` writes one
-(`.github/workflows/release.yml`: Linux, macOS and Windows runners, on a `v*`
-tag) — see [signing](../deploy/signing.md); [CI](ci.md) has the plain matrix.
+(`.github/workflows/release.yml`: on a `v*` tag, one Linux runner installs aio
+at the app's `aioVersion` and `am publish` cross-builds every target; it fails
+without the signing secret unless chosen, and Pages from a tag needs a `v*` rule
+on the `github-pages` environment) — see [signing](../deploy/signing.md) and
+[updates](../deploy/updates.md); [CI](ci.md) has the plain matrix.
 
 ### Shared Electron runtime: `build.electronRuntime`
 

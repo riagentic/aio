@@ -926,6 +926,10 @@ export function tmplParentWatch(): string {
 // Decimal digits only — same rule as the server's parentPidOf / AIO_PORT.
 const __aioParent = (() => {
   const raw = process.env.AIO_PARENT_PID;
+  // Read once, then gone: a process this window starts (an opened file, a
+  // second aio app) must not watch — and die with — this app's server.
+  delete process.env.AIO_PARENT_PID;
+  delete process.env.AIO_PARENT_PID_FROM;
   if (raw === undefined || String(raw).trim() === "") return 0;
   const s = String(raw).trim();
   const n = Number(s);

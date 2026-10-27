@@ -2,7 +2,7 @@
  * @module
  * Build configuration — parses CLI flags, reads deno.json, derives all shared build state.
  */
-import { isArtifactName } from "../build-all.ts";
+import { rootArtifactIsOutput } from "./root-artifact.ts";
 import { readDenoJson } from "../server/deno-json.ts";
 import { BUNDLE_JS, DIST_DIR, UI_ENTRY } from "../server/app-files.ts";
 import { dirname, join, resolve, SEPARATOR } from "@std/path";
@@ -630,12 +630,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
         // release there, and the previous one must not count as dirty — the
         // same bug the fleet had (`build-all.ts` now passes its resolved dir).
         out: outArg ?? (mainConfig.build as { out?: string } | undefined)?.out,
-        // A previous build's artifact left in the project root (the
-        // single-target build writes there) is an OUTPUT, not a change: the
-        // onboarding lab built the same scaffold twice and got two dirty
-        // hashes for one codebase.
-        isOutput: (rel) =>
-          !rel.includes("/") && isArtifactName(rel, binaryName),
+        isOutput: rootArtifactIsOutput(binaryName),
       },
     );
   } catch (e) {

@@ -60,7 +60,12 @@ import {
   zombieLine,
   zombieVerdict,
 } from "./lock-owner.ts";
-import { delay, ownPidNs, parentPidOf } from "./process-liveness.ts";
+import {
+  delay,
+  inheritedEnv,
+  ownPidNs,
+  parentPidOf,
+} from "./process-liveness.ts";
 
 // ── Moved out — re-exported so every importer keeps this path ──
 export {
@@ -441,7 +446,7 @@ function handoffSecret(): string | undefined {
 function devSupervisorPid(): number | undefined {
   try {
     if (Deno.env.get("AIO_DEV_SUPERVISED") !== "1") return undefined;
-    return parentPidOf(Deno.env.get("AIO_PARENT_PID"));
+    return parentPidOf(inheritedEnv("AIO_PARENT_PID"));
   } catch {
     return undefined; // aio-ok: no env permission — then nothing supervises it
   }

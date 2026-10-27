@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.25-beta</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.26-beta</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -182,6 +182,11 @@ software — run on aio today: public ones like
 [Claude Control](https://github.com/riagentic/cc), mdview, llama-master, spacy
 and fixable, and private ones such as a trading platform, a 3D CAD editor and an
 e-shop. Their bug reports shaped much of the framework.
+
+To try the open-source ones, use
+[AIO APPS LAUNCHER](https://github.com/riagentic/aio-launcher): one window that
+installs, updates and opens them (Claude Control, mdview, llama-master, spacy,
+fixable and more). Each app is cloned from git and built on your machine.
 
 ## 🎯 Honestly
 

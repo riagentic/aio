@@ -417,6 +417,80 @@ async function run(
   }
 }
 
+/** Is `working` the `committed` value with entries dropped — nothing added or
+ *  changed? Pure. */
+export function onlyPruned(committed: unknown, working: unknown): boolean {
+  if (Array.isArray(working)) {
+    if (!Array.isArray(committed)) return false;
+    const have = new Set(committed.map((v) => JSON.stringify(v)));
+    return working.every((v) => have.has(JSON.stringify(v)));
+  }
+  if (working && typeof working === "object") {
+    if (!committed || typeof committed !== "object") return false;
+    const c = committed as Record<string, unknown>;
+    return Object.entries(working).every(([k, v]) =>
+      Object.hasOwn(c, k) && onlyPruned(c[k], v)
+    );
+  }
+  return committed === working;
+}
+
+/** `git -C dir <args>`'s stdout, or null when it fails (no git, no repo).
+ *  Discovery open (`gitEnvFor(null)`): the app may be a folder of a larger
+ *  repository. */
+async function gitOut(dir: string, args: string[]): Promise<string | null> {
+  const o = await new Deno.Command("git", {
+    args: ["-C", dir, ...args],
+    stdout: "piped",
+    stderr: "null",
+    stdin: "null",
+    ...gitEnvFor(null),
+  }).output();
+  return o.code === 0 ? new TextDecoder().decode(o.stdout) : null;
+}
+
+/** Any deno command run in the app BEFORE `dep/aio` exists — a CI step that
+ *  reads deno.json with `deno eval` — rewrites the committed deno.lock without
+ *  aio's entries: the import map points into a folder that is not there yet,
+ *  so Deno drops what it cannot reach (measured: 118 lines gone). The clone is
+ *  then dirty, and `am publish` refuses its build (a field report). Once the
+ *  link exists, the committed lock is right again: restore it when the working
+ *  one is exactly that lock with entries dropped AND it is the only tracked
+ *  change in the repository — a fresh checkout. Beside any other change the
+ *  drop may be the developer's own (an import removed, the lock pruned to
+ *  match). The repository is git's own discovery, so an app in a monorepo
+ *  folder counts too. Returns the report note, or null when nothing was
+ *  restored. */
+async function restorePrunedLock(dir: string): Promise<string | null> {
+  try {
+    const prefix = await gitOut(dir, ["rev-parse", "--show-prefix"]);
+    if (prefix === null) return null; // not in a git work tree
+    const lock = `${prefix.trim()}deno.lock`;
+    const status = await gitOut(dir, [
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=no",
+    ]);
+    // Porcelain v1 paths are relative to the repository root, like `lock`.
+    const changed = status?.split("\0").filter(Boolean).map((l) => l.slice(3));
+    if (changed?.length !== 1 || changed[0] !== lock) return null;
+    const committed = await gitOut(dir, ["show", `HEAD:${lock}`]);
+    if (committed === null) return null; // not committed
+    const path = join(dir, "deno.lock");
+    const working = await Deno.readTextFile(path);
+    if (working === committed) return null;
+    if (!onlyPruned(JSON.parse(committed), JSON.parse(working))) return null;
+    await Deno.writeTextFile(path, committed);
+    return "restored — a deno command run before dep/aio existed had " +
+      "dropped aio's entries from it (in CI, run `am fix` before any deno " +
+      "command)";
+  } catch {
+    // aio-ok: no git, or an unreadable lock — left as it is, unreported.
+    return null;
+  }
+}
+
 /** What the cache repair loads: the app entry first, then aio's tool entry
  *  points that are on disk (a `dep/aio` path appears once the link exists).
  *  @internal exported for tests/doctor-lock-coverage.test.ts */
@@ -904,6 +978,10 @@ export async function cmdFix(
             ? `→ ${root}${was}`
             : "",
         );
+        if (r === "linked") {
+          const note = await restorePrunedLock(dir);
+          if (note) add("committed deno.lock", "fixed", note);
+        }
       }
     }
   }

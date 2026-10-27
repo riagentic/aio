@@ -6426,6 +6426,17 @@
             "73cd503e1e1d55ca"
           ]
         },
+        "githubReleaseWorkflow": {
+          "kind": "function",
+          "sig": "e450db3d33981db9",
+          "members": {
+            "param0": "req:ce8ead43dbe36ba5|2504afa97828ecfc~typeLiteral",
+            "return": "req:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "5798968d86a3195d"
+          ]
+        },
         "githubWorkflow": {
           "kind": "function",
           "sig": "764b5503991ec79e",
@@ -9268,6 +9279,10 @@
           "sig": "value"
         },
         "build --no-data": {
+          "kind": "flag",
+          "sig": "bool"
+        },
+        "build --no-pages": {
           "kind": "flag",
           "sig": "bool"
         },
