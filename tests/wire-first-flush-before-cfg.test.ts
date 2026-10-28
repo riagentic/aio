@@ -22,6 +22,7 @@ import { closeWindow } from "../src/testing/close-window.ts";
 import { udsProdHTML } from "../src/electron/electron-shared.ts";
 import { electronMainScriptUDS } from "../src/electron/electron-uds.ts";
 import { enc } from "../src/protocol/envelope.ts";
+import { bootSource } from "./boot-source.ts";
 
 type Fn = (line?: string) => void;
 type G = { __aioConfig?: Record<string, unknown> };
@@ -55,13 +56,15 @@ Deno.test("wire option: the launch-templated aio:// shell carries it, and only w
 });
 
 Deno.test("wire option: the boot hands `wire` to that shell (a source check — this path boots only with an Electron window)", async () => {
-  const run = await Deno.readTextFile("src/server/aio.ts");
+  // aio.ts and the boot steps it calls out to (boot-*.ts).
+  const run = await bootSource();
   const life = await Deno.readTextFile("src/server/aio-lifecycle.ts");
   const at = life.indexOf("shell: {\n");
   assertEquals(at > 0, true);
   assertEquals(
     life.slice(at, at + 200).includes("wire: deps.wire,") &&
-      /security: config\.security,\s+wire: config\.wire,/.test(run),
+      /security: (?:ctx\.)?config\.security,\s+wire: (?:ctx\.)?config\.wire,/
+        .test(run),
     true,
     "aio.run({ wire }) no longer reaches the aio:// shell — a packaged " +
       "window's first flush would encode calls the default way",

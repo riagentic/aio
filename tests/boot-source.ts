@@ -12,6 +12,7 @@ export const BOOT_FILES = [
   "src/server/boot-config.ts",
   "src/server/boot-storage.ts",
   "src/server/boot-dispatch.ts",
+  "src/server/boot-transport.ts",
   "src/server/boot-ctx.ts",
   "src/server/aio.ts",
 ] as const;

@@ -1539,9 +1539,9 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a plain client action's failed save is owed to every open async call — a call whose work was saved is told it was not",
-    file: "src/server/aio.ts",
-    find: "        _sureOf.add(action as object);",
-    replace: "        void action;",
+    file: "src/server/boot-transport.ts",
+    find: "      ctx._sureOf.add(action as object);",
+    replace: "      void action;",
     test: "tests/journal-owed-saves-plain-action.test.ts",
     filter:
       "owed saves: a plain client action's failed save is its own — an async call open beside it is not told `unsaved`",
@@ -6280,9 +6280,9 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "main isolate never tells worker cells to start so their onInit never runs once wired",
-    file: "src/server/aio.ts",
-    find: "        workerPool.start();\n",
-    replace: "        void workerPool;\n",
+    file: "src/server/boot-transport.ts",
+    find: "      ctx.workerPool.start();\n",
+    replace: "      void ctx.workerPool;\n",
     test: "tests/worker-reseed-no-reinit.test.ts",
     filter: "worker cell: onInit's dispatch at boot lands on the main isolate",
   },

@@ -14,6 +14,7 @@ import { assert, assertEquals } from "@std/assert";
 import { resetBudgets, setBudgets } from "../src/state/budgets.ts";
 import { createVitalsSystem } from "../src/vitals/mod.ts";
 import { fromFileUrl } from "@std/path";
+import { bootSource } from "./boot-source.ts";
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
@@ -84,7 +85,8 @@ Deno.test("budgets owner: every budgetsFor( read in src/ is an audited owner-saf
   );
   assertEquals(found.length, allowed.size, `sites:\n${found.join("\n")}`);
   // …and the one production caller of each fallback really passes the ledger.
-  const aio = await Deno.readTextFile(ROOT + "src/server/aio.ts");
+  // aio.ts and the boot steps it calls out to (boot-*.ts).
+  const aio = await bootSource();
   const helpers = await Deno.readTextFile(
     ROOT + "src/server/aio-run-helpers.ts",
   );
@@ -93,7 +95,10 @@ Deno.test("budgets owner: every budgetsFor( read in src/ is an audited owner-saf
     /redact,\s*\/\/[^\n]*\n\s*_budgetLedger,\s*\)/.test(aio),
     "initDiagAndVitals",
   );
-  assert(/budgets: _budgetLedger,\s*\n[^\n]*shouldPersist/.test(aio), "server");
+  assert(
+    /budgets: (?:ctx\.)?_budgetLedger,\s*\n[^\n]*shouldPersist/.test(aio),
+    "server",
+  );
   assert(
     /bootStorage\(\{[\s\S]{0,400}budgets: _budgetLedger/.test(aio),
     "bootStorage",

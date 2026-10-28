@@ -31,6 +31,7 @@ import { assert, assertEquals } from "@std/assert";
 import { VALID_AIO_CONFIG_KEYS } from "../src/server/config.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
 import { fromFileUrl } from "@std/path";
+import { bootSource } from "./boot-source.ts";
 
 const REPO = fromFileUrl(new URL("..", import.meta.url));
 const _childCovDir = childCoverageDir();
@@ -114,9 +115,10 @@ Deno.test("config bridge hop 2: every key the transport reads is a real config k
 });
 
 Deno.test("config bridge hop 2: the call site stays a mechanical passthrough", async () => {
-  const src = await Deno.readTextFile(REPO + "src/server/aio.ts");
+  // aio.ts and the boot steps it calls out to (boot-*.ts).
+  const src = await bootSource();
   const start = src.indexOf("setupTransport<S, A>({");
-  assert(start > 0, "setupTransport call site not found in aio.ts");
+  assert(start > 0, "setupTransport call site not found in the boot");
   // The call's own indent (it sits inside a helper): its keys are one level
   // deeper, its `});` at the same depth.
   const indent = src.slice(src.lastIndexOf("\n", start) + 1, start)
@@ -126,7 +128,7 @@ Deno.test("config bridge hop 2: the call site stays a mechanical passthrough", a
   const call = src.slice(start, end);
 
   assert(
-    new RegExp(`\n${indent}  config,\n`).test(call),
+    new RegExp(`\n${indent}  config(?:: ctx\\.config)?,\n`).test(call),
     "aio.ts must hand the WHOLE config object to setupTransport " +
       "(`config,`) — a hand-copied literal is the bug: it dropped serveDirs " +
       "and _cellNames in alpha45, silently, after four earlier instances at " +

@@ -11,22 +11,33 @@ import type { ReportErrorOpts } from "../diagnostics/error.ts";
 import type { DiagnosticsHooks } from "../diagnostics/mod.ts";
 import type { Redactor } from "../diagnostics/redact.ts";
 import type { ReduceBreakdown, TTState } from "../diagnostics/time-travel.ts";
-import type { CellFieldFilter } from "../state/cell-types.ts";
+import type { BudgetLedger } from "../state/budgets.ts";
+import type { AccessUser, CellFieldFilter } from "../state/cell-types.ts";
 import type { createDispatch } from "../state/dispatch.ts";
 import type { OwnEffect } from "../state/own.ts";
 import type { ScheduleDef, ScheduleEffect } from "../state/schedule.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
+import type { CostMeter } from "../vitals/cost-meter.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { BootResult } from "./aio-boot.ts";
 import type { CliFlags } from "./aio-cli.ts";
 import type { CellPatches } from "./aio-dispatch.ts";
 import type { InternalApp, UdsBroadcastController } from "./aio-run-helpers.ts";
-import type { AioApp, AioConfig, AioUser } from "./aio-types.ts";
+import type { ServerSetupResult } from "./aio-server.ts";
+import type {
+  AioApp,
+  AioConfig,
+  AioUser,
+  AuthOptions,
+  UiConfig,
+} from "./aio-types.ts";
 import type { AppDirs } from "./app-dirs.ts";
 import type { UserStore } from "./auth-users.ts";
 import type { BlobStore } from "./blobs.ts";
+import type { Provenance } from "./boot-facts.ts";
 import type { MigrationSummary } from "./boot-restore.ts";
 import type { CellWorkerPool } from "./cell-worker-pool.ts";
+import type { StartedFeedback } from "./feedback-boot.ts";
 import type {
   ActionCause,
   Journal,
@@ -36,11 +47,12 @@ import type {
 } from "./journal.ts";
 import type { PersistenceManager } from "./persistence.ts";
 import type { ServerHandle } from "./server-types.ts";
-import type { SessionStore } from "./sessions.ts";
+import type { SessionInfo, SessionStore } from "./sessions.ts";
 import type { AppLock } from "./single-instance-lock.ts";
 import type { SkvInstance } from "./skv.ts";
 import type { Timeline } from "./timeline.ts";
 import type { UDSHandle } from "./uds.ts";
+import type { StartedUpdates } from "./updates-boot.ts";
 import type { AsyncLocalStorage } from "node:async_hooks";
 
 /** Make a write durable by its own save, NOW — for a line the journal
@@ -68,14 +80,26 @@ export interface BootCtx<S, A, E> {
   _stampDataDir: (() => Promise<void>) | undefined;
   readonly _dirs: AppDirs;
   readonly port: number;
+  readonly _portRequested: boolean;
+  readonly portFrom: Provenance;
+  readonly _settings: [string, string][];
   readonly releaseFileSizeGuard: () => void;
+  readonly singletonMode: boolean;
   readonly appLock: AppLock | null;
+  readonly baseDir: string;
+  readonly baseDirFallbacks: string[];
   readonly VERBOSE: boolean;
   distDir: string;
   prod: boolean;
+  readonly electronDistDir: string | undefined;
+  readonly _budgetLedger: BudgetLedger;
   readonly redact: Redactor;
   readonly diagHooks: DiagnosticsHooks | null;
   readonly vitalsSystem: VitalsSystem | undefined;
+  readonly client: string;
+  readonly clientFrom: Provenance;
+  readonly useElectron: boolean;
+  readonly isHeadless: boolean;
   readonly reduce: (state: S, action: A) => {
     state: S;
     effects: (E | ScheduleEffect | OwnEffect)[];
@@ -87,11 +111,16 @@ export interface BootCtx<S, A, E> {
   readonly onEffect:
     | ((effect: E, state: S, user?: AioUser) => void)
     | undefined;
+  readonly onStart: ((app: AioApp<S, A>) => void | Promise<void>) | undefined;
   readonly onStopping: (() => void | Promise<void>) | undefined;
   readonly onStop: (() => void | Promise<void>) | undefined;
   readonly shouldPersist: boolean;
   readonly dbPath: string | undefined;
+  readonly getUIState: (s: S, user?: AioUser) => unknown;
   readonly getDBState: (s: S) => unknown;
+  readonly persistMode: "single" | "multi";
+  readonly ui: UiConfig;
+  readonly title: string;
   readonly syncCellIds: string[];
   state: S;
   tt:
@@ -106,6 +135,9 @@ export interface BootCtx<S, A, E> {
   readonly persistence: PersistenceManager;
   readonly journal: Journal | null;
   readonly syncHandler: ServerSyncHandler | undefined;
+  readonly syncBroadcastRef: {
+    fn: (msg: string, exclude?: WebSocket) => void;
+  };
   readonly strayJournal: Journal | null;
   readonly storeSavedElsewhere: boolean;
   readonly journalHeld: ReadonlySet<string>;
@@ -195,6 +227,7 @@ export interface BootCtx<S, A, E> {
     disposeByPrefix: (prefix: string) => void;
     active: () => string[];
   };
+  readonly costMeter: CostMeter;
   readonly udsCtrl: UdsBroadcastController;
   readonly onPerf:
     | ((timing: {
@@ -209,6 +242,10 @@ export interface BootCtx<S, A, E> {
     }) => void)
     | undefined;
   readonly _reseedWorkerCells: () => void;
+  readonly handleTTCommand: (
+    cmd: string,
+    arg?: number,
+  ) => void | Promise<string | undefined>;
   _shapeThrew: boolean;
   readonly _storedSlice: (cell: string, slice: unknown) => unknown;
   readonly _ttOwed: object;
@@ -305,6 +342,8 @@ export interface BootCtx<S, A, E> {
   readonly discoveryRef: {
     stop: (() => void) | null;
   };
+  readonly authEnabled: boolean;
+  readonly authOpts: AuthOptions;
   readonly sessionStore: SessionStore | null;
   readonly userStore: UserStore | null;
   readonly _unregisterAuthStore: (() => void) | null;
@@ -319,6 +358,30 @@ export interface BootCtx<S, A, E> {
   readonly _unregisterRuntime: () => void;
   readonly blobStore: BlobStore;
   readonly app: InternalApp<S, A>;
+  readonly expose: boolean;
+  readonly users: Record<string, AccessUser> | undefined;
+  readonly _resolveUser:
+    | ((tok: string) => AccessUser | Promise<AccessUser | null> | null)
+    | undefined;
+  readonly sessionResolver: ((tok: string) => SessionInfo | null) | undefined;
+  readonly _perUserAuth: boolean;
+  readonly token: string | undefined;
+  readonly clientCounter: {
+    value: number;
+  };
+  readonly udsRef: {
+    current: UDSHandle | null;
+  };
+  readonly _tls: {
+    cert?: string;
+    key?: string;
+    noTls: boolean;
+  };
+  readonly transport: ServerSetupResult;
+  readonly livePort: number;
+  readonly _tcpPort: number | undefined;
+  readonly _updates: StartedUpdates | undefined;
+  readonly _feedback: StartedFeedback | undefined;
 }
 
 /** The context over the boot's own variables: each field is a getter that

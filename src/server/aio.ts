@@ -1,4 +1,4 @@
-import { checkPeerTypes } from "./peer-describe.ts";
+import "./peer-describe.ts"; // load order: evaluated here, as before the split
 import "immer"; // load order: evaluated here, as before the split
 import { inheritedParentEnv } from "./process-liveness.ts";
 import {
@@ -28,12 +28,7 @@ import { registerRuntime } from "./shutdown.ts";
 import { _registerAuthStore } from "./auth-context.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
-import {
-  createTT,
-  record,
-  toBroadcast,
-  type TTState,
-} from "../diagnostics/time-travel.ts";
+import { createTT, record, type TTState } from "../diagnostics/time-travel.ts";
 import { createScheduleManager } from "../state/schedule.ts";
 import { createOwnManager } from "../state/own.ts";
 import "../state/framework-cells.ts"; // load order: evaluated here, as before the split
@@ -83,7 +78,7 @@ import "./cell-worker-pool.ts"; // load order: evaluated here, as before the spl
 import { validateSchedules } from "../state/schedule.ts";
 import "./heap-policy.ts"; // load order: evaluated here, as before the split
 import type { Provenance } from "./boot-facts.ts";
-import { entryPathOf } from "./boot-facts.ts";
+import "./boot-facts.ts"; // load order: evaluated here, as before the split
 import {
   dbPathOf,
   exposeFlagOf,
@@ -93,7 +88,6 @@ import {
   pick,
   serverUrlOf,
   sourceLines,
-  tlsOf,
   windowSizeOf,
 } from "./config-sources.ts";
 import {
@@ -110,12 +104,11 @@ import "./paths.ts"; // load order: evaluated here, as before the split
 import { carriedPort } from "./dev-restart.ts";
 import "./app-dirs-migrate.ts"; // load order: evaluated here, as before the split
 import "../state/dispatch.ts"; // load order: evaluated here, as before the split
-import { setupTransport } from "./aio-server.ts";
+import "./aio-server.ts"; // load order: evaluated here, as before the split
 import {
   requestRestart,
   requestStop,
   type RestartPlan,
-  startLifecycle,
 } from "./aio-lifecycle.ts";
 import {
   acquireSingletonLock,
@@ -148,7 +141,7 @@ import {
 import "./server-trojan.ts"; // load order: evaluated here, as before the split
 import { _moveRejections } from "../state/rejection-tracker.ts";
 import { ownLogFiles } from "./aio-cells-bridge.ts";
-import { getRegisteredCells } from "../state/cell-reactive.ts";
+import "../state/cell-reactive.ts"; // load order: evaluated here, as before the split
 import "../state/updates-cell.ts"; // load order: evaluated here, as before the split
 import "../state/feedback-cell.ts"; // load order: evaluated here, as before the split
 import { createCostMeter } from "../vitals/cost-meter.ts";
@@ -174,7 +167,6 @@ import {
   returnBootAttempt,
   startUpdates,
   ttyPrompt,
-  updateWindow,
 } from "./updates-boot.ts";
 import { offerMoveToApplications } from "./macos-move.ts";
 import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
@@ -254,13 +246,13 @@ import {
   _tlsOf,
   _warnPinDrift,
   clientOf,
-  defaultClientFor,
   exposeReason,
 } from "./aio-run-config.ts";
 import { _appSlots, run, sayBootRefused } from "./aio-run-entry.ts";
 import * as configSteps from "./boot-config.ts";
 import * as storageSteps from "./boot-storage.ts";
 import * as dispatchSteps from "./boot-dispatch.ts";
+import * as transportSteps from "./boot-transport.ts";
 import {
   type BootCtx,
   liveCtx,
@@ -390,23 +382,40 @@ async function _runPhases<S, A, E>(
     _stampDataDir: [() => _stampDataDir, (v) => (_stampDataDir = v)],
     _dirs: () => _dirs,
     port: () => port,
+    _portRequested: () => _portRequested,
+    portFrom: () => portFrom,
+    _settings: () => _settings,
     releaseFileSizeGuard: () => releaseFileSizeGuard,
+    singletonMode: () => singletonMode,
     appLock: () => appLock,
+    baseDir: () => baseDir,
+    baseDirFallbacks: () => baseDirFallbacks,
     VERBOSE: () => VERBOSE,
     distDir: [() => distDir, (v) => (distDir = v)],
     prod: [() => prod, (v) => (prod = v)],
+    electronDistDir: () => electronDistDir,
+    _budgetLedger: () => _budgetLedger,
     redact: () => redact,
     diagHooks: () => diagHooks,
     vitalsSystem: () => vitalsSystem,
+    client: () => client,
+    clientFrom: () => clientFrom,
+    useElectron: () => useElectron,
+    isHeadless: () => isHeadless,
     reduce: () => reduce,
     execute: () => execute,
     onAction: () => onAction,
     onEffect: () => onEffect,
+    onStart: () => onStart,
     onStopping: () => onStopping,
     onStop: () => onStop,
     shouldPersist: () => shouldPersist,
     dbPath: () => dbPath,
+    getUIState: () => getUIState,
     getDBState: () => getDBState,
+    persistMode: () => persistMode,
+    ui: () => ui,
+    title: () => title,
     syncCellIds: () => syncCellIds,
     state: [() => state, (v) => (state = v)],
     tt: [() => tt, (v) => (tt = v)],
@@ -417,6 +426,7 @@ async function _runPhases<S, A, E>(
     persistence: () => persistence,
     journal: () => journal,
     syncHandler: () => syncHandler,
+    syncBroadcastRef: () => syncBroadcastRef,
     strayJournal: () => strayJournal,
     storeSavedElsewhere: () => storeSavedElsewhere,
     journalHeld: () => journalHeld,
@@ -454,9 +464,11 @@ async function _runPhases<S, A, E>(
     _vitalsCheckTimer: () => _vitalsCheckTimer,
     scheduleManager: () => scheduleManager,
     ownManager: () => ownManager,
+    costMeter: () => costMeter,
     udsCtrl: () => udsCtrl,
     onPerf: () => onPerf,
     _reseedWorkerCells: () => _reseedWorkerCells,
+    handleTTCommand: () => handleTTCommand,
     _shapeThrew: [() => _shapeThrew, (v) => (_shapeThrew = v)],
     _storedSlice: () => _storedSlice,
     _ttOwed: () => _ttOwed,
@@ -499,6 +511,8 @@ async function _runPhases<S, A, E>(
     dispatch: () => dispatch,
     freezeEnabled: () => freezeEnabled,
     discoveryRef: () => discoveryRef,
+    authEnabled: () => authEnabled,
+    authOpts: () => authOpts,
     sessionStore: () => sessionStore,
     userStore: () => userStore,
     _unregisterAuthStore: () => _unregisterAuthStore,
@@ -513,6 +527,20 @@ async function _runPhases<S, A, E>(
     _unregisterRuntime: () => _unregisterRuntime,
     blobStore: () => blobStore,
     app: () => app,
+    expose: () => expose,
+    users: () => users,
+    _resolveUser: () => _resolveUser,
+    sessionResolver: () => sessionResolver,
+    _perUserAuth: () => _perUserAuth,
+    token: () => token,
+    clientCounter: () => clientCounter,
+    udsRef: () => udsRef,
+    _tls: () => _tls,
+    transport: () => transport,
+    livePort: () => livePort,
+    _tcpPort: () => _tcpPort,
+    _updates: () => _updates,
+    _feedback: () => _feedback,
   });
   // --- Phase 1: resolve CLI, env, config validation, lint ---
   const cli = parseCli();
@@ -2584,178 +2612,11 @@ async function _runPhases<S, A, E>(
   // boot, where it can name the config key, not at the first handshake.
   const _tls = _tlsOf(config as { tls?: AioConfig<S, A, E>["tls"] });
   const transport = await _setupTransport();
-  async function _setupTransport() {
-    return setupTransport<S, A>({
-      appId,
-      appVersion: await _appVersion(),
-      port,
-      portRequested: _portRequested,
-      prod,
-      distDir,
-      electronDistDir,
-      // The shell the app runs in: the dev graph evaluation presents its UA.
-      shell: defaultClientFor(config.client) === "electron"
-        ? "electron"
-        : "browser",
-      baseDir,
-      baseDirFallbacks,
-      expose,
-      token,
-      users,
-      resolveUser: _resolveUser,
-      ...(config.peerTypes !== undefined
-        ? { peerTypes: checkPeerTypes(config.peerTypes) }
-        : {}),
-      ...(config.resolvePeer
-        ? {
-          resolvePeer: (p: { app: string; pid: number }) =>
-            config.resolvePeer!(p, state),
-        }
-        : {}),
-      sessionResolver,
-      // Every source of "this socket's user is not who it was" the boot has.
-      // Built from the STORES, not from `authFlows` — `authFlows` exists only
-      // under `auth: true`, which left `sessions: true` on the 5-second sweep
-      // (measured: 4.8s and ten more frames of private state after a revoke).
-      // A role change had no source at all; `onUserChanged` is the new one.
-      onIdentityChange: (sessionStore || userStore)
-        ? (fn: () => void) => {
-          const offs: (() => void)[] = [];
-          if (sessionStore) offs.push(sessionStore.onRevoked(fn));
-          if (userStore?.onUserChanged) offs.push(userStore.onUserChanged(fn));
-          return () => {
-            for (const off of offs) off();
-          };
-        }
-        : undefined,
-      // AUTH-2/3: login-flow deps — aio-server adds the TLS-aware `secure` flag.
-      authFlows: userStore && sessionStore
-        ? {
-          users: userStore,
-          sessions: sessionStore,
-          signup: authOpts.signup !== false,
-          cookie: authOpts.cookie !== false,
-          ttlMs: authOpts.ttlMs,
-          appTitle: title,
-          sendMail: authOpts.sendMail,
-          requireVerified: authOpts.requireVerified,
-          totp: authOpts.totp,
-          oidc: authOpts.oidc,
-          publicDir: authOpts.publicDir,
-        }
-        : undefined,
-      // TLS: ONE decider for the flag/config pair. The flags are per-launch and
-      // win; `tls` in config is how a compiled binary — a service unit passes no
-      // shell flags — declares the same thing (R-7).
-      cliCert: tlsOf(cli, _tls).cert?.value,
-      cliKey: tlsOf(cli, _tls).key?.value,
-      cliNoTls: tlsOf(cli, _tls).noTls?.value,
-      // Which of the two said so — the warning names what was actually written.
-      noTlsSource: cli.noTls !== undefined ? "flag" : "config",
-      certSource: cli.cert !== undefined || cli.key !== undefined
-        ? "flag" as const
-        : "config" as const,
-      cliTransport: cli.transport,
-      // `--no-watch` / `--watch=…` beats the config value: a flag is a decision
-      // about THIS run, a config value is the app's standing preference. Merged
-      // HERE because `config` below is passed whole and must stay the app's own
-      // object (tests/config-bridge-hop2.test.ts).
-      cliWatch: cli.watch,
-      ui,
-      title,
-      // HOP 2 of the config bridge — MECHANICAL, never a hand-copied literal.
-      // The whole config rides across and `TransportConfig` (aio-server.ts) is
-      // the single list of what may be read. The literal that used to stand here
-      // silently dropped `serveDirs` (feature dead on arrival) and `_cellNames`
-      // (browser drift warning unreachable), after strictOrigin/redactActions/
-      // appDir/renderBudget did the same at hop 1. Gate:
-      // tests/config-bridge-hop2.test.ts.
-      config,
-      getState: () => state,
-      getUIState: (s, user?) => getUIState(s, user),
-      // ROUTED dispatch: a network-borne action for a `worker: true` cell must
-      // reach its worker, not be reduced here. The raw dispatcher would have run
-      // the method on the main isolate — no isolation at all, and the worker's
-      // copy of the slice would drift out of sync with ours.
-      //
-      // …and an action that came in through a network door has no call for an
-      // author — no call's continuation made it. Known, not guessed (`_sureOf`):
-      // its failed save is its own ack's, not every open call's.
-      dispatch: (action) => {
-        if (action !== null && typeof action === "object") {
-          _sureOf.add(action as object);
-        }
-        return appDispatch(action as A);
-      },
-      closing: () => dispatch.phase() !== "open",
-      app: {
-        snapshot: () => app.snapshot!(),
-        loadSnapshot: (json, opts) => app.loadSnapshot!(json, opts),
-      },
-      blobs: blobStore,
-      vitalsSystem,
-      costMeter,
-      useElectron,
-      tt: tt
-        ? { handleTTCommand, getTTBroadcast: () => toBroadcast(tt!) }
-        : null,
-      syncHandler: syncHandler ?? null,
-      syncBroadcastRef,
-      shutdown,
-      udsHandle: udsRef,
-      // `am persist` / trojan `persist`: the reply is the claim "on disk", so
-      // this is the flush itself, awaited, and a cycle that reported a failure
-      // rejects (the manager never rejects on its own — it keeps the loop alive
-      // — so the verdict is read back from `lastCycleError`). Sync cells'
-      // server-origin writes debounce into their own snapshot; they ride too,
-      // exactly as on a clean exit.
-      flushPersist: async () => {
-        await persistence.flushPersist();
-        await syncHandler?.flushServerWrites();
-        const failed = persistence.lastCycleError();
-        if (failed) throw failed;
-      },
-      // The SAME value, read by `/__aio/health` — one verdict, every door.
-      lastPersistError: () => persistence.lastCycleError(),
-      // `am persist --drop`: an undeclared stored cell out of every future
-      // write — and out of `am migrations`' drift list, which said it was
-      // still stored.
-      dropStoredCell: (cell: string) => {
-        const r = persistence.dropOrphanCell?.(cell) ?? [];
-        if (r === true && migrationSummary) {
-          migrationSummary.drift = migrationSummary.drift.filter((d) =>
-            !(d.cell === cell && d.issue === "unknown-cell")
-          );
-        }
-        return r;
-      },
-      budgets: _budgetLedger,
-      shouldPersist,
-      scheduleManager,
-      // Cell id → method names — trojan `cells` route (amui run-method buttons).
-      cellMethods: config._cellMethods ?? {},
-      cellAsyncMethods: config._cellAsyncMethods ?? {},
-      cellMethodArity: config._cellMethodArity ?? {},
-      cellFields: config._cellFields ?? {},
-      // The same version / converts-state facts boot replay reads, for every
-      // declared cell — `am replay` applies the one stamp rule (staleStamps).
-      cellVersions: Object.fromEntries(
-        (config._cellNames ?? []).map((c) => [c, {
-          version: config._cellVersions?.[c] ?? 0,
-          migrates: !!config._cellMigrations?.get(c)?.onMigrate,
-        }]),
-      ),
-      asyncDb,
-      // In-memory dispatch timeline — the trojan `timeline` route.
-      getTimeline: (after?: number, limit?: number) =>
-        timeline.entries(after, limit),
-      getTimelineRotated: () => timeline.rotated(),
-      // Boot migration + shape-drift picture — trojan `migrations`.
-      migrations: migrationSummary,
-      appLock,
-      clientCounter,
-      log,
-    });
+  // Moved: boot-transport.ts.
+  function _setupTransport(
+    ...a: StepArgs<typeof transportSteps._setupTransport<S, A, E>>
+  ) {
+    return transportSteps._setupTransport(ctx, ...a);
   }
 
   server = transport.server;
@@ -2911,202 +2772,11 @@ async function _runPhases<S, A, E>(
 
   // Lifecycle: globals, onStart, schedules, logging, client launch
   await _startLifecycle();
-  async function _startLifecycle(): Promise<void> {
-    return startLifecycle({
-      // Boot-report auth label — "password+totp+oidc", "sessions", or fallback.
-      authMode: authEnabled
-        ? [
-          "password",
-          authOpts.totp !== false ? "totp" : "",
-          authOpts.oidc ? "oidc" : "",
-          authOpts.requireVerified ? "verified-email" : "",
-        ].filter(Boolean).join("+")
-        : sessionStore
-        ? "sessions"
-        : undefined,
-      // Facts the report cannot read off the process: where this app keeps what
-      // it owns, and what it is actually running.
-      bootExtras: {
-        pid: Deno.pid,
-        // `--verbose`: every setting with more than one home, the value it
-        // resolved to and WHO decided — from the same resolvers that decided it
-        // (config-sources.ts), so the label cannot disagree with the value.
-        sources: VERBOSE ? _settings : undefined,
-        client: { value: client, from: clientFrom },
-        // An app that binds no TCP port has no port fact to report. It used to
-        // print one anyway — `findFreePort()` runs before the transport is even
-        // decided — so a zero-port app announced a number it never bound, and
-        // anyone who tried it got a refused connection. `sourced()` drops an
-        // undefined value, and the socket is named on its own line instead.
-        port: { value: _tcpPort as number, from: portFrom },
-        entry: {
-          // What is RUNNING, read from the process — not what a config said
-          // should run. Those differ exactly when someone is confused.
-          value: entryPathOf(Deno.mainModule),
-          from: "default",
-        },
-        heap: _heapLine,
-        plugins: config._pluginNames,
-        dataDir: _dirs.home,
-        // `--db-path` moves the state file OUT of the data dir, and a relative
-        // one resolves against CWD — so the `data` line above was pointing at a
-        // directory the state was not in. Resolved, because "./rel.db" is not an
-        // answer to "where is it".
-        dbFile: dbPath ? resolve(dbPath) : undefined,
-        logs: { dir: _dirs.logs, level: cli.verbose ? "debug" : "info" },
-        journal: config.journal
-          ? (typeof config.journal === "string"
-            ? config.journal
-            : _dirs.journal)
-          : undefined,
-        cells: Object.keys(config._cellMethods ?? {}),
-        // What is NOT ordinary about a cell: its own thread, or a second writer.
-        // Both change how a symptom is read, and neither was visible without
-        // opening the source.
-        workers: [...getRegisteredCells().values()]
-          .filter((c) => (c as { __aio?: { worker?: boolean } }).__aio?.worker)
-          .map((c) => (c as { __aio: { id: string } }).__aio.id),
-        syncCells: [...getRegisteredCells().values()]
-          .filter((c) =>
-            (c as { __aio?: { syncConfig?: unknown } }).__aio?.syncConfig !==
-              undefined
-          )
-          .map((c) => (c as { __aio: { id: string } }).__aio.id),
-        routes: config.routes ? Object.keys(config.routes).length : 0,
-        feedback: _feedback
-          ? {
-            auto: _feedback.auto,
-            keep: _feedback.keep,
-            destination: _feedback.url ??
-              (_feedback.hasSink ? "custom sink" : undefined),
-          }
-          : undefined,
-        updates: _updates
-          ? {
-            source: _updates.source,
-            kind: _updates.kind,
-            channel: _updates.channel,
-            intervalMs: _updates.intervalMs,
-            auto: _updates.auto,
-          }
-          : undefined,
-      },
-      appId,
-      appVersion: await _appVersion(),
-      title,
-      prod,
-      electronDistDir,
-      distDir,
-      baseDir,
-      expose,
-      singletonMode,
-      childWindows: !!config.childWindows,
-      electron: config.electron,
-      splash: config.splash,
-      client,
-      useElectron,
-      isHeadless,
-      libraryMode: config.libraryMode,
-      transport: transport.transport,
-      skipHttp: transport.skipHttp,
-      httpSocketPath: transport.httpSocketPath,
-      port: livePort,
-      token,
-      pairingPake: config.pairing?.pake === true,
-      users,
-      perUserAuth: _perUserAuth,
-      tlsCert: transport.tlsCert,
-      shareUrl: transport.shareUrl,
-      localUrl: transport.localUrl,
-      advertiseHost: transport.advertiseHost,
-      bindHost: transport.bindHost,
-      server,
-      udsHandle,
-      app,
-      // `onStart` here is the cells bridge's: it runs every cell's `onInit`
-      // (the app's own `onStart` fires later, from `aio.run`). Boot re-creates
-      // what `onInit` dispatches — every harness runs it too — so it is caused,
-      // like a timer a method arms. Recorded as an input, `am record` emitted
-      // the call AND `bootCells` ran `onInit`: applied twice.
-      //
-      // Worker cells' `onInit` runs in THEIR isolate, started here — beside the
-      // main cells' and no earlier: a patch it dispatches is applied through
-      // this isolate's dispatch, whose broadcast is wired only now. Posted
-      // BEFORE the main `onInit`s, so a main cell calling a worker cell from its
-      // own `onInit` reaches one that has already initialised (per-worker FIFO).
-      onStart: onStart || workerPool.size > 0
-        ? ((a: Parameters<NonNullable<typeof onStart>>[0]) => {
-          workerPool.start();
-          if (onStart) return _effectScope.run(true, () => onStart(a));
-        })
-        : undefined,
-      fatalOnStart: config.fatalOnStart,
-      scheduleManager,
-      schedules: config.schedules,
-      shouldPersist,
-      persistMode,
-      asyncDb,
-      db: config.db,
-      maxConnections: config.maxConnections,
-      cli: {
-        width: cli.width,
-        height: cli.height,
-        keepServer: cli.keepServer,
-        open: cli.open,
-        // Read by the report only, to say when `--channel` can do nothing.
-        channel: cli.channel,
-      },
-      // The FULL head-shaped config, not just the window box: the dev Electron
-      // aio:// shell is templated at launch and has no other way to learn
-      // ui.head/ui.viewport/ui.showStatus. Dropping them here made an app that
-      // respected ui.head under `deno task dev` (HTTP) ship it in the packaged
-      // window but NOT in the dev Electron window — two dev surfaces, two heads
-      // (WYSIDIWYSIP).
-      // EVERY key the lifecycle's `ui` type names — not a hand-picked five.
-      // The list here silently lost chrome, theme, layout and lang (and then
-      // tray) on the way to the dev Electron launch: the lifecycle read
-      // `ui.chrome` from an object that never had it, so the templated shell
-      // drew the OS frame whatever the app asked for. Measured: `const TRAY =
-      // null` in the generated main of an app that configured a tray.
-      ui: {
-        width: ui.width,
-        height: ui.height,
-        showStatus: ui.showStatus,
-        viewport: ui.viewport,
-        head: ui.head,
-        chrome: ui.chrome,
-        theme: ui.theme,
-        layout: ui.layout,
-        // …and `dir` is the key it lost NEXT, after the five the comment above
-        // was written about. The lifecycle's `ui` shape is a `Pick<UiConfig>`
-        // now, so a key it names and this object omits is a compile error
-        // rather than a config that reaches no target.
-        dir: ui.dir,
-        lang: ui.lang,
-        tray: ui.tray,
-      },
-      security: config.security,
-      wire: config.wire,
-      keepServer: config.keepServer,
-      setElectronProc: (proc) => {
-        _electronProc = proc;
-      },
-      stopSignal: _stopCtl.signal,
-      // The update this boot judged, told what the window's start did.
-      window: !config.libraryMode && _appSlots.get(config)
-        ? updateWindow(
-          _dirs.data,
-          log,
-          _appSlots.get(config)!.window,
-          ownReplayArgs(),
-        )
-        : undefined,
-      setDiscoveryStop: (stop) => {
-        discoveryRef.stop = stop;
-      },
-      appLock,
-      log,
-    });
+  // Moved: boot-transport.ts.
+  function _startLifecycle(
+    ...a: StepArgs<typeof transportSteps._startLifecycle<S, A, E>>
+  ) {
+    return transportSteps._startLifecycle(ctx, ...a);
   }
 
   // Whatever was pending has booted far enough to SERVE. It is confirmed —
