@@ -68,6 +68,12 @@ jobs:
           # apps the tests start take the service-unit exit paths (143, no
           # in-place update handover). Tests model a shell: empty is unset.
           INVOCATION_ID: ""
+          # ~15,000 tests on a shared 2-core runner: each full run has shown
+          # one or two DIFFERENT timing flakes. A shard that fails only on
+          # named tests re-runs just those files once, serially; the job is
+          # green only if that re-run is, and the summary lists every file
+          # that "passed on retry". Local runs stay strict (unset).
+          AIO_TEST_RETRY_FAILED: "1"
         run: deno task test
       - name: Upload shard logs
         # Each shard's full output, so a red or slow run can be read file by

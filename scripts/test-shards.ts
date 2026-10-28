@@ -492,6 +492,18 @@ export function failures(log: string): string[] {
   );
 }
 
+/** The test files a shard's failures name (`name => ./file:line:col`), or
+ *  null when one of them names no file — such a failure is not re-run. Pure. */
+export function failedFiles(failed: readonly string[]): string[] | null {
+  const files = new Set<string>();
+  for (const f of failed) {
+    const m = f.match(/ => \.\/(.+?):\d+:\d+$/);
+    if (!m) return null;
+    files.add(m[1]!);
+  }
+  return files.size ? [...files] : null;
+}
+
 /** Shard `i` of `n`'s port range, "<first>-<last>": 20000–32767 split
  *  evenly (below the OS ephemeral range, so the OS never hands them out). */
 export function portSliceFor(i: number, n: number): string {
@@ -1358,15 +1370,17 @@ if (import.meta.main) {
       }/`,
   );
 
-  const results = await runLimited(
-    shards.map((list, i) => async () => {
+  // One shard's run of `list`. `tag` names a re-run's log beside the first
+  // (`0.retry.log`), so the failed attempt stays readable.
+  const runShard = (list: string[], i: number, tag = "") =>
+    (async () => {
       const home = join(ROOT, ".aio-test-shards", String(i), ".aio-test-home");
       await Deno.remove(home, { recursive: true }).catch(() => {});
       await Deno.remove(join(dirname(home), "stores"), { recursive: true })
         .catch(() => {});
       await Deno.mkdir(home, { recursive: true });
-      const log = join(OUT, `${i}.log`);
-      const junit = join(OUT, `${i}.xml`);
+      const log = join(OUT, `${i}${tag}.log`);
+      const junit = join(OUT, `${i}${tag}.xml`);
       // Its OWN runtime dir — lock dirs, sockets, the registry — so a shard
       // never writes into the developer's real $XDG_RUNTIME_DIR, and shards
       // cannot see each other's locks. Short (`/tmp/xdg-shard-XXXX`): socket
@@ -1522,14 +1536,21 @@ if (import.meta.main) {
         times,
         left: left.length > 0 || swallowed.length > 0,
         unrun: unrun.length > 0,
+        // The files to re-run, when every failure is a named test failure
+        // (`name => ./file:line`); null when anything else failed the shard.
+        files: held || swallowed.length || unrun.length
+          ? null
+          : failedFiles(failed),
       };
       console.log(
-        `${
-          shardPassed(result) ? "✓" : "✗"
-        } shard ${i}  ${list.length} files  ${secs}s  ${summary}`,
+        `${shardPassed(result) ? "✓" : "✗"} shard ${i}${
+          tag ? " retry" : ""
+        }  ${list.length} files  ${secs}s  ${summary}`,
       );
       return result;
-    }),
+    })();
+  const results = await runLimited(
+    shards.map((list, i) => () => runShard(list, i)),
     n,
   );
 
@@ -1539,7 +1560,32 @@ if (import.meta.main) {
   await Deno.mkdir(join(ROOT, ".aio"), { recursive: true });
   await Deno.writeTextFile(TIMINGS, JSON.stringify(merged, null, 0));
 
-  const bad = results.filter((r) => !shardPassed(r));
+  // CI only (`AIO_TEST_RETRY_FAILED=1`): a shard that failed ONLY on named
+  // tests re-runs just those files, once, one shard after another (nothing
+  // else running), and counts as passed only if that re-run is green. The
+  // files that passed on retry are printed — never hidden. A local run keeps
+  // the strict verdict.
+  const flaky: string[] = [];
+  const retried = new Set<number>();
+  if (Deno.env.get("AIO_TEST_RETRY_FAILED") === "1") {
+    for (const [k, r] of results.entries()) {
+      if (shardPassed(r) || !r.files?.length) continue;
+      console.log(
+        `\n↻ shard ${r.i}: re-running its ${r.files.length} failed file(s) ` +
+          `once, serially: ${r.files.join(", ")}`,
+      );
+      const again = await runShard(r.files, r.i, ".retry");
+      if (shardPassed(again)) flaky.push(...r.files), retried.add(r.i);
+      else results[k] = again;
+    }
+  }
+  if (flaky.length > 0) {
+    console.log(
+      `\n⚠ passed on retry (failed once in the full run, then passed alone): ` +
+        flaky.join(", "),
+    );
+  }
+  const bad = results.filter((r) => !shardPassed(r) && !retried.has(r.i));
   const wall = Math.round((performance.now() - started) / 1000);
   const storeWrites = storeChanges(storesBefore, snapshotStores(storeDirs));
   if (storeWrites.length > 0) {
@@ -1598,7 +1644,13 @@ if (import.meta.main) {
     bad.length === 0 && storeWrites.length === 0 && strays.length === 0 &&
     rootLeaks.length === 0
   ) {
-    console.log(`\n✓ all ${shards.length} shards passed in ${wall}s`);
+    console.log(
+      `\n✓ all ${shards.length} shards passed in ${wall}s${
+        flaky.length
+          ? ` (${flaky.length} file(s) passed on retry, listed above)`
+          : ""
+      }`,
+    );
     Deno.exit(0);
   }
   if (bad.length > 0) {
