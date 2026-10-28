@@ -76,6 +76,17 @@ function burnedSince(a: Map<string, number>, tid: string): number {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Poll `done` every 50 ms until it holds or `ms` pass; answers whether it
+ *  held. The wait ends on the condition, not on the clock. */
+async function until(done: () => boolean, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (!done()) {
+    if (Date.now() >= deadline) return false;
+    await sleep(50);
+  }
+  return true;
+}
+
 /** A size-1 pool whose worker is up: a cold worker can still be loading at
  *  the cancel, which is not the case under test. */
 async function warmPool() {
@@ -91,25 +102,33 @@ async function warmPool() {
 
 Deno.test("blocking: cancelling a task inside a sync loop warns that its thread keeps running", async () => {
   const pool = await warmPool();
+  let tid: string | null = null;
   try {
     let burned: number | null = null;
     const logs = await withLogs(async () => {
+      // 3 s of wall time: under a loaded 2-core CI runner the surviving
+      // thread only gets a share of a core, so it needs room to SHOW it runs.
       const p = pool.run("crunch", () => {
-        const end = performance.now() + 1500;
+        const end = performance.now() + 3000;
         while (performance.now() < end) { /* crunch */ }
         return "done";
       });
       const s0 = threadCpu();
       await sleep(300);
-      const tid = s0 && busiest(s0, threadCpu()!, pool.mine);
+      tid = s0 && busiest(s0, threadCpu()!, pool.mine);
       assertEquals(pool.cancel("crunch"), true);
       const c0 = threadCpu();
       assertEquals(
         await p.catch((e) => e.message),
         "blocking task 'crunch' cancelled",
       );
-      await sleep(400);
-      if (c0 !== null) burned = burnedSince(c0, tid!);
+      // Until the cancelled thread has burned more than 0.25 CPU-s since the
+      // cancel — the claim — or its loop's own 3 s are over. A fixed 400 ms
+      // window measured 0.25 s exactly on a busy runner: the thread was
+      // running, just not on a whole core.
+      if (c0 !== null) {
+        await until(() => (burned = burnedSince(c0, tid!)) > 0.25, 3_000);
+      }
     });
     const warn = logs.filter((l) => l.includes("cannot interrupt"));
     assertEquals(warn.length, 1, logs.join("\n"));
@@ -121,7 +140,10 @@ Deno.test("blocking: cancelling a task inside a sync loop warns that its thread 
   } finally {
     await pool.dispose();
   }
-  await sleep(1300); // let the surviving loop end before the next test
+  // Let the surviving loop end before the next test: its thread leaves
+  // /proc/self/task when the loop returns (bounded: the loop is 3 s of wall).
+  if (tid) await until(() => !threadCpu()?.has(tid!), 4_000);
+  else await sleep(3000);
 });
 
 Deno.test("blocking: a task that yields between chunks stops at cancel, with no warning", async () => {

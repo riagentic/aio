@@ -27,18 +27,35 @@ import { browserHomeEnv } from "../src/testing/chromium.ts";
 
 const BROWSER = findBrowser();
 
+/** Poll `fn` until it answers. With `child`, the wait lasts as long as the
+ *  child lives — its exit fails at once, with its code — and `timeoutMs` only
+ *  bounds a child that is alive but never answers. A fixed 30 s was missed by
+ *  a cold headless start on a loaded 2-core CI runner (4 shards beside it):
+ *  slow, not hung. */
 async function waitFor<T>(
   what: string,
   fn: () => Promise<T | null | undefined>,
-  timeoutMs = 30_000,
+  { child, timeoutMs = 30_000 }: {
+    child?: Deno.ChildProcess;
+    timeoutMs?: number;
+  } = {},
 ): Promise<T> {
+  let exited: Deno.CommandStatus | null = null;
+  child?.status.then((s) => exited = s, () => {});
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const v = await fn().catch(() => null);
     if (v !== null && v !== undefined) return v;
+    if (exited) {
+      throw new Error(
+        `${what}: the process exited (code ${
+          (exited as Deno.CommandStatus).code
+        }) before it answered`,
+      );
+    }
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(`timeout waiting for ${what}`);
+  throw new Error(`timeout waiting for ${what} (${timeoutMs} ms)`);
 }
 
 /** id → markup. `fill` = a button whose fill must survive every state. */
@@ -103,7 +120,7 @@ Deno.test({
         const targets = await (await fetch(`http://127.0.0.1:${p}/json`))
           .json() as { type: string; webSocketDebuggerUrl: string }[];
         return targets.find((t) => t.type === "page")?.webSocketDebuggerUrl;
-      });
+      }, { child: browser, timeoutMs: 180_000 });
       cdp = await cdpConnect(wsUrl);
       const c = cdp;
       const js = async <T>(expression: string): Promise<T> => {
