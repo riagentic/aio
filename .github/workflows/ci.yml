@@ -43,6 +43,14 @@ jobs:
         run: deno task lint:aio
       - name: Type check (full tree)
         run: deno task check
+      - name: Test environment
+        # A display for the window tests (Electron stand-ins refuse to open a
+        # window with no DISPLAY), and a local `main` branch: a PR checkout is
+        # a detached merge commit, and the version-pin tests resolve `main`.
+        run: |
+          command -v Xvfb >/dev/null || sudo apt-get install -y xvfb
+          Xvfb :99 -screen 0 1920x1200x24 >/dev/null 2>&1 &
+          git branch main origin/main 2>/dev/null || true
       - name: Test
         # The shard runner keeps 4 cores free by default (for a dev machine)
         # and picks usable/2 shards: on a 4-core runner that is ONE shard, and
@@ -53,6 +61,13 @@ jobs:
         env:
           AIO_TEST_FREE_CORES: "1"
           AIO_TEST_SHARDS: "4"
+          DISPLAY: ":99"
+          AIO_TEST_DISPLAY: ":99"
+          # The runner is itself a systemd service and hands its INVOCATION_ID
+          # to every step: aio reads that as "under a service manager" and the
+          # apps the tests start take the service-unit exit paths (143, no
+          # in-place update handover). Tests model a shell: empty is unset.
+          INVOCATION_ID: ""
         run: deno task test
       - name: Upload shard logs
         # Each shard's full output, so a red or slow run can be read file by
