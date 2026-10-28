@@ -5679,9 +5679,9 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "an acknowledged sync op whose commit line the journal lost is taken for one caught in flight, and a build that refuses it deletes the row every peer still holds",
-    file: "src/server/aio.ts",
-    find: '          if (p === "in-flight" && r.settled !== 1) {',
-    replace: '          if (p === "in-flight") {',
+    file: "src/server/boot-storage.ts",
+    find: '        if (p === "in-flight" && r.settled !== 1) {',
+    replace: '        if (p === "in-flight") {',
     test: "tests/sync-op-killed-before-settle.test.ts",
     filter:
       "an ACKNOWLEDGED op whose commit line the journal lost is never removed as in flight (dev: the boot refuses)",

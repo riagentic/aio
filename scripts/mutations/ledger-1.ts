@@ -1277,9 +1277,9 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the store's reactions stamp stops counting as 'this build's data' — once the journal compacts empty, every boot after the first 1.0.10 boot over 1.0.9 data warns 'last run by an older aio build' again, forever",
-    file: "src/server/aio.ts",
-    find: "    const ours = await reactionsFormat(asyncDb) !== undefined ||",
-    replace: "    const ours = await reactionsFormat(asyncDb) === -1 ||",
+    file: "src/server/boot-storage.ts",
+    find: "  const ours = await reactionsFormat(asyncDb) !== undefined ||",
+    replace: "  const ours = await reactionsFormat(asyncDb) === -1 ||",
     test: "tests/journal-upgrade-compat.test.ts",
     filter:
       "journal upgrade: the store's stamp outlives the journal — once its stamped lines are compacted away, the next boot is not an upgrade again",
@@ -1287,11 +1287,11 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "an op the boot NAMED as uncovered is never committed — every later boot names the same listensTo listeners again ('cannot tell whether …'), so the one-time upgrade warning becomes permanent noise",
-    file: "src/server/aio.ts",
+    file: "src/server/boot-storage.ts",
     find:
-      "          if (_marking) _unmarked.push({ cell: c, id: r.id, ts: r.server_ts });",
+      "        if (ctx._marking) {\n          ctx._unmarked.push({ cell: c, id: r.id, ts: r.server_ts });",
     replace:
-      "          if (!_marking) _unmarked.push({ cell: c, id: r.id, ts: r.server_ts });",
+      "        if (!ctx._marking) {\n          ctx._unmarked.push({ cell: c, id: r.id, ts: r.server_ts });",
     test: "tests/journal-upgrade-compat.test.ts",
     filter:
       "journal upgrade (clean-stop): v1.0.9 data — nothing re-derived, nothing counted twice, every listener that may lack reactions named — twice",
@@ -1826,11 +1826,11 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "an op the boot NAMED is never committed (before-fold upgrade) — every later boot names the same listeners again, forever",
-    file: "src/server/aio.ts",
+    file: "src/server/boot-storage.ts",
     find:
-      "          if (_marking) _unmarked.push({ cell: c, id: r.id, ts: r.server_ts });",
+      "        if (ctx._marking) {\n          ctx._unmarked.push({ cell: c, id: r.id, ts: r.server_ts });",
     replace:
-      "          if (!_marking) _unmarked.push({ cell: c, id: r.id, ts: r.server_ts });",
+      "        if (!ctx._marking) {\n          ctx._unmarked.push({ cell: c, id: r.id, ts: r.server_ts });",
     test: "tests/journal-upgrade-compat.test.ts",
     filter:
       "journal upgrade (before-fold): v1.0.9 data — nothing re-derived, nothing counted twice, every listener that may lack reactions named — twice",
