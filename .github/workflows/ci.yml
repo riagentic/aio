@@ -23,7 +23,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,9 +44,23 @@ jobs:
       - name: Type check (full tree)
         run: deno task check
       - name: Test
-        # The shard runner keeps 4 cores free by default (for a dev machine);
-        # on a 4-core runner that left one shard and the suite outran the
-        # timeout. CI has nothing else to protect, so use every core.
+        # The shard runner keeps 4 cores free by default (for a dev machine)
+        # and picks usable/2 shards: on a 4-core runner that is ONE shard, and
+        # all ~2,900 files ran in series past the job timeout (it was slow,
+        # not hung: the runner's 5-minute no-output watch never fired). CI has
+        # nothing else to protect: keep one core for the OS, and run 4 shards,
+        # since most test time is spent waiting on child processes.
         env:
-          AIO_TEST_FREE_CORES: "0"
+          AIO_TEST_FREE_CORES: "1"
+          AIO_TEST_SHARDS: "4"
         run: deno task test
+      - name: Upload shard logs
+        # Each shard's full output, so a red or slow run can be read file by
+        # file (the runner only prints a summary).
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-shard-logs
+          path: .aio/test-shards/
+          if-no-files-found: ignore
+          retention-days: 7
