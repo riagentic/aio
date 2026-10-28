@@ -17,6 +17,7 @@ import {
   initClientLog,
   writeClientLog,
 } from "../src/server/client-log.ts";
+import { bootSource } from "./boot-source.ts";
 
 /** Busy-loop for `ms` — the shape of work that `await` cannot rescue. */
 function burn(ms: number): number {
@@ -126,11 +127,11 @@ Deno.test("an app's perfBudget merges over the dev default per field", async () 
   );
   assertEquals(perfBudgetFor({ methods }, true), { methods }, "prod: as-is");
   assertEquals(perfBudgetFor(undefined, true), undefined);
-  const src = await Deno.readTextFile(
-    new URL("../src/server/aio.ts", import.meta.url),
-  );
+  // aio.ts and the boot steps it calls out to (boot-*.ts).
+  const src = await bootSource();
   assert(
-    /perfBudget: perfBudgetFor\(config\.perfBudget, prod\)/.test(src),
+    /perfBudget: perfBudgetFor\(\s*(?:ctx\.)?config\.perfBudget,\s*(?:ctx\.)?prod,?\s*\)/
+      .test(src),
     "aio.ts wires the app budget through perfBudgetFor",
   );
 });

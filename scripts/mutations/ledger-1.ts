@@ -1241,9 +1241,9 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the same notify() moved into a `worker: true` cell reaches every other user's screen and nothing says so — only the dispatch loop's router knew the notice",
-    file: "src/server/aio.ts",
-    find: "              _workerUserCalls > 0,",
-    replace: "              _workerUserCalls < 0,",
+    file: "src/server/boot-dispatch.ts",
+    find: "            ctx._workerUserCalls > 0,",
+    replace: "            ctx._workerUserCalls < 0,",
     test: "tests/worker-notify-per-user-notice.test.ts",
     filter:
       "notify from a REAL worker cell: raised in a signed-in user's call → delivered app-wide, and named once",
@@ -1267,9 +1267,9 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a sync op its cell's validate REFUSED gets a journal commit like an accepted one — a kill before the row's delete makes the next boot keep it as accepted and ack its author's resend, for an op that is in no state",
-    file: "src/server/aio.ts",
-    find: "    if (hasRejectionFor(action, c)) return;",
-    replace: '    if (hasRejectionFor(action, "")) return;',
+    file: "src/server/boot-dispatch.ts",
+    find: "  if (hasRejectionFor(action, c)) return;",
+    replace: '  if (hasRejectionFor(action, "")) return;',
     test: "tests/sync-op-killed-at-settle.test.ts",
     filter:
       "sync op REFUSED by validate, killed at its delete (journal 1): the next boot removes it, and the resend is refused — never acked",
@@ -3341,9 +3341,9 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "snapshot load leaves sync cells undurable, so a restart brings back the writes the load undid",
-    file: "src/server/aio.ts",
-    find: "        _jumpSyncCells(before, s);",
-    replace: "        void 0;",
+    file: "src/server/boot-dispatch.ts",
+    find: "      ctx._jumpSyncCells(before, s);",
+    replace: "      void 0;",
     test: "tests/snapshot-load-sync-cell-durable.test.ts",
     filter:
       "snapshot load: a sync:true cell's loaded state survives a restart (journal off, close, api)",
@@ -6784,9 +6784,9 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the worker pool is not handed the app's error sink so worker cell errors only reach a log line",
-    file: "src/server/aio.ts",
-    find: "    reportError: (err) => reportAioError(err, _reportOpts),",
-    replace: "    reportError: undefined,",
+    file: "src/server/boot-dispatch.ts",
+    find: "  reportError: (err) => reportAioError(err, ctx._reportOpts),",
+    replace: "  reportError: undefined,",
     test: "tests/worker-oninit-failures.test.ts",
     filter:
       "worker onInit: a REAL worker survives a rejecting onInit and reports every cell error",
@@ -7157,10 +7157,10 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a failed save of a nested call a shared queue ran from another call's continuation is owed only to that other call — the author is acked as saved",
-    file: "src/server/aio.ts",
+    file: "src/server/boot-dispatch.ts",
     find:
-      "      const calls = _sureOf.has(a) ? [call] : new Set([call, ..._openCalls]);",
-    replace: "      const calls = [call];",
+      "    const calls = ctx._sureOf.has(a)\n      ? [call]\n      : new Set([call, ...ctx._openCalls]);",
+    replace: "    const calls = [call];",
     test: "tests/journal-owed-saves-whose-write.test.ts",
     filter:
       "owed saves: under any interleaving, no call whose write's save failed is told it was saved — a write, or a nested call, a shared queue runs from another call's continuation included",

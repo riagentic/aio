@@ -18,8 +18,9 @@
 // discriminating when `deepFreeze` started skipping typed arrays to match
 // Immer, which is itself a dev==prod fix.) What IS checkable is that the owner's
 // decision reaches the worker and nothing captures it too early.
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { bootSource } from "./boot-source.ts";
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 const read = (p: string) => Deno.readTextFileSync(join(REPO, p));
@@ -40,13 +41,14 @@ Deno.test("dispatch reads freezeState at commit time, not at construction", () =
   );
 });
 
-Deno.test("the owner's resolved freezeState reaches a worker", () => {
+Deno.test("the owner's resolved freezeState reaches a worker", async () => {
   // One decider: aio.ts computes `config.freezeState ?? !prod` once, prints it
   // on the boot line, and hands THAT to the pool — rather than each isolate
   // recomputing a rule they could disagree about.
-  assertStringIncludes(
-    read("src/server/aio.ts"),
-    "freezeState: freezeEnabled",
+  // aio.ts and the boot steps it calls out to (boot-*.ts).
+  assertMatch(
+    await bootSource(),
+    /freezeState: (?:ctx\.)?freezeEnabled\b/,
     "the worker pool must be given the same value the boot line prints",
   );
   assertStringIncludes(

@@ -38,6 +38,7 @@ import {
 } from "@std/assert";
 import { join } from "@std/path";
 import { codeMask } from "../src/diagnostics/code-mask.ts";
+import { bootSource } from "./boot-source.ts";
 import { PERSIST_REFUSED } from "../src/server/server-trojan.ts";
 import { createServer } from "../src/server/server.ts";
 import { freePort } from "../src/testing/server-test.ts";
@@ -77,6 +78,8 @@ function stripComments(src: string): string {
   return out.join("");
 }
 const code = async (p: string) => stripComments(await read(p));
+// aio.ts and the boot steps it calls out to (boot-*.ts) — see boot-source.ts.
+const boot = async () => stripComments(await bootSource());
 
 /** The body of `function name(…)` — its block, braces counted on CODE
  *  offsets only, so a `{` inside a message string cannot unbalance it. The
@@ -130,7 +133,7 @@ const CATALOG: Row[] = [
       // aio.ts has TWO flushes: the shutdown one (logs the verdict — its
       // own row below) and the trojan one, which is the door this row is
       // about and the one that rethrows it.
-      const aio = await code("src/server/aio.ts");
+      const aio = await boot();
       const flushes = [...aio.matchAll(/flushPersist: async \(\) => \{/g)]
         .map((m) => aio.slice(m.index!, m.index! + 900));
       assertEquals(
@@ -140,7 +143,7 @@ const CATALOG: Row[] = [
       );
       assert(
         flushes.some((b) =>
-          /const failed = persistence\.lastCycleError\(\);\s*if \(failed\) throw failed;/
+          /const failed = (?:ctx\.)?persistence\.lastCycleError\(\);\s*if \(failed\) throw failed;/
             .test(b)
         ),
         "the trojan flush must rethrow lastCycleError()",
@@ -176,10 +179,10 @@ const CATALOG: Row[] = [
       assertMatch(decision, /"degraded"/);
       // One value, every door: the trojan flush and health read the SAME
       // getter (aio.ts wires both from `persistence.lastCycleError`).
-      const aio = await code("src/server/aio.ts");
+      const aio = await boot();
       assertMatch(
         aio,
-        /lastPersistError: \(\) => persistence\.lastCycleError\(\)/,
+        /lastPersistError: \(\) => (?:ctx\.)?persistence\.lastCycleError\(\)/,
       );
     },
   },
@@ -315,27 +318,27 @@ const CATALOG: Row[] = [
     verdict:
       "an immediate flush (its refusal → PERSIST_ERROR, lastCycleError) + one WARN per episode + degraded(journal) → health",
     check: async () => {
-      const aio = await code("src/server/aio.ts");
+      const aio = await boot();
       const body = fnBody(aio, "_journalAppend");
       // Not a PERSIST_ERROR of its own: the flush below saves the change, and
       // only ITS refusal is one (persistence reports it, with the verdict).
       assert(!/createAioError\("PERSIST_ERROR"/.test(body), body);
-      assertMatch(body, /_journalSaid\.refused\(e\)/);
+      assertMatch(body, /(?:ctx\.)?_journalSaid\.refused\(e\)/);
       // The compensating save is a parameter (a sync cell's fold closes the
       // gap, not a KV flush) — its DEFAULT is still the persist flush, and
       // the body still runs it, owed to the caller (`_saveNow`).
       assertMatch(
         aio,
-        /function _journalAppend\([^]*?save: SaveNow = \{ clock: "kv" \},?\s*\)/,
+        /function _journalAppend(?:<S, A, E>)?\([^]*?save: SaveNow = \{ clock: "kv" \},?\s*\)/,
       );
-      assertMatch(body, /_saveNow\(save\)/);
-      assertMatch(body, /_journalSaid\.landed\(\)/);
-      assertMatch(aio, /health: _journalHealth/);
+      assertMatch(body, /(?:ctx\.)?_saveNow\(save\)/);
+      assertMatch(body, /(?:ctx\.)?_journalSaid\.landed\(\)/);
+      assertMatch(aio, /health: (?:ctx\.)?_journalHealth/);
       // The compensating save's rejection handler is LOUD — flushPersist
       // never rejects by contract, so a rejection there is a broken contract
       // and the one thing it must not be is `.catch(() => {})`.
       const saveNow = fnBody(aio, "_saveNow");
-      assertMatch(saveNow, /persistence\.flushPersist\(\)/);
+      assertMatch(saveNow, /(?:ctx\.)?persistence\.flushPersist\(\)/);
       for (const b of [body, saveNow]) {
         assert(
           !/\.catch\(\(\) => \{\}\)/.test(b),
@@ -347,7 +350,10 @@ const CATALOG: Row[] = [
         aio,
         /_journalKey = `journal:\$\{resolveAppId\(config\.appId\)\}`/,
       );
-      assertMatch(aio, /degraded\(_journalKey, \{\s*after: 1,?\s*\}\)/);
+      assertMatch(
+        aio,
+        /degraded\((?:ctx\.)?_journalKey, \{\s*after: 1,?\s*\}\)/,
+      );
     },
   },
   {
@@ -356,10 +362,13 @@ const CATALOG: Row[] = [
     verdict:
       "lastCycleError() → log.error (the exit code is NOT it — see the report)",
     check: async () => {
-      const aio = await code("src/server/aio.ts");
+      const aio = await boot();
       const at = aio.indexOf("createShutdownOrchestrator({");
       const flush = aio.slice(at, at + 1600);
-      assertMatch(flush, /const failed = persistence\.lastCycleError\(\);/);
+      assertMatch(
+        flush,
+        /const failed = (?:ctx\.)?persistence\.lastCycleError\(\);/,
+      );
       assertMatch(flush, /FINAL persist was refused/);
     },
   },
