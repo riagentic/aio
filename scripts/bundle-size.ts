@@ -199,8 +199,33 @@ async function bundleAirAlone(): Promise<Uint8Array<ArrayBuffer>> {
         `function App() { return <div class="x">hi</div>; }\n` +
         `mount(document.body, App);\n`,
     );
+    // `src/state-core.ts` imports the bare specifier "immer". esbuild resolves
+    // bare specifiers through node_modules only, and a fresh clone (CI) has
+    // none — the measurement then failed with `Could not resolve "immer"` and
+    // passed only on machines with a leftover node_modules. Materialize the
+    // same pinned version beside the probe and point esbuild at it.
+    await Deno.writeTextFile(
+      `${dir}/deno.json`,
+      JSON.stringify({
+        nodeModulesDir: "auto",
+        imports: { "immer": "npm:immer@10.2.0" },
+      }),
+    );
+    const install = await new Deno.Command(Deno.execPath(), {
+      args: ["install"],
+      cwd: dir,
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    if (install.code !== 0) {
+      throw new Error(
+        "bundle-size: could not install immer for the AIR probe.\n" +
+          new TextDecoder().decode(install.stderr).slice(-2000),
+      );
+    }
     const r = await esbuild.build({
       entryPoints: [`${dir}/entry.tsx`],
+      nodePaths: [`${dir}/node_modules`],
       bundle: true,
       minify: true,
       format: "esm",

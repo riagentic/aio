@@ -5,6 +5,7 @@ import { join } from "@std/path";
 import {
   cpuFence,
   expandDirs,
+  failedFiles,
   failures,
   followShard,
   freeCores,
@@ -142,6 +143,24 @@ Deno.test("failures + summaryLine: the shard's OWN closing report, never a child
   ]);
   assertEquals(summaryLine(log, 1), "FAILED | 40 passed | 2 failed (61m)");
   assertEquals(summaryLine("nothing\n", 3), "exit 3");
+});
+
+Deno.test("failedFiles: the files a re-run takes — only when every failure names one", () => {
+  assertEquals(
+    failedFiles([
+      "a case => ./tests/a.test.ts:70:6",
+      "another case => ./tests/a.test.ts:92:6",
+      "b case => ./tests/sub/b.test.ts:1:1",
+    ]),
+    ["tests/a.test.ts", "tests/sub/b.test.ts"],
+  );
+  // A failure with no file (a module that did not load, a held lock dir) is
+  // not a flake to retry: the shard stays red.
+  assertEquals(
+    failedFiles(["a case => ./tests/a.test.ts:70:6", "error: boom"]),
+    null,
+  );
+  assertEquals(failedFiles([]), null);
 });
 
 Deno.test("failures: a shard where nothing ran reports deno's error line", () => {
