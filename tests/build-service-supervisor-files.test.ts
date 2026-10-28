@@ -129,7 +129,10 @@ async function runLoop(
         out += dec.decode(value);
         if (opts.termAfterLine && !sent && out.includes(opts.termAfterLine)) {
           sent = true;
-          p.kill("SIGTERM");
+          // Not in the same instant: the app can print before the loop has
+          // run `p=$!` (seen on a loaded CI runner), and a TERM in that gap
+          // finds no pid to pass on. A bootout comes long after a start.
+          setTimeout(() => p.kill("SIGTERM"), 300);
         }
       }
       await p.stderr.cancel();

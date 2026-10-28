@@ -293,7 +293,9 @@ const pwsh = (() => {
 Deno.test({
   name:
     "window place: the PowerShell copy gives the TS rule's origin on every case (run where PowerShell is)",
-  ignore: !pwsh,
+  // System.Windows.Forms is Windows-only: a PowerShell 7 on Linux (a CI
+  // runner ships one) cannot load the assembly the copy runs on.
+  ignore: !pwsh || Deno.build.os !== "windows",
   async fn() {
     const rect = (r: Rect) =>
       `(New-Object System.Drawing.Rectangle(${r.x}, ${r.y}, ${r.width}, ${r.height}))`;

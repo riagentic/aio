@@ -29,7 +29,11 @@ async function answers(real: boolean): Promise<Record<string, unknown>> {
   const errs: string[] = [];
   await using srv = await testServer({
     cells: [wiAsync, wiThrow, wiReject],
-    onError: (e) => void errs.push(`${e.code}: ${e.message}`),
+    // The perf budget is not what this file asks about, and a loaded runner
+    // can push `boom`'s sync prefix past 5 ms (5.004 ms, 5.6 ms on CI): the
+    // budget's own tests judge it; here only the in-isolate errors count.
+    onError: (e) =>
+      void (e.code !== "BUDGET_EFFECT" && errs.push(`${e.code}: ${e.message}`)),
     ...(real ? { workers: "real" as const, workerEntry: ENTRY } : {}),
   });
   const boots = () =>

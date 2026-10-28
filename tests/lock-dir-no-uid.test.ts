@@ -51,7 +51,10 @@ Deno.chmodSync(swap, 0o755);
 out.swap = m._prepareLockDir(swap, {
   chmod: (p, to) => {
     Deno.chmodSync(p, to);
-    Deno.removeSync(p);
+    // Moved aside, not removed: a removed directory's inode is free, and the
+    // filesystem may hand the SAME number to the one made next (ext4 and
+    // overlayfs do), which is then indistinguishable by identity.
+    Deno.renameSync(p, p + ".judged");
     Deno.mkdirSync(p, { mode: 0o700 });
   },
 });

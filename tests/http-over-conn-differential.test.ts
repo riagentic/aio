@@ -55,8 +55,9 @@ function app() {
   /** What the handler was TOLD, per route: `abort` events and stream cancels. */
   const counts: Counts = {};
   const bump = (k: string) => counts[k] = (counts[k] ?? 0) + 1;
-  /** Body bytes the `/count` route has been handed so far. */
-  const progress = { bytes: 0 };
+  /** Body bytes the `/count` route has been handed so far, and how many
+   *  `/slow` requests the handler has been handed. */
+  const progress = { bytes: 0, slow: 0 };
   const handler = async (
     req: Request,
     info: { remoteAddr: Deno.Addr; completed: Promise<void> },
@@ -187,6 +188,7 @@ function app() {
         for (let i = 0; i < 100; i++) await null;
         return new Response("hops");
       case "/slow":
+        progress.slow++;
         await new Promise((r) =>
           setTimeout(r, Number(u.searchParams.get("d")))
         );
@@ -360,7 +362,7 @@ type Srv = {
   kind: Kind;
   path: string;
   counts: Counts;
-  progress: { bytes: number };
+  progress: { bytes: number; slow: number };
   close(): Promise<void>;
 };
 
@@ -1909,7 +1911,11 @@ differential(
             "GET /299 HTTP/1.1\r\nHost: localhost\r\n\r\n".repeat(2),
           3000,
         );
-        await new Promise((r) => setTimeout(r, 50));
+        // Closed once the slow request is IN the handler — a fixed 50 ms was
+        // sometimes before it, on a loaded CI runner, and then nothing ran.
+        for (let i = 0; i < 300 && s.progress.slow === 0; i++) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
         await s.close();
         got.push({ ...(await client), ran: Object.keys(s.counts).sort() });
       }
