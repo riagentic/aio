@@ -23,7 +23,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,4 +44,9 @@ jobs:
       - name: Type check (full tree)
         run: deno task check
       - name: Test
+        # The shard runner keeps 4 cores free by default (for a dev machine);
+        # on a 4-core runner that left one shard and the suite outran the
+        # timeout. CI has nothing else to protect, so use every core.
+        env:
+          AIO_TEST_FREE_CORES: "0"
         run: deno task test
