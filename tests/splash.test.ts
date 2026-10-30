@@ -595,6 +595,24 @@ Deno.test("splash helpers: Linux says in ONE line what was drawn — yad, zenity
   for (const x of [z, n]) assert(!x.note.includes("\n"));
 });
 
+/** An X display number with no server: no socket, no lock file. */
+function unservedDisplay(): string {
+  const taken = (p: string) => {
+    try {
+      Deno.statSync(p);
+      return true;
+    } catch {
+      return false; // aio-ok: absent is the answer
+    }
+  };
+  for (let n = 4242; n < 5242; n++) {
+    if (!taken(`/tmp/.X11-unix/X${n}`) && !taken(`/tmp/.X${n}-lock`)) {
+      return `:${n}`;
+    }
+  }
+  throw new Error("no free X display number in :4242–:5241");
+}
+
 Deno.test({
   name:
     "splash helpers: Linux without yad — a fake zenity is handed a text-only pulsing window, and the text as it changes",
@@ -604,6 +622,7 @@ Deno.test({
     const old = {
       PATH: Deno.env.get("PATH"),
       DISPLAY: Deno.env.get("DISPLAY"),
+      WAYLAND_DISPLAY: Deno.env.get("WAYLAND_DISPLAY"),
     };
     try {
       const bin = join(tmp, "zenity");
@@ -614,8 +633,11 @@ Deno.test({
       await Deno.chmod(bin, 0o755);
       // ONLY the fake: a box with yad installed (in /usr/bin) would pick it.
       Deno.env.set("PATH", tmp);
-      // No display there: GTK cannot draw, so the helpers are asked.
-      Deno.env.set("DISPLAY", ":99");
+      // A display nobody serves, and no Wayland: GTK cannot draw, so the
+      // helpers are asked. Not a fixed ":99" — CI's Xvfb lives there, and
+      // GTK drew on it. The number is the first with no X socket or lock.
+      Deno.env.delete("WAYLAND_DISPLAY");
+      Deno.env.set("DISPLAY", unservedDisplay());
       const notes: string[] = [];
       const s = spec({ image: "assets/splash.png", text: "Starting {title}…" });
       const opener = await splashBackend(s, { log: (m) => notes.push(m) });

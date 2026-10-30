@@ -741,9 +741,15 @@ Deno.test("older builds: the look is said, naming what it took — and taken aga
     // them again, by their exact names.
     Deno.removeSync(ownedPath(data));
     const lost = await boot(where, data, "looked for");
-    assertEquals(looks(lost), [
-      `${head}took over notes.old-0.1.0, notes.old-0.1.1`,
-    ]);
+    // Both names, in the order the directory listed them (readdir order is
+    // the filesystem's: a CI runner listed 0.1.1 first).
+    assertEquals(looks(lost).length, 1, looks(lost).join(" | "));
+    const tookLost = looks(lost)[0]!;
+    assert(tookLost.startsWith(`${head}took over `), tookLost);
+    assertEquals(
+      tookLost.slice(`${head}took over `.length).split(", ").toSorted(),
+      ["notes.old-0.1.0", "notes.old-0.1.1"],
+    );
     assertEquals(names(root), ["notes", "notes.old-0.1.0", "notes.old-0.1.1"]);
   } finally {
     await dropTempDir(root);

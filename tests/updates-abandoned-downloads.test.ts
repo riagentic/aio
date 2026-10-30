@@ -247,7 +247,8 @@ Deno.test("downloads: a download of ours with other bytes is moved aside, whole 
     assertEquals(adoptOlder(w.data, w.install, () => true), []);
     const swept = await sweepOwned(w.data, w.install);
     assertEquals(swept.removed, ["notes.zip-0.1.6"]);
-    assertEquals(swept.left, [
+    // `left` is in directory-listing order, which no file system promises.
+    assertEquals([...swept.left].sort(), [
       "notes.zip-0.1.6~damaged",
       "notes.zip-0.1.6~damaged-2",
     ]);

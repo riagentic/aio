@@ -9,6 +9,7 @@ import { _resetInstanceVerify } from "../src/am/am-http.ts";
 import { resolveAmAppId } from "../src/am/am-utils.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { aioTestRoot } from "../src/testing/test-strict.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
 
 const APP = "am-trigger-mod-platform-app";
@@ -81,10 +82,22 @@ Deno.test("am trigger: a client of unknown platform takes am's own OS", async ()
     // created in the repo root on Linux (it reappeared on every suite run).
     // Point them at a managed temp dir for the length of the stub.
     const winTemp = os === "windows" ? await tempDir("am-trigger-win-") : null;
-    const prev = { TEMP: Deno.env.get("TEMP"), TMP: Deno.env.get("TMP") };
+    const prev = {
+      TEMP: Deno.env.get("TEMP"),
+      TMP: Deno.env.get("TMP"),
+      AIO_TEST_ROOT: Deno.env.get("AIO_TEST_ROOT"),
+    };
     if (winTemp) {
       Deno.env.set("TEMP", winTemp);
       Deno.env.set("TMP", winTemp);
+    }
+    // The stub also sends the test root down the Windows branch: on a POSIX
+    // host `$HOME\tmp\aio` is one odd name under `/home`, which mkdir is
+    // refused (PermissionDenied). Pin the root this host really uses.
+    if (
+      os === "windows" && real.value.os !== "windows" && !prev.AIO_TEST_ROOT
+    ) {
+      Deno.env.set("AIO_TEST_ROOT", aioTestRoot());
     }
     Object.defineProperty(Deno, "build", {
       ...real,

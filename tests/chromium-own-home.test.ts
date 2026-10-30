@@ -82,6 +82,12 @@ async function launchIn(
   }
 }
 
+/** The crash database a launch writes under its config home: the folder is
+ *  the browser's own name — `chromium`, or `google-chrome` (and its beta/dev
+ *  channels) where Google Chrome is the browser found (a CI runner's). */
+const CRASH_DB =
+  /^\.config\/(chromium|google-chrome[\w-]*)\/Crash Reports\/settings\.dat$/;
+
 Deno.test({
   ignore: !CHROME || !linux,
   name:
@@ -92,14 +98,14 @@ Deno.test({
       const own = await launchIn(home, true);
       assertEquals(own.left, [], "the browser wrote under HOME");
       assert(
-        own.ownHome.includes(".config/chromium/Crash Reports/settings.dat"),
+        own.ownHome.some((p) => CRASH_DB.test(p)),
         `the crash database is not in the profile's home: ${own.ownHome}`,
       );
       // The control: the SAME launch without the option is what writes there
       // — or the empty list above proves nothing about this Chromium.
       const plain = await launchIn(home, false);
       assert(
-        plain.left.includes(".config/chromium/Crash Reports/settings.dat"),
+        plain.left.some((p) => CRASH_DB.test(p)),
         `a plain launch left no crash database under HOME: ${plain.left}`,
       );
     } finally {

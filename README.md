@@ -15,6 +15,20 @@
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
+<p align="center">
+  🧪 2,902 test files · TypeScript on Deno · used from source via <code>am</code>, no package to install
+</p>
+
+<p align="center">
+  <img src="docs/img/theme.png" alt="the todo example in light and dark, styled entirely by aio's default theme" width="860">
+</p>
+
+<p align="center"><i>
+  <a href="examples/todo">examples/todo</a> — 3 files, no stylesheet.
+  Light and dark come from <a href="docs/ui/theme.md"><code>ui.theme</code></a>,
+  whose accent is derived from the app's own name.
+</i></p>
+
 ---
 
 ## ⚡ Start
@@ -104,16 +118,6 @@ Two files. `count` is persisted to SQLite, broadcast to every client as a delta,
 restored on restart, and drivable from a test — because it is state, and state
 is aio's whole job.
 
-<p align="center">
-  <img src="docs/img/theme.png" alt="the todo example in light and dark, styled entirely by aio's default theme" width="860">
-</p>
-
-<p align="center"><i>
-  <a href="examples/todo">examples/todo</a> — 3 files, no stylesheet.
-  Light and dark come from <a href="docs/ui/theme.md"><code>ui.theme</code></a>,
-  whose accent is derived from the app's own name.
-</i></p>
-
 ## 🧪 And its test, in full
 
 Components are semantic APIs, so a test needs no selectors, no DOM scraping and
@@ -177,16 +181,19 @@ and macOS specifics: [aio on Windows and macOS](docs/basics/windows-macos.md).
 
 The examples here are small on purpose; the apps built with aio so far are not.
 More than 20 apps across many categories — desktop tools, local AI and NLP
-front-ends, developer utilities, document viewers, web shops and trading
-software — run on aio today: public ones like
-[Claude Control](https://github.com/riagentic/cc), mdview, llama-master, spacy
-and fixable, and private ones such as a trading platform, a 3D CAD editor and an
-e-shop. Their bug reports shaped much of the framework.
+front-ends, developer utilities, document viewers — run on aio today. Public
+ones include [Claude Control](https://github.com/riagentic/cc),
+[Globe Today](https://github.com/riagentic/gt),
+[llama-master](https://github.com/riagentic/llama-master),
+[mdview](https://github.com/riagentic/mdview),
+[spacy](https://github.com/riagentic/spacy) and
+[fixable](https://github.com/riagentic/fixable);
+[aio-launcher](https://github.com/riagentic/aio-launcher) installs and updates
+16 of them from one window; each app is cloned from git and built on your
+machine. Their bug reports shaped much of the framework.
 
-To try the open-source ones, use
-[AIO APPS LAUNCHER](https://github.com/riagentic/aio-launcher): one window that
-installs, updates and opens them (Claude Control, mdview, llama-master, spacy,
-fixable and more). Each app is cloned from git and built on your machine.
+**Next:** aio v2, a full rewrite in Rust, is in development and will come as a
+separate repo. This repo is the TypeScript/Deno v1 line.
 
 ## 🎯 Honestly
 

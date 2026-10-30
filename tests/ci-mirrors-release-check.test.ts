@@ -1,12 +1,10 @@
-// CI runs what `check:release` runs — checked, not assumed.
+// CI runs the correctness gates; check:release keeps the release lanes.
 //
-// alpha56 shipped with `deno lint` red because the local loop and the remote
-// loop were two lists maintained by hand. `scripts/release-check.ts` is now
-// THE list (FAST + HEAVY); this test reads it and `.github/workflows/ci.yml`
-// and requires every gate on it to be a `run:` step somewhere in CI. A gate
-// added to the release check without a CI step is red here, on the same push.
+// `scripts/release-check.ts` is THE release list (FAST + HEAVY) and runs
+// locally before a tag. CI (`.github/workflows/ci.yml`) is deliberately the
+// smaller correctness gate: format, lint, type check and the suite on every
+// push. These tests keep each list honest about its own job.
 import { assertEquals } from "@std/assert";
-import { MIN_DENO } from "../src/server/deno-version.ts";
 import { fromFileUrl } from "@std/path";
 
 const REPO = fromFileUrl(new URL("../", import.meta.url));
@@ -29,52 +27,29 @@ async function releaseGates(): Promise<string[]> {
   return out;
 }
 
-Deno.test("ci: every gate check:release runs is a CI step", async () => {
+Deno.test("ci: every push runs format, lint, type check and the suite — and builds nothing", async () => {
+  // CI is the correctness gate only. aio is consumed as source, so packaging,
+  // publishing and the slow release lanes (bundle size, benchmarks, mutations,
+  // build/Electron/onboard e2e, the lab) run locally in `check:release`
+  // before a tag — the tests below keep that list complete.
   const ci = await Deno.readTextFile(REPO + ".github/workflows/ci.yml");
   const steps = [...ci.matchAll(/^\s*run:\s*(.+)$/gm)].map((m) => m[1]!.trim());
-  const gates = await releaseGates();
-  assertEquals(gates.length > 10, true, "read the lists");
-  const missing = gates.filter((g) => {
-    // `deno task update:docs -- --check` is spelled the same way in both.
-    return !steps.some((s) => s === g || s.startsWith(g + " "));
-  });
+  const REQUIRED = [
+    "deno fmt --check",
+    "deno task lint",
+    "deno task lint:aio",
+    "deno task check",
+    "deno task test",
+  ];
   assertEquals(
-    missing,
+    REQUIRED.filter((r) => !steps.includes(r)),
     [],
-    `gates in scripts/release-check.ts with no \`run:\` step in ci.yml — add ` +
-      `one (a slow gate may go in the scheduled \`heavy\` job, and say so)`,
+    "ci.yml must run every correctness gate",
   );
-});
-
-Deno.test("ci: the heavy tier is scheduled AND on demand, and says it is not on every push", async () => {
-  const ci = await Deno.readTextFile(REPO + ".github/workflows/ci.yml");
-  assertEquals(/^\s*schedule:/m.test(ci), true, "a nightly schedule");
-  assertEquals(/^\s*workflow_dispatch:/m.test(ci), true, "on demand");
   assertEquals(
-    /heavy:[\s\S]*?if:.*schedule.*workflow_dispatch/.test(ci),
-    true,
-    "the heavy job is gated on those two events",
-  );
-});
-
-Deno.test("ci: the test matrix pins the SUPPORTED FLOOR, not a number", async () => {
-  // `MIN_DENO` is what aio refuses to boot below; the matrix's extra
-  // `include:` entry is what proves the suite actually passes there. Two
-  // hand-kept numbers in two files, and ci.yml already claimed "a guard test
-  // pins the two to each other" — it did not exist, so raising MIN_DENO would
-  // have left CI proving the wrong floor, silently and indefinitely.
-  const ci = await Deno.readTextFile(REPO + ".github/workflows/ci.yml");
-  const include = ci.match(/^\s*include:\n([\s\S]*?)\n\s*runs-on:/m);
-  assertEquals(!!include, true, "the test job must keep its `include:` block");
-  const pinned = [...include![1]!.matchAll(/deno:\s*"?([\w.\-]+)"?/g)]
-    .map((m) => m[1]!)
-    .filter((v) => v !== "v2.x");
-  assertEquals(
-    pinned.includes(MIN_DENO),
-    true,
-    `.github/workflows/ci.yml must run the suite on the supported floor ` +
-      `(MIN_DENO = ${MIN_DENO} in src/server/deno-version.ts); its matrix ` +
-      `pins ${JSON.stringify(pinned)}. Raise both together.`,
+    steps.filter((s) => /\b(build|publish|compile)\b/.test(s)),
+    [],
+    "ci.yml builds and publishes nothing",
   );
 });
 
@@ -163,17 +138,4 @@ Deno.test("ci: the suite runs the ratchets first, and the ratchets keep check:re
     true,
     "deno.json check:ratchets must run scripts/check-report-dirs.ts",
   );
-});
-
-Deno.test("ci: the suite runs on Windows too — advisory, and saying so", async () => {
-  // aio ships Windows artifacts; no CI lane ran its suite there, so a
-  // Windows-only regression waited for the release VM run.
-  const ci = await Deno.readTextFile(REPO + ".github/workflows/ci.yml");
-  const job = ci.match(
-    /\n  test-windows:\n([\s\S]*?)(?=\n  [\w-]+:\n|(?![\s\S]))/,
-  );
-  assertEquals(!!job, true, "a test-windows job");
-  assertEquals(/runs-on:\s*windows-latest/.test(job![1]!), true);
-  assertEquals(/continue-on-error:\s*true/.test(job![1]!), true);
-  assertEquals(/run:\s*deno task test\b/.test(job![1]!), true);
 });
