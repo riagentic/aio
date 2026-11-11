@@ -50,7 +50,14 @@ if (Deno.env.get("PHASE") === "read") {
   Deno.exit(0);
 }
 await w.add(1);
-await new Promise((r) => setTimeout(r, 1000));
+// The v1 snapshot must be ON DISK before the kill, or the next boot has
+// nothing to migrate (a fixed 1 s wait was not always enough on a loaded VM).
+const saved = await fetch(\`http://127.0.0.1:\${app.port}/__aio/trojan/persist\`, {
+  method: "POST",
+  headers: { "X-AIO": "1" },
+});
+await saved.body?.cancel();
+if (!saved.ok) throw new Error(\`persist: \${saved.status}\`);
 await w.add(5);
 Deno.kill(Deno.pid, "SIGKILL");
 `;

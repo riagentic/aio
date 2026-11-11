@@ -6,10 +6,17 @@ what is OPEN, what is DECIDED (so it is not argued again), and measured facts.
 
 ## 1. State
 
-- Current release: 1.0.25-beta (2026-10-24, tagged and pushed). 1.0.26-beta is
-  prepared locally (2026-10-27): the bughunter round (review/bughunter.md, 15
-  fixed), the aipro §6–§12 and aio-launcher field reports, happy-dom 21, the
-  launchd stop race. What is left is under "Before the release" and §5.
+- Current release: 1.0.27-beta (2026-11-11, tagged and pushed together with
+  1.0.26-beta). 1.0.26-beta (2026-10-27): the bughunter round, the aipro §6–§12
+  and aio-launcher field reports, happy-dom 21, the launchd stop race.
+  1.0.27-beta (2026-10-30): `_runPhases` split into `boot-*.ts`, origin's CI
+  workflow merged. Its off-box proof rows stay at the 1.0.26 commits: five full
+  Windows runs each hit a different load-only red (each passes alone; all but
+  one fixed). Open: `local-peer-lockdown-e2e` on a loaded Windows VM — the pipe
+  client's 2 s busy bound (`PIPE_BUSY_WAIT_MS`) ran out during the test's
+  connection burst; and Defender's ML flags the suite's fake-program stub
+  (`tests/fake-program-helper.ts`) now and then — the lab VM needs an exclusion
+  for its lab folder.
 - Surface frozen since 2026-09-04: additive only, bugfix-only through beta.
   1.0.0 = a date, once releases have been boring for several weeks — the owner's
   call.
@@ -80,9 +87,12 @@ Refused (one line each; long form in `feedback/refused.md`):
   a cell file with the same bytes — `savedWhileStarting` needs a previous
   start's stamp (`src/server/dev-restart.ts`).
 - Code health: the six hotspot files were cut by pure moves (old paths
-  re-export); `_runPhases` (~200 KB) and `_buildTestUI` (~100 KB) close over
-  their outer locals, so a further cut is a rewrite. 289 silent-catch blocks,
-  ratcheted.
+  re-export). `_runPhases`' 31 larger steps moved to `boot-config.ts`,
+  `boot-storage.ts`, `boot-dispatch.ts` and `boot-transport.ts` in 1.0.27; they
+  reach its locals through one live context (`boot-ctx.ts`: a getter per local,
+  a setter per reassigned `let`) — a step that starts using a new local adds it
+  there (the type check says so). `_buildTestUI` (~100 KB) still closes over its
+  outer locals. 289 silent-catch blocks, ratcheted.
 - Field asks (2026-10-18): `aiol --safe-fix` rewriting an `onInit` `setTimeout`
   to `app.dispatch` (measured unsafe: dispatch runs before later cells'
   `onInit`) · `s.$progress(done, total)` (`s.$commit(minMs)` is it) ·

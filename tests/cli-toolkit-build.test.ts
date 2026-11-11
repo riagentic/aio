@@ -53,7 +53,9 @@ const prime = () =>
       p.success,
       p.signal
         ? "`deno cache` of the example did not finish in 5 min — killed"
-        : `could not set the example up: ${dec.decode(p.stderr)}`,
+        : `could not set the example up (exit ${p.code}): ${
+          dec.decode(p.stderr)
+        }`,
     );
   })();
 

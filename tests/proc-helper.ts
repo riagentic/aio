@@ -114,9 +114,13 @@ export async function processList(): Promise<{ pid: number; cmd: string }[]> {
 }
 
 /** The Windows query both tree walks in tests/ use: one process per line,
- *  `<pid> <parent pid> <creation ticks>`. */
+ *  `<pid> <parent pid> <creation ticks, UTC>`. */
 export const WINDOWS_PROCESS_QUERY =
-  'Get-CimInstance Win32_Process | % { "$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate.Ticks)" }';
+  'Get-CimInstance Win32_Process | % { "$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate.ToUniversalTime().Ticks)" }';
+
+/** .NET ticks (100 ns since 0001-01-01 UTC) → epoch ms. Pure. */
+export const ticksToEpochMs = (ticks: number): number =>
+  (ticks - 621_355_968_000_000_000) / 10_000;
 
 /** pid → parent pid from `[pid, parent, born]` rows, with every tie that is
  *  not a family tie cut (parent 0).

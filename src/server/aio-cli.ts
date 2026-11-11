@@ -32,7 +32,7 @@ noteAioRuntime();
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.26-beta";
+export const VERSION: string = "1.0.27-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *

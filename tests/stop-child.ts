@@ -42,6 +42,7 @@ import { dirname, join } from "@std/path";
 import {
   descendantsIn,
   familyTies,
+  ticksToEpochMs,
   WINDOWS_PROCESS_QUERY,
   windowsProcessRows,
 } from "./proc-helper.ts";
@@ -55,6 +56,9 @@ import {
 const WINDOWS = Deno.build.os === "windows";
 /** Between two looks for the app's lock record / two stop requests. */
 const ASK_POLL_MS = 200;
+/** CIM's creation time and `Date.now()` are one clock, read at different
+ *  resolutions: a record is a stranger's only when clearly older. */
+const CLOCK_SLACK_MS = 1_000;
 
 /** Every lock record under the runtime base, whatever apps root it is scoped
  *  to: a child is given its own `AIO_APPS_DIR` more often than not, and its
@@ -87,29 +91,43 @@ function lockRecords(): LockData[] {
 }
 
 /** `pid` and everything under it, on Windows (`deno task` is a parent of the
- *  app, never the app). CIM, because `pgrep` is not there. */
-async function windowsTree(pid: number): Promise<Set<number>> {
+ *  app, never the app), with when each was born (epoch ms). CIM, because
+ *  `pgrep` is not there. */
+async function windowsTree(
+  pid: number,
+): Promise<{ tree: Set<number>; born: Map<number, number> }> {
   const o = await new Deno.Command("powershell", {
     args: ["-NoProfile", "-Command", WINDOWS_PROCESS_QUERY],
     stdout: "piped",
     stderr: "null",
   }).output();
+  const rows = windowsProcessRows(new TextDecoder().decode(o.stdout));
   // By parent pid AND creation time (`familyTies`): a parent pid alone also
   // names strangers whose dead parent once had this number.
-  const ties = familyTies(
-    windowsProcessRows(new TextDecoder().decode(o.stdout)),
-  );
-  return new Set([pid, ...descendantsIn(ties, pid)]);
+  return {
+    tree: new Set([pid, ...descendantsIn(familyTies(rows), pid)]),
+    born: new Map(rows.map(([p, , at]) => [p, ticksToEpochMs(at)])),
+  };
 }
 
 /** The lock record of the app running as `pid` or under it; null when there
- *  is none — the child is not an aio app, or has not taken its lock yet. */
+ *  is none — the child is not an aio app, or has not taken its lock yet.
+ *
+ *  Windows hands pids out again within seconds, and a killed app leaves its
+ *  record behind: a record whose pid is now a different process (one born
+ *  AFTER the record was written — an app writes `startedAt` itself, so its
+ *  own record is never older than it) is a stranger's. Taken as this child's,
+ *  it was asked to stop at a dead port for the whole grace (a `singleton:
+ *  false` child, which has no record, on a loaded 4-shard run). */
 async function lockUnder(pid: number): Promise<LockData | null> {
   const all = lockRecords();
-  const own = all.find((l) => l.pid === pid);
-  if (own || all.length === 0) return own ?? null;
-  const tree = await windowsTree(pid);
-  return all.find((l) => tree.has(l.pid)) ?? null;
+  if (all.length === 0) return null;
+  const { tree, born } = await windowsTree(pid);
+  // NaN (an unknown birth) proves nothing: the record is kept.
+  const live = all.filter((l) =>
+    tree.has(l.pid) && !(l.startedAt < born.get(l.pid)! - CLOCK_SLACK_MS)
+  );
+  return live.find((l) => l.pid === pid) ?? live[0] ?? null;
 }
 
 /** Windows: ask the app under `proc` to stop, until it accepts, it is gone,

@@ -156,6 +156,48 @@ async function precheckFixtures(paths: string[], width: number): Promise<void> {
   }
 }
 
+/** Set up each example's own `node_modules` ONCE, before any shard.
+ *
+ *  An example with `"nodeModulesDir": "auto"` builds that folder on its first
+ *  `deno` run. In a fresh checkout several tests in different shards run
+ *  `examples/cli-tool` at once, so they all set it up at once — on the
+ *  Windows VM one `deno cache` there exited 1 with nothing but the setup lines
+ *  on stderr, and four tests failed (green alone, from a clean folder). An
+ *  example that will not install is said and left to its tests. */
+async function primeExamples(): Promise<void> {
+  const dirs: string[] = [];
+  let entries: Deno.DirEntry[] = [];
+  try {
+    entries = [...Deno.readDirSync(join(ROOT, "examples"))];
+  } catch {
+    /* aio-ok: a tree with no examples/ (a planted suite) — nothing to set up */
+  }
+  for (const e of entries) {
+    const cfg = join(ROOT, "examples", e.name, "deno.json");
+    try {
+      if (/"nodeModulesDir":\s*"auto"/.test(Deno.readTextFileSync(cfg))) {
+        dirs.push(join(ROOT, "examples", e.name));
+      }
+    } catch { /* aio-ok: no deno.json — not an example app */ }
+  }
+  const failed: string[] = [];
+  await Promise.all(dirs.map(async (cwd) => {
+    const { success } = await new Deno.Command(Deno.execPath(), {
+      args: ["install", "--quiet"],
+      cwd,
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    if (!success) failed.push(cwd);
+  }));
+  if (failed.length > 0) {
+    console.error(
+      `test-shards: ${failed.length} example(s) did not install (their ` +
+        `tests will say why): ${failed.join(", ")}`,
+    );
+  }
+}
+
 /** `deno test`'s own discovery rule for a directory argument. */
 const TEST_FILE = /(^|[._])test\.(ts|tsx|mts|js|mjs|jsx)$/;
 
@@ -1294,7 +1336,7 @@ if (import.meta.main) {
       fixtures.add(join("tests", "fixtures", m[1]!));
     }
   }));
-  await precheckFixtures([...fixtures], n);
+  await Promise.all([precheckFixtures([...fixtures], n), primeExamples()]);
   const shards = planWithin(
     files,
     n,

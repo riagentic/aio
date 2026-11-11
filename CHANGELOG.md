@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.0.27-beta — the boot split into one module per phase, and a CI workflow that runs the suite (2026-10-30)
+
+> **Nothing is removed, renamed or changed in behaviour.** No app needs an edit;
+> see [the upgrade guide](docs/upgrade/from-1.0.26-beta-to-1.0.27-beta.md).
+
+### Inside the framework
+
+- **The server boot is split by phase.** `_runPhases` in `src/server/aio.ts`
+  held the whole boot in one 4,551-line function. Its 31 larger steps now live
+  in `boot-config.ts`, `boot-storage.ts`, `boot-dispatch.ts` and
+  `boot-transport.ts`; they read and write the boot's own variables through one
+  live context (`boot-ctx.ts`), so every step sees exactly what it saw before.
+  `aio.ts` is 2,860 lines (was 5,031). The move is mechanical: each moved
+  function equals the original token for token, every comment is kept, module
+  load order is unchanged, and the suite and the mutation ledger give the same
+  result before and after.
+
+### Tests and CI
+
+- The repository's own GitHub workflow runs the checks and the suite (fmt, lint,
+  aiol, check, test) on 4 shards under Xvfb; a shard that failed only on named
+  tests re-runs those files once, serially, and lists them
+  (`AIO_TEST_RETRY_FAILED=1`, CI only).
+- `scripts/bundle-size.ts` resolves immer on a fresh clone.
+- Tests that assumed this workstation now hold on a plain Linux runner (readdir
+  order, inode reuse, google-chrome's config folder, a POSIX test root under the
+  Windows stub, a fixed X display), and several load flakes wait for an event
+  instead of a fixed time.
+
 ## v1.0.26-beta — updates from GitHub releases, per-client diffs for `forUser` cells, and the bughunter and field-report fixes (2026-10-27)
 
 > **Nothing is removed or renamed, and no option changes meaning.** New:

@@ -389,7 +389,12 @@ Deno.test("ws fuse: honest clients filling the fuse between them are told retryA
     assertEquals(mgr.connections.size, 60);
     await sleep(1_100);
     peers.forEach((p, i) => burst(p, `p${i}-`, 9));
-    await sleep(300);
+    // Until every frame is answered, not a fixed 300 ms: on a loaded machine
+    // the answers (and the fuse's diag) were still on the way.
+    for (let i = 0; i < 100; i++) {
+      await sleep(50);
+      if (peers.every((p) => p.acks.size >= 9)) break;
+    }
 
     const refused = peers.flatMap((p) =>
       [...p.acks.values()].filter((d) =>

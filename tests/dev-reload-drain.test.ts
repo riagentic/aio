@@ -74,7 +74,11 @@ Deno.test("dev reload drain: the app is not 'restarting' while it waits, the rel
     // A save of a module the server imports: the walk decides it restarts.
     await Deno.writeTextFile(helper, "export const f = () => 2;\n");
     w.scheduleReload(helper);
-    await new Promise((r) => setTimeout(r, 2 * DEBOUNCE_MS + 1000));
+    // Polled, not one fixed wait: on a loaded machine (4 shards on a Windows
+    // VM) the walk ended after the 2 x debounce + 1 s this used to sleep.
+    for (let t = Date.now(); !restart && Date.now() - t < 20_000;) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
     assert(restart, "the walk found the module in the server graph");
     assert(restartPending(), "the save claimed a restart");
     assertEquals(isRestarting(), false, "draining is not tearing down");

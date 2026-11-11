@@ -377,6 +377,16 @@ writeLock({ appId: ${JSON.stringify(appId)}, pid: Deno.pid, port: ${port},
 await new Promise((r) => setTimeout(r, 60_000));
 `,
     });
+    // Compile the stand-in first: this test is about reading a registration
+    // as success, not about a cold compile of the lock module's graph, which
+    // outran the 10 s start bound on a loaded Windows VM (4 shards).
+    const warm = await new Deno.Command(Deno.execPath(), {
+      args: ["cache", "src/app.ts"],
+      cwd: dir,
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assert(warm.success, new TextDecoder().decode(warm.stderr));
     let pid: number | undefined;
     let failed: unknown;
     try {
