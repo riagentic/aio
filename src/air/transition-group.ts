@@ -18,6 +18,11 @@ import { _runTickTransition } from "./transition-component.ts";
 
 // AIO-192: Track FLIP cleanup timers per element to cancel on re-animation
 const _flipTimers = new WeakMap<HTMLElement, number>();
+/** An element's OWN transform while a FLIP on it is in flight. Read back from
+ *  `style.transform` instead, a second reorder in the same frame took the
+ *  first FLIP's `translate(…)` for the element's own transform and restored
+ *  it at the end: the row stayed offset for good. */
+const _flipBase = new WeakMap<HTMLElement, string>();
 
 // ── Exit handler registry (shared with <Transition>) ────────────────
 
@@ -211,7 +216,10 @@ export function TransitionGroup(
 
             // AIO-287: preserve pre-existing transforms (scale, rotate, etc.)
             // Compose FLIP translation on top of existing transform
-            const existingTransform = dom.style.transform;
+            const existingTransform = _flipBase.has(dom)
+              ? _flipBase.get(dom)!
+              : dom.style.transform;
+            _flipBase.set(dom, existingTransform);
             const flipTransform = `translate(${dx}px, ${dy}px)`;
             dom.style.transform = existingTransform
               ? `${existingTransform} ${flipTransform}`
@@ -226,6 +234,7 @@ export function TransitionGroup(
               // Clean up after transition
               const cleanup = () => {
                 dom.style.transition = "";
+                _flipBase.delete(dom);
                 dom.removeEventListener("transitionend", onEnd);
                 // Clear the safety timer, don't just forget it. Deleting the
                 // map entry alone left an armed timeout holding THIS closure:
