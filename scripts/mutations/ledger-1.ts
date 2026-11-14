@@ -5336,9 +5336,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "aiol rewrites --key=/--cert= flags inside a deno.json task that runs some other program, not the app",
     file: "aiol/fixes.ts",
-    find:
-      `return want !== "" && taskTokens(cmd).some((t) => normTaskPath(t) === want);`,
-    replace: `return true;`,
+    find: `? (normTaskPath(script.text) === want ? script : undefined)`,
+    replace: `? script`,
     test: "tests/aiol-safe-fix-scope.test.ts",
     filter:
       "aiol task flags: a non-app task's --key= is neither reported nor rewritten",
@@ -5897,9 +5896,9 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "an app entry matched as a substring makes another script's task the app and safe-fix rewrites its flags",
     file: "aiol/fixes.ts",
-    find:
-      'return want !== "" && taskTokens(cmd).some((t) => normTaskPath(t) === want);',
-    replace: 'return want !== "" && cmd.includes(entry!);',
+    find: "? (normTaskPath(script.text) === want ? script : undefined)",
+    replace:
+      "? (normTaskPath(script.text).includes(want) ? script : undefined)",
     test: "tests/aiol-safe-fix-scope.test.ts",
     filter:
       "aiol task flags: an entry that is a SUBSTRING of another script's path is not that script",

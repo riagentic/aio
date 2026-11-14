@@ -2332,27 +2332,136 @@ export function fixCallTimeoutMs(
  *  be reported as a renamed aio flag and REWRITTEN to `--tls-key=` by
  *  --safe-fix — breaking a script aio never runs. Pure. */
 export function taskRunsApp(cmd: string, entry: string | null): boolean {
-  const want = entry ? normTaskPath(entry) : "";
-  // A whole TOKEN, never a substring: entry `app.ts` is inside
-  // `scripts/webapp.ts`, and that program's `--key=` got rewritten.
-  return want !== "" && taskTokens(cmd).some((t) => normTaskPath(t) === want);
+  return taskAppArgSpans(cmd, entry).length > 0;
 }
 
 /** Does this task run SOME script (`deno run … <file>.ts`)? The fallback scope
  *  for REPORTING a renamed flag when no app entry is detectable — never for
  *  the rewrite, which cannot tell the app from another program then. Pure. */
 export function taskRunsScript(cmd: string): boolean {
-  const t = taskTokens(cmd);
-  const run = t.findIndex((x, i) => x === "deno" && t[i + 1] === "run");
-  return run !== -1 &&
-    t.slice(run + 2).some((x) => /^[^-].*\.(?:[mc]?[jt]s|[jt]sx)$/.test(x));
+  return taskScriptArgSpans(cmd).length > 0;
 }
 
-/** A task's command line as tokens: split on whitespace and shell operators,
- *  surrounding quotes dropped. Pure. */
-function taskTokens(cmd: string): string[] {
-  return cmd.split(/[\s;&|()]+/).filter(Boolean)
-    .map((t) => t.replace(/^(["'])(.*)\1$/, "$2"));
+/** The `[start, end)` offsets of `cmd` that are the APP's own argv: what
+ *  follows the entry token, to the end of that command segment. THE scope of
+ *  every task-flag finding and rewrite — the report (checks.ts) and the fix
+ *  both read it, so they cannot drift. A flag BEFORE the entry is deno's
+ *  (`deno run --cert=ca.pem -A src/app.ts` — deno's CA certificate, which a
+ *  rename to `--tls-cert=` broke), and another segment of a chained task
+ *  (`deno run gen.ts --key=x && deno run -A src/app.ts`) is another program's
+ *  argv. In a `deno <sub>` segment the entry must be the SCRIPT — the first
+ *  non-flag argument after the subcommand — not an argument passed to some
+ *  other script. A segment with no `deno` (a compiled binary, a wrapper)
+ *  counts the entry token wherever it stands. Pure. */
+export function taskAppArgSpans(
+  cmd: string,
+  entry: string | null,
+): [number, number][] {
+  const want = entry ? normTaskPath(entry) : "";
+  if (want === "") return [];
+  const spans: [number, number][] = [];
+  for (const seg of taskSegments(cmd)) {
+    const script = segmentScript(seg.toks);
+    // A whole TOKEN, never a substring: entry `app.ts` is inside
+    // `scripts/webapp.ts`, and that program's `--key=` got rewritten.
+    const hit = script !== undefined
+      ? (normTaskPath(script.text) === want ? script : undefined)
+      : seg.toks.find((t) => normTaskPath(t.text) === want);
+    if (hit) spans.push([hit.end, seg.end]);
+  }
+  return spans;
+}
+
+/** {@linkcode taskAppArgSpans} for ANY `deno run <file>.ts` — the report-only
+ *  fallback when no app entry is detectable. Pure. */
+export function taskScriptArgSpans(cmd: string): [number, number][] {
+  const spans: [number, number][] = [];
+  for (const seg of taskSegments(cmd)) {
+    const d = seg.toks.findIndex((t) => t.text === "deno");
+    if (d === -1 || seg.toks[d + 1]?.text !== "run") continue;
+    const script = segmentScript(seg.toks);
+    if (script && /^[^-].*\.(?:[mc]?[jt]s|[jt]sx)$/.test(script.text)) {
+      spans.push([script.end, seg.end]);
+    }
+  }
+  return spans;
+}
+
+/** The text of `cmd` inside `spans`, joined by a space — what a task-flag
+ *  finding tests. Pure. */
+export function taskSpanText(cmd: string, spans: [number, number][]): string {
+  return spans.map(([a, b]) => cmd.slice(a, b)).join(" ");
+}
+
+/** Deno flags whose value may be the NEXT token (`--cert ca.pem`), so that
+ *  token is not the script. */
+const DENO_VALUE_FLAGS = new Set([
+  "-c",
+  "--config",
+  "--import-map",
+  "--cert",
+  "--location",
+  "--seed",
+  "--v8-flags",
+  "--log-level",
+  "-L",
+  "--ext",
+]);
+
+/** In a `deno <sub> …` segment, the script token: the first non-flag argument
+ *  after the subcommand (a value-taking flag's separate value skipped).
+ *  `undefined` when the segment does not run deno. Pure. */
+function segmentScript(toks: TaskTok[]): TaskTok | undefined {
+  const d = toks.findIndex((t) => t.text === "deno");
+  if (d === -1 || d + 1 >= toks.length) return undefined;
+  for (let i = d + 2; i < toks.length; i++) {
+    const t = toks[i]!.text;
+    if (t === "--") continue;
+    if (!t.startsWith("-")) return toks[i];
+    if (DENO_VALUE_FLAGS.has(t)) i++;
+  }
+  return undefined;
+}
+
+type TaskTok = { text: string; start: number; end: number };
+
+/** A task's command line as segments (split at `;` `&` `|` `(` `)` and
+ *  newlines outside quotes), each a list of whitespace-separated tokens with
+ *  their offsets in `cmd`; surrounding quotes dropped from `text`. Pure. */
+function taskSegments(
+  cmd: string,
+): { toks: TaskTok[]; end: number }[] {
+  const segs: { toks: TaskTok[]; end: number }[] = [];
+  let toks: TaskTok[] = [];
+  let start = -1;
+  let quote = "";
+  const endTok = (at: number) => {
+    if (start === -1) return;
+    const raw = cmd.slice(start, at);
+    toks.push({
+      text: raw.replace(/^(["'])(.*)\1$/, "$2"),
+      start,
+      end: at,
+    });
+    start = -1;
+  };
+  for (let i = 0; i <= cmd.length; i++) {
+    const c = cmd[i];
+    if (quote) {
+      if (c === quote) quote = "";
+      if (c !== undefined) continue;
+    }
+    if (c === '"' || c === "'") {
+      if (start === -1) start = i;
+      quote = c;
+    } else if (c === undefined || /[;&|()\n]/.test(c)) {
+      endTok(i);
+      if (toks.length > 0) segs.push({ toks, end: i });
+      toks = [];
+    } else if (/\s/.test(c)) endTok(i);
+    else if (start === -1) start = i;
+  }
+  return segs;
 }
 
 /** `./src/app.ts` and `src\app.ts` name the same file as `src/app.ts`. */
@@ -2360,11 +2469,26 @@ function normTaskPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
 }
 
+/** The deprecated-flag rewrites, applied to the app's argv only. Pure. */
+function rewriteAppFlags(argv: string): string {
+  return argv
+    .replace(/(?<![\w-])--cert=/g, "--tls-cert=")
+    .replace(/(?<![\w-])--key=/g, "--tls-key=")
+    // alpha76 removals (src/state/removals.ts). Two are renames; two are
+    // deletions — a flag whose whole behaviour was "nothing" has no successor
+    // spelling, so the surrounding space goes with it.
+    .replace(/(?<![\w-])--kill-existing(?![\w=-])/g, "--takeover")
+    .replace(/(?<![\w-])--server-url(?![\w=-])/g, "--connect")
+    .replace(/\s*(?<![\w-])--zero-port(?![\w=-])/g, "")
+    .replace(/\s*(?<![\w-])--backup-logs(?![\w=-])/g, "")
+    .replace(/(?<![\w-])--headless(?![\w=-])/g, "--client=server-only");
+}
+
 /** Rewrite deprecated flags inside `deno.json` tasks. `--cert=`/`--key=` became
  *  `--tls-cert=`/`--tls-key=` (the bare names collided with the auth `key`
  *  concept); `--headless` is a BUILD flag that a run task must not pass — the
  *  runtime equivalent is `--client=server-only`. `entry` scopes EVERY rewrite
- *  to tasks that actually run the app ({@link taskRunsApp}). */
+ *  to the app's own argv in tasks that run it ({@link taskAppArgSpans}). */
 export function fixTaskFlags(
   entry: string | null,
 ): (projectDir: string) => Promise<boolean> {
@@ -2373,21 +2497,15 @@ export function fixTaskFlags(
       const tasks = config.tasks;
       if (!tasks) return;
       for (const [name, cmd] of Object.entries(tasks)) {
-        if (typeof cmd !== "string" || !taskRunsApp(cmd, entry)) continue;
-        let next = cmd
-          .replace(/(?<![\w-])--cert=/g, "--tls-cert=")
-          .replace(/(?<![\w-])--key=/g, "--tls-key=")
-          // alpha76 removals (src/state/removals.ts). Two are renames; two
-          // are deletions — a flag whose whole behaviour was "nothing" has
-          // no successor spelling, so the surrounding space goes with it.
-          .replace(/(?<![\w-])--kill-existing(?![\w=-])/g, "--takeover")
-          .replace(/(?<![\w-])--server-url(?![\w=-])/g, "--connect")
-          .replace(/\s*(?<![\w-])--zero-port(?![\w=-])/g, "")
-          .replace(/\s*(?<![\w-])--backup-logs(?![\w=-])/g, "");
-        next = next.replace(
-          /(?<![\w-])--headless(?![\w=-])/g,
-          "--client=server-only",
-        );
+        if (typeof cmd !== "string") continue;
+        // Only the APP's argv is rewritten — never deno's own flags before the
+        // entry, nor another program's in a chained segment. Right to left,
+        // so earlier offsets stay valid.
+        let next = cmd;
+        for (const [a, b] of taskAppArgSpans(cmd, entry).reverse()) {
+          next = next.slice(0, a) + rewriteAppFlags(next.slice(a, b)) +
+            next.slice(b);
+        }
         tasks[name] = next;
       }
     });
@@ -3297,33 +3415,15 @@ export function fixUiKeyToVisible(
   filePath: string,
   kinds: SpecKinds = specKinds(),
 ): () => Promise<boolean> {
-  /** TOP-LEVEL `ui:` key offsets within a config body. Walks the MASKED body
-   *  (structure is exact there); the offsets are applied to the RAW body —
-   *  identifiers are code, so offsets are identical in both. Declines a block
-   *  that already has a top-level `visible:` (both-set is a hard error at
-   *  cell() — the author's call). */
-  const topLevelUiOffsets = (maskedBody: string): number[] => {
-    const offsets: number[] = [];
-    let depth = 0;
-    let hasVisible = false;
-    for (let i = 0; i < maskedBody.length; i++) {
-      const ch = maskedBody[i]!;
-      if ("({[".includes(ch)) depth++;
-      else if (")}]".includes(ch)) depth--;
-      else if (depth === 1 && /[$\w]/.test(ch)) {
-        if (/[$\w.]/.test(maskedBody[i - 1] ?? "")) continue;
-        const m = /^([$\w]+)\s*:/.exec(maskedBody.slice(i));
-        if (m) {
-          if (m[1] === "visible") hasVisible = true;
-          if (m[1] === "ui") offsets.push(i);
-        }
-        while (i + 1 < maskedBody.length && /[$\w]/.test(maskedBody[i + 1]!)) {
-          i++;
-        }
-      }
-    }
-    return hasVisible ? [] : offsets;
-  };
+  /** TOP-LEVEL `ui:` key offsets in the config object whose `{` is at
+   *  `open` — {@link topLevelKeyOffsets}, THE key decider: depth-, mask- and
+   *  property-start-aware, so a ternary's `? ui :` is not a key. Declines a
+   *  block that already has a top-level `visible:` (both-set is a hard error
+   *  at cell() — the author's call). */
+  const topLevelUiOffsets = (src: string, open: number): number[] =>
+    topLevelKeyOffsets(src, open, "visible").length > 0
+      ? []
+      : topLevelKeyOffsets(src, open, "ui");
   return async () => {
     let src: string;
     try {
@@ -3350,9 +3450,7 @@ export function fixUiKeyToVisible(
       if (open === -1) continue;
       const end = balancedEnd(src, open, masked);
       if (end === -1) continue;
-      for (const off of topLevelUiOffsets(masked.slice(open, end + 1))) {
-        renames.push(open + off);
-      }
+      renames.push(...topLevelUiOffsets(src, open));
       re.lastIndex = end + 1;
     }
     if (renames.length === 0) return false;
@@ -3385,26 +3483,14 @@ export function fixRenameRunKey(
   from: string,
   to: string,
 ): () => Promise<boolean> {
-  const topLevelKeyOffsets = (masked: string): number[] => {
-    const offsets: number[] = [];
-    let depth = 0;
-    let hasNew = false;
-    for (let i = 0; i < masked.length; i++) {
-      const ch = masked[i]!;
-      if ("({[".includes(ch)) depth++;
-      else if (")}]".includes(ch)) depth--;
-      else if (depth === 1 && /[$\w]/.test(ch)) {
-        if (/[$\w.]/.test(masked[i - 1] ?? "")) continue;
-        const m = /^([$\w]+)\s*:/.exec(masked.slice(i));
-        if (m) {
-          if (m[1] === to) hasNew = true;
-          if (m[1] === from) offsets.push(i);
-        }
-        while (i + 1 < masked.length && /[$\w]/.test(masked[i + 1]!)) i++;
-      }
-    }
-    return hasNew ? [] : offsets;
-  };
+  // THE key decider (aiol/scan.ts): a key only at a PROPERTY START, so
+  // `killExisting: dev ? killExisting : false` renames the key and leaves the
+  // variable — reading every depth-1 `identifier :` as a key renamed the
+  // ternary's branch to a name that does not exist.
+  const runKeyOffsets = (src: string, open: number): number[] =>
+    topLevelKeyOffsets(src, open, to).length > 0
+      ? []
+      : topLevelKeyOffsets(src, open, from);
   return async () => {
     let src: string;
     try {
@@ -3421,9 +3507,7 @@ export function fixRenameRunKey(
       const open = m.index + m[0].length - 1;
       const end = balancedEnd(src, open, masked);
       if (end === -1) continue;
-      for (const off of topLevelKeyOffsets(masked.slice(open, end + 1))) {
-        renames.push(open + off);
-      }
+      renames.push(...runKeyOffsets(src, open));
       re.lastIndex = end + 1;
     }
     if (renames.length === 0) return false;

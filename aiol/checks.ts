@@ -3309,12 +3309,19 @@ export const checkUpgrade: Checker = (ctx) => {
     if (typeof cmd !== "string") continue;
     const isApp = fix.taskRunsApp(cmd, entry);
     if (!isApp && (entry !== null || !fix.taskRunsScript(cmd))) continue;
+    // Test the APP's argv only — the same spans the rewrite edits — so deno's
+    // own `--cert=` before the entry, or another segment's `--key=`, is
+    // neither reported nor (by the fix) rewritten.
+    const argv = fix.taskSpanText(
+      cmd,
+      isApp ? fix.taskAppArgSpans(cmd, entry) : fix.taskScriptArgSpans(cmd),
+    );
     const flagFix = isApp ? { safeFix: fix.fixTaskFlags(entry) } : {
       manual: `no app entry detected (declare \`entry\` in deno.json), so ` +
         `--safe-fix cannot tell whether this task runs the app or another ` +
         `program — edit it by hand if it runs the app`,
     };
-    if (/(?<![\w-])--(cert|key)=/.test(cmd)) {
+    if (/(?<![\w-])--(cert|key)=/.test(argv)) {
       found++;
       report(
         "warn",
@@ -3333,7 +3340,7 @@ export const checkUpgrade: Checker = (ctx) => {
     // found before the app boots and `parseCli` refuses it.
     for (const r of REMOVALS) {
       if (r.kind !== "cli-flag") continue;
-      if (!new RegExp(`(?<![\\w-])${r.key}(?![\\w=-])`).test(cmd)) continue;
+      if (!new RegExp(`(?<![\\w-])${r.key}(?![\\w=-])`).test(argv)) continue;
       found++;
       report(
         "error",
@@ -3347,7 +3354,7 @@ export const checkUpgrade: Checker = (ctx) => {
       );
     }
     // `--headless` is only wrong on the APP (a build script may take it).
-    if (isApp && /(?<![\w-])--headless(?![\w=-])/.test(cmd)) {
+    if (isApp && /(?<![\w-])--headless(?![\w=-])/.test(argv)) {
       found++;
       report(
         "warn",
