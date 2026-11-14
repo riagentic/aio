@@ -43,6 +43,8 @@ type WorkerStray = {
   id?: string;
   error: string;
   stack?: string;
+  /** The task ended the thread itself (`Deno.exit(3)`, `self.close()`). */
+  exit?: string;
 };
 
 export type BlockingPool = {
@@ -162,6 +164,23 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
     busyFlag.set(w, new Int32Array(new SharedArrayBuffer(4)));
     w.onmessage = ({ data }: MessageEvent<WorkerRes | WorkerStray>) => {
       const task = active.get(w);
+      if ("stray" in data && data.exit !== undefined) {
+        // The thread is GONE (a task called `Deno.exit()`/`self.close()`):
+        // whatever runs on it now can never settle, whoever's exit it was.
+        // Reject it by name and retire the worker, as a crash does — never a
+        // caller waiting forever on a slot nobody will free.
+        const whose = data.id !== undefined
+          ? `in blocking task '${data.id}'`
+          : `outside any blocking task`;
+        const err = new Error(
+          `blocking worker crashed: the worker exited (${data.exit}) ${whose}`,
+        );
+        if (task) task.reject(err);
+        else log.error("blocking", err.message);
+        retire(w);
+        pump();
+        return;
+      }
       if ("stray" in data) {
         if (task && task.n === data.n) {
           // The running task's own: its crash, as an uncaught error always

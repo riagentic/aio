@@ -260,6 +260,26 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       stack: r instanceof Error ? r.stack : undefined,
     });
   });
+  // A thread that ends ITSELF — `Deno.exit()` or `self.close()` in app code —
+  // raises no `onerror`: the owner went on posting calls into a dead thread
+  // and every caller, this one included, waited forever with not a line in
+  // any log. Both doors are wrapped to say so first (the message is queued
+  // before the thread ends, so it arrives); the owner treats it as a crash.
+  // This host's own close uses `realClose`, never the wrapper.
+  /** The calls running here, by `call.id` → action type. */
+  const running = new Map<number, string>();
+  const realExit = Deno.exit;
+  const realClose = globalThis.close;
+  const exiting = (how: string) =>
+    post({ t: "exited", how, methods: [...new Set(running.values())] });
+  Deno.exit = ((code?: number) => {
+    exiting(`Deno.exit(${code ?? ""})`);
+    return realExit(code);
+  }) as typeof Deno.exit;
+  globalThis.close = () => {
+    exiting("self.close()");
+    realClose.call(globalThis);
+  };
   /** Has the authoritative slice arrived? Until it does, this isolate holds
    *  its DEFAULTS, and anything it commits is not a change to ship home.
    *
@@ -582,7 +602,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       ]);
       if (ownTimer !== undefined) clearTimeout(ownTimer);
       post({ t: "closed" });
-      self.close();
+      realClose.call(globalThis); // the host's own end — not an `exited`
       return;
     }
     // t === "call"
@@ -606,6 +626,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       ?._callId;
     if (callId) callIds.set(callId, id);
     if (action !== null && typeof action === "object") callOf.set(action, id);
+    running.set(id, String((action as { type?: unknown }).type));
     try {
       const settled = callId ? registerCall(callId) : null;
       if (settled) settled.catch(() => {}); // observed via await below; never unhandled
@@ -683,6 +704,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
         ...thrownPayload(e),
       });
     } finally {
+      running.delete(id);
       if (callId) callIds.delete(callId);
     }
   };

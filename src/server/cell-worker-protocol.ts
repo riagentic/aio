@@ -299,6 +299,12 @@ export type FromWorker =
   | { t: "stray"; message: string; stack?: string }
   /** The host could not start (bad cell name, unsupported config). Fatal. */
   | { t: "boot-error"; message: string }
+  /** The thread is ending ITSELF — app code called `Deno.exit()` or
+   *  `self.close()`. Neither raises `onerror`, so without this note the owner
+   *  never learns: every caller waits forever. The owner treats it as a crash.
+   *  `how` is the call as written (`Deno.exit(3)`); `methods` the calls running
+   *  here when it happened. */
+  | { t: "exited"; how: string; methods: string[] }
   /** Close is complete: in-flight methods were aborted and their final
    *  patches have already been posted (message order is FIFO). */
   | { t: "closed" };

@@ -29,6 +29,9 @@ type Stray = {
   id?: string;
   error: string;
   stack?: string;
+  /** Set when the task ended the THREAD (`Deno.exit(…)` / `self.close()`) —
+   *  the call as written. Nothing else would ever report it: see below. */
+  exit?: string;
 };
 
 // A compiled build's minifier (`build.minify`, build/minify-server.ts) keeps
@@ -159,6 +162,34 @@ self.addEventListener("unhandledrejection", (e: PromiseRejectionEvent) => {
     }`,
   );
 });
+
+// A task that ends this THREAD — `Deno.exit()` or `self.close()` — raises no
+// error event: the task never settled, its caller waited forever, the dead
+// worker kept its pool slot (a size-1 pool then hung every later task) and
+// `disposeIdle()` refused at shutdown, with not a line in any log. Both doors
+// are wrapped to say so first, tagged with the task like a stray (the message
+// is queued before the thread ends, so it arrives).
+const realExit = Deno.exit;
+const realClose = globalThis.close;
+function exiting(how: string): void {
+  const who = owner.getStore() ?? running;
+  const res: Stray = {
+    stray: true,
+    n: who?.n ?? 0,
+    id: who?.id,
+    error: `the worker exited (${how})`,
+    exit: how,
+  };
+  self.postMessage(res);
+}
+Deno.exit = ((code?: number) => {
+  exiting(`Deno.exit(${code ?? ""})`);
+  return realExit(code);
+}) as typeof Deno.exit;
+globalThis.close = () => {
+  exiting("self.close()");
+  realClose.call(globalThis);
+};
 
 self.onmessage = ({ data }: MessageEvent<Req>) => {
   const ctx = { n: data.n, id: data.id };

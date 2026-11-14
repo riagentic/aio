@@ -505,6 +505,20 @@ export function createCellWorker(
       case "closed":
         closedResolve?.();
         return;
+      case "exited": {
+        // App code ended the thread itself (`Deno.exit()` / `self.close()`):
+        // no `onerror` follows, so this note is the only word the owner gets.
+        // A crash like any other — the calls in flight and every later one
+        // are answered by name (or the cell respawns), never left hanging.
+        const where = msg.methods.length
+          ? ` in ${
+            msg.methods.map((t) =>
+              `${t.startsWith(`${name}:`) ? t.slice(name.length + 1) : t}()`
+            ).join(", ")
+          }`
+          : " outside any method";
+        return crashed(`the worker exited (${msg.how})${where}`);
+      }
     }
   };
 
@@ -528,6 +542,11 @@ export function createCellWorker(
     clearTimeout(readyTimer);
     readyReject?.(err);
     failAll(err);
+    // A crash DURING close() (a disposer's timer throwing, an exit in
+    // onDestroy) means no `closed` ack is coming: release close()'s wait now,
+    // rather than stall shutdown the full WORKER_CLOSE_DEADLINE_MS and then
+    // blame a thread "stuck in synchronous code" that is already dead.
+    closedResolve?.();
     try {
       worker.terminate();
     } catch {
@@ -716,7 +735,9 @@ export function createCellWorker(
           new Promise<void>((r) => t = setTimeout(r, WORKER_CLOSE_DEADLINE_MS)),
         ]);
         if (t !== undefined) clearTimeout(t);
-        if (!done) {
+        // A crash during the close already said what happened (crashed()
+        // logged it and released the wait) — the stuck-thread story is false.
+        if (!done && crashError === null) {
           // The worker's own drain is bounded under this deadline
           // (WORKER_CLOSE_DRAIN_MS), so no ack means its loop never ran the
           // close: the thread is inside synchronous code. Deno's terminate() does not stop that, so the

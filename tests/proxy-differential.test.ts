@@ -81,6 +81,7 @@ Deno.test("differential: a method body behaves identically sync and async", asyn
       methods: {
         run(s: { data: Data }) {
           for (const op of program) applyOp(s, op, syncLog);
+          return s.data;
         },
       },
     });
@@ -90,19 +91,46 @@ Deno.test("differential: a method body behaves identically sync and async", asyn
         // deno-lint-ignore require-await
         async run(s: { data: Data }) {
           for (const op of program) applyOp(s, op, asyncLog);
+          return s.data;
         },
       },
     });
+    // The same body as a TRANSACTION: reads overlay a pinned snapshot with the
+    // call's own buffered write-set, committed as one `__set` at the end. Its
+    // RETURN is compared too — `return s.data` after writes once handed back
+    // the pre-write snapshot, because the value was materialized after the
+    // commit had already dropped the overlay (read-your-writes held for every
+    // read inside the body and broke for the value the caller got).
+    const txLog: unknown[] = [];
+    const tc = cell(`fz_t_${round}`, {
+      transaction: true,
+      state: { data: initData() } as { data: Data },
+      methods: {
+        // deno-lint-ignore require-await
+        async run(s: { data: Data }) {
+          for (const op of program) applyOp(s, op, txLog);
+          return s.data;
+        },
+      },
+    } as Any);
 
-    const h = await bootCells([sc, ac]);
+    const h = await bootCells([sc, ac, tc]);
     try {
-      await (sc as Any).run();
-      await (ac as Any).run();
+      const plain = (v: unknown) => JSON.parse(JSON.stringify(v ?? null));
+      const syncRet = plain(await (sc as Any).run());
+      const asyncRet = plain(await (ac as Any).run());
+      const txRet = plain(await (tc as Any).run());
       await h.settle();
-      const syncState = JSON.parse(JSON.stringify((sc as Any).data));
-      const asyncState = JSON.parse(JSON.stringify((ac as Any).data));
+      const syncState = plain((sc as Any).data);
+      const asyncState = plain((ac as Any).data);
       assertEquals(asyncState, syncState, `state diverged — ${repro}`);
       assertEquals(asyncLog, syncLog, `reads diverged — ${repro}`);
+      assertEquals(asyncRet, syncRet, `return diverged — ${repro}`);
+      assertEquals(plain((tc as Any).data), syncState, `tx state — ${repro}`);
+      assertEquals(txLog, syncLog, `tx reads diverged — ${repro}`);
+      assertEquals(txRet, syncRet, `tx return diverged — ${repro}`);
+      // The return is what was committed: never an older view of it.
+      assertEquals(txRet, syncState, `tx return is not the state — ${repro}`);
     } finally {
       h.dispose();
     }

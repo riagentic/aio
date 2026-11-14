@@ -1520,6 +1520,22 @@ export function buildMethodsExecutor(
               return;
             }
             guardCommit();
+            // Materialize the return value NOW, while the proxy still overlays
+            // this call's pending writes. A transactional proxy reads the
+            // pinned snapshot plus the write-set; once the write-set commits
+            // the overlay is gone, so `s.obj.q = 5; return s.obj` handed back
+            // `{ q: 0 }` and `s.list.push(9); return s.list` lacked the 9 —
+            // read-your-writes held for a field read inside the body and broke
+            // for the very value the caller got. Used only after a successful
+            // commit (a refused commit rejects the call as before). A throw
+            // (a circular return) is held and rethrown at the old site, so
+            // the commit and the rejection keep their order.
+            let preValue: { v: unknown } | { e: unknown };
+            try {
+              preValue = { v: materializeValue(value) };
+            } catch (e) {
+              preValue = { e };
+            }
             batcher.flush();
             // …then find out whether the store ACCEPTED it. A refused write-set
             // (classically `s.x = { ...s.x, y }` — a proxy-derived value assigned
@@ -1605,9 +1621,11 @@ export function buildMethodsExecutor(
               // Proxy is refused by structuredClone at the transport seam, so
               // the return crosses to the caller as plain data. Values with no
               // proxy inside are returned by reference and cost nothing.
+              // Materialized before the commit (see `preValue`).
+              if (retEffects.length === 0 && "e" in preValue) throw preValue.e;
               const settled = retEffects.length > 0
                 ? undefined
-                : materializeValue(value);
+                : (preValue as { v: unknown }).v;
               settlePolicy({ value: settled });
               answer(settled);
             }
