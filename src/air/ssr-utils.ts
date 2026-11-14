@@ -136,8 +136,17 @@ export function rawTextContent(
   return escapeHtml(text);
 }
 
+// `<` and `>` are escaped too, though a quoted attribute value never needs it
+// in normal markup: inside a raw-text parent — `<noscript>` for a browser with
+// scripting on, `<noembed>`, `<noframes>`, `<xmp>`, `<iframe>` — the parser
+// does not see attributes at all, only text up to `</noscript`. A value
+// holding `</noscript><img src=x onerror=…>` ended the element there and
+// shipped live markup from app/user data. Escaped, the same bytes are inert in
+// both parser modes and decode to the identical attribute value (React does
+// the same).
 export function escapeAttr(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/'/g, "&#x27;").replace(/`/g, "&#96;")
     .replace(/\n/g, "&#xa;").replace(/\r/g, "&#xd;"); // AIO-277: escape newlines
 }
