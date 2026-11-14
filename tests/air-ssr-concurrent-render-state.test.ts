@@ -92,11 +92,11 @@ Deno.test("SSR: two interleaved streams keep their own <head>", async () => {
 
   const headA = collectHead(reqA);
   const headB = collectHead(reqB);
-  assertStringIncludes(headA, "<title>alice — site</title>");
+  assertStringIncludes(headA, "<title data-aio-head>alice — site</title>");
   assertStringIncludes(headA, 'content="about alice"');
   assertStringIncludes(headA, "https://x.test/alice");
   assert(!headA.includes("bob"), `A's head leaked B's page: ${headA}`);
-  assertStringIncludes(headB, "<title>bob — site</title>");
+  assertStringIncludes(headB, "<title data-aio-head>bob — site</title>");
   assert(!headB.includes("alice"), `B's head leaked A's page: ${headB}`);
 });
 
@@ -131,8 +131,8 @@ Deno.test("SSR: a lone stream's head still answers collectHead() with no argumen
   let out = "";
   for await (const c of renderToStream(h(Page, null), req)) out += c;
   assertEquals(out, "<p>x</p>");
-  assertStringIncludes(collectHead(), "<title>only</title>");
-  assertStringIncludes(collectHead(req), "<title>only</title>");
+  assertStringIncludes(collectHead(), "<title data-aio-head>only</title>");
+  assertStringIncludes(collectHead(req), "<title data-aio-head>only</title>");
 });
 
 Deno.test("SSR: collectHead() with no argument REFUSES to guess between overlapped streams", async () => {
@@ -149,8 +149,8 @@ Deno.test("SSR: collectHead() with no argument REFUSES to guess between overlapp
   const err = assertThrows(() => collectHead(), Error);
   assertStringIncludes((err as Error).message, "collectHead(req)");
   // …and the exact answer is always available to whoever named their render.
-  assertStringIncludes(collectHead(reqA), "<title>alice</title>");
-  assertStringIncludes(collectHead(reqB), "<title>bob</title>");
+  assertStringIncludes(collectHead(reqA), "<title data-aio-head>alice</title>");
+  assertStringIncludes(collectHead(reqB), "<title data-aio-head>bob</title>");
 });
 
 Deno.test("SSR: a renderToString inside an open stream keeps both heads intact", async () => {
@@ -169,7 +169,7 @@ Deno.test("SSR: a renderToString inside an open stream keeps both heads intact",
   assert(!first.done);
   const innerHtml = renderToString(h(Sync, null));
   assertEquals(innerHtml, "<i>inner</i>");
-  assertStringIncludes(collectHead(), "<title>inner</title>");
+  assertStringIncludes(collectHead(), "<title data-aio-head>inner</title>");
   let rest = first.value;
   for (;;) {
     const r = await s.next();
@@ -177,7 +177,7 @@ Deno.test("SSR: a renderToString inside an open stream keeps both heads intact",
     rest += r.value;
   }
   assertEquals(rest, `<div><input id=":r0:"><input id=":r1:"></div>`);
-  assertStringIncludes(collectHead(req), "<title>outer</title>");
+  assertStringIncludes(collectHead(req), "<title data-aio-head>outer</title>");
 });
 
 // ── the window AFTER a render ends ────────────────────────────────────
@@ -213,7 +213,7 @@ Deno.test("SSR: a render that started after mine ended is not mine", async () =>
   await b.next();
   assertStringIncludes(
     collectHead(),
-    "<title>alice</title>",
+    "<title data-aio-head>alice</title>",
     "A's response was served B's head",
   );
   for await (const _ of b) { /* drain B */ }
@@ -241,7 +241,7 @@ Deno.test("SSR: an abandoned stream does not poison every later head", async () 
     body += c;
   }
   assertEquals(body, "<p>real</p>");
-  assertStringIncludes(collectHead(), "<title>real</title>");
+  assertStringIncludes(collectHead(), "<title data-aio-head>real</title>");
   _resetHead();
 });
 
@@ -263,8 +263,8 @@ Deno.test("SSR: two heads finished and unasked-for is still a refusal", async ()
   );
   const err = assertThrows(() => collectHead(), Error);
   assertStringIncludes((err as Error).message, "collectHead(req)");
-  assertStringIncludes(collectHead(ra), "<title>alice</title>");
-  assertStringIncludes(collectHead(rb), "<title>bob</title>");
+  assertStringIncludes(collectHead(ra), "<title data-aio-head>alice</title>");
+  assertStringIncludes(collectHead(rb), "<title data-aio-head>bob</title>");
   _resetHead();
 });
 
@@ -304,7 +304,10 @@ Deno.test("SSR: a key that names no render says so instead of an empty head", as
   const quiet: string[] = [];
   console.warn = (...a: unknown[]) => void quiet.push(a.join(" "));
   try {
-    assertStringIncludes(collectHead(req), "<title>named</title>");
+    assertStringIncludes(
+      collectHead(req),
+      "<title data-aio-head>named</title>",
+    );
   } finally {
     console.warn = orig;
   }
@@ -351,12 +354,12 @@ Deno.test("SSR: a closed tab's head is not the no-argument answer once another r
   _resetHead();
   await silently(async () => {
     await drain("mine");
-    assertStringIncludes(collectHead(), "<title>mine</title>");
+    assertStringIncludes(collectHead(), "<title data-aio-head>mine</title>");
     await closeTab("gone"); // aborted after mine was answered
     const next = renderToStream(h(Titled, { name: "next" }) as VNode);
     assertEquals(collectHead(), ""); // mine's caller again: was gone's title
     for await (const _ of next) { /* the next request, streamed */ }
-    assertStringIncludes(collectHead(), "<title>next</title>"); // no refusal
+    assertStringIncludes(collectHead(), "<title data-aio-head>next</title>"); // no refusal
   });
   _resetHead();
 });
@@ -369,7 +372,7 @@ Deno.test("SSR: breaking out of your own stream, then asking, answers as 1.0.9",
   await silently(async () => {
     const gen = renderToStream(h(Titled, { name: "Mine" }) as VNode);
     for await (const c of gen) if (c.includes("Mine")) break;
-    assertStringIncludes(collectHead(), "<title>Mine</title>");
+    assertStringIncludes(collectHead(), "<title data-aio-head>Mine</title>");
   });
   _resetHead();
 });
@@ -397,13 +400,13 @@ Deno.test("SSR: a closed tab still makes the next page's no-argument head refuse
   _resetHead();
   await silently(async () => {
     await drain("before");
-    assertStringIncludes(collectHead(), "<title>before</title>");
+    assertStringIncludes(collectHead(), "<title data-aio-head>before</title>");
     await closeTab("gone");
     const req = {};
     await drain("next", req);
     const err = assertThrows(() => collectHead(), Error);
     assertStringIncludes((err as Error).message, "collectHead(req)");
-    assertStringIncludes(collectHead(req), "<title>next</title>");
+    assertStringIncludes(collectHead(req), "<title data-aio-head>next</title>");
   });
   _resetHead();
 });
@@ -428,10 +431,10 @@ Deno.test("SSR: 1.0.9 answers — a head collected mid-render, then the next pag
       )
     ) { /**/ }
     await drain("B");
-    assertStringIncludes(collectHead(), "<title>B</title>");
-    assertStringIncludes(collectHead(), "<title>B</title>");
+    assertStringIncludes(collectHead(), "<title data-aio-head>B</title>");
+    assertStringIncludes(collectHead(), "<title data-aio-head>B</title>");
   });
-  assertStringIncludes(mid, "<title>A</title>");
+  assertStringIncludes(mid, "<title data-aio-head>A</title>");
   _resetHead();
 });
 
@@ -444,13 +447,13 @@ Deno.test("SSR: 1.0.9 answers — a fragment endpoint that never asks, then page
         renderToString(h(Titled, { name: `s${i}` }) as VNode),
         `<div><p>s${i}</p><p>more</p></div>`,
       );
-      assertStringIncludes(collectHead(), `<title>s${i}</title>`);
-      assertStringIncludes(collectHead(), `<title>s${i}</title>`); // twice
+      assertStringIncludes(collectHead(), `<title data-aio-head>s${i}</title>`);
+      assertStringIncludes(collectHead(), `<title data-aio-head>s${i}</title>`); // twice
     }
     await drain("Q");
-    assertStringIncludes(collectHead(), "<title>Q</title>");
+    assertStringIncludes(collectHead(), "<title data-aio-head>Q</title>");
     await drain("Q2");
-    assertStringIncludes(collectHead(), "<title>Q2</title>");
+    assertStringIncludes(collectHead(), "<title data-aio-head>Q2</title>");
   });
   _resetHead();
 });
@@ -460,8 +463,8 @@ Deno.test("SSR: 1.0.9 answers — pages asked twice behind unasked fragments", a
   await silently(async () => {
     await drain("headless");
     await drain("P");
-    assertStringIncludes(collectHead(), "<title>P</title>");
-    assertStringIncludes(collectHead(), "<title>P</title>");
+    assertStringIncludes(collectHead(), "<title data-aio-head>P</title>");
+    assertStringIncludes(collectHead(), "<title data-aio-head>P</title>");
     await drain("F");
     const q = {};
     await drain("headless", q);
@@ -485,7 +488,7 @@ Deno.test("SSR: 1.0.9 answers — an error handler collecting a thrown page's he
         )
       ) { /**/ }
     } catch { /* the handler's catch… */ }
-    assertStringIncludes(collectHead(), "<title>Y</title>"); // …asks
+    assertStringIncludes(collectHead(), "<title data-aio-head>Y</title>"); // …asks
   });
   _resetHead();
 });
@@ -513,7 +516,7 @@ Deno.test("SSR: 1.0.9 refuses — a thrown page and the page after it; a keyed n
   await drain("A");
   await drain("K", k);
   await drain("B");
-  assertStringIncludes(collectHead(k), "<title>K</title>");
+  assertStringIncludes(collectHead(k), "<title data-aio-head>K</title>");
   assertThrows(() => collectHead(), Error); // A's caller
   assertThrows(() => collectHead(), Error); // B's caller
   _resetHead();

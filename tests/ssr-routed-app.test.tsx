@@ -53,11 +53,11 @@ Deno.test("SSR: renderToString of a routed app renders the matched page and its 
   const html = await atPath("/p/hello", () => renderToString(<App />));
   assert(html.includes("<article>post hello</article>"), html);
   assert(html.includes('href="/p/hello"'), html);
-  assertEquals(collectHead(), "<title>Post hello</title>");
+  assertEquals(collectHead(), "<title data-aio-head>Post hello</title>");
   const about = await atPath("/about", () => renderToString(<App />));
   assert(about.includes("<p>about</p>"), about);
   assert(!about.includes("<article>"), about);
-  assertEquals(collectHead(), "<title>Site</title>");
+  assertEquals(collectHead(), "<title data-aio-head>Site</title>");
 });
 
 Deno.test("SSR: renderToStream of a routed app renders the matched page and its head", async () => {
@@ -67,5 +67,5 @@ Deno.test("SSR: renderToStream of a routed app renders the matched page and its 
     return out;
   });
   assert(html.includes("<article>post streamed</article>"), html);
-  assertEquals(collectHead(), "<title>Post streamed</title>");
+  assertEquals(collectHead(), "<title data-aio-head>Post streamed</title>");
 });

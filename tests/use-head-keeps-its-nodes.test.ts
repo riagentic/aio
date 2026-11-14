@@ -84,13 +84,16 @@ Deno.test("useHead: hydrate adopts the server's head tags", async () => {
     const body = renderToString(h(App as ComponentFn, null));
     doc.head.innerHTML = collectHead();
     const link = doc.head.querySelector("link");
-    assert(link);
+    const title = doc.head.querySelector("title");
+    assert(link && title);
     const root = doc.createElement("div");
     root.innerHTML = body;
     doc.body.appendChild(root);
     const handle = hydrate(root, App as ComponentFn);
     assert(doc.head.querySelector("link") === link, "the server's node stays");
-    assertEquals(doc.head.querySelectorAll("[data-aio-head]").length, 2);
+    assert(doc.head.querySelector("title") === title, "…and its <title>");
+    // title + link + meta: collectHead marks its <title> too.
+    assertEquals(doc.head.querySelectorAll("[data-aio-head]").length, 3);
     _unmount(handle);
   });
 });

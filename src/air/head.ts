@@ -251,7 +251,7 @@ function _apply(doc: Document | undefined): void {
   const { title, tags } = _merge(_liveInOrder(doc));
   const base = _baseTitles.get(doc);
   if (title !== undefined) {
-    if (base === undefined) _baseTitles.set(doc, doc.title);
+    if (base === undefined) _baseTitles.set(doc, _originalTitle(doc));
     if (doc.title !== title) doc.title = title;
   } else if (base !== undefined) {
     doc.title = base;
@@ -270,11 +270,29 @@ function _apply(doc: Document | undefined): void {
   // them on every apply re-inserted a `<link rel="stylesheet">` (styles gone
   // until it reloads) and the icon on each re-render of any owner, and
   // replaced the server's own tags on hydrate.
-  const cur = Array.from(doc.head.querySelectorAll(`[${ATTR}]`));
+  // The server's `<title data-aio-head>` is not one of these: the title is
+  // owned through `doc.title` above, and removing it here dropped it.
+  const cur = Array.from(
+    doc.head.querySelectorAll(`meta[${ATTR}], link[${ATTR}]`),
+  );
   const html = (l: Element[]) => l.map((e) => e.outerHTML) + "";
   if (html(cur) === html(els)) return;
   for (const el of cur) el.remove();
   for (const el of els) doc.head.appendChild(el);
+}
+
+/** The title the document had before any `useHead` owned it — what is
+ *  restored once none does. On a hydrated page `doc.title` is NOT that: it is
+ *  the server page's own `useHead` title, which `collectHead` marks
+ *  `data-aio-head`. Recorded as the original, it was "restored" on the next
+ *  page without a `useHead` — the post's title left on the About page, where a
+ *  client mount drops it. A marked title is ours, so the original is the
+ *  shell's own unmarked `<title>` if it has one, else none (""). */
+function _originalTitle(doc: Document): string {
+  const titles = Array.from(doc.querySelectorAll("title"));
+  if (!titles.some((t) => t.hasAttribute(ATTR))) return doc.title;
+  const shell = titles.find((t) => !t.hasAttribute(ATTR));
+  return shell ? shell.textContent ?? "" : "";
 }
 
 /** The document the component rendering RIGHT NOW is mounted in. */
@@ -443,7 +461,11 @@ export function collectHead(key?: object): string {
   const entries = render ? _ssrHeads.get(render) : undefined;
   const { title, tags } = _merge(entries ?? []);
   const out: string[] = [];
-  if (title !== undefined) out.push(`<title>${escapeHtml(title)}</title>`);
+  // Marked like the tags, so hydration knows this title is the page's and not
+  // the document's original (see `_originalTitle`).
+  if (title !== undefined) {
+    out.push(`<title ${ATTR}>${escapeHtml(title)}</title>`);
+  }
   for (const t of tags) {
     let attrs = "";
     for (const [k, v] of Object.entries(t.attrs)) {

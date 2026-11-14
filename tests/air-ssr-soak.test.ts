@@ -1269,7 +1269,7 @@ Deno.test("SSR soak over HTTP: a stream keeps the route of the request that crea
           `<main>${
             names.map((n) => n === b.n ? `<p>${n}-private</p>` : "<!---->")
               .join("")
-          }</main><!--head:<title>${b.n}</title>-->`,
+          }</main><!--head:<title data-aio-head>${b.n}</title>-->`,
           `FUZZ_SEED=${SEED}: /${b.n} served another request's page or head`,
         );
       });

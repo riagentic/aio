@@ -75,7 +75,7 @@ Deno.test("SSR stream 1.0.9: a stream created in a component and read after the 
     assertEquals(collectHead(), "");
     // 1.0.9: its own id sequence, and its own head under its key.
     assertEquals(await drain(pending!), '<i id=":r0:">isl</i>');
-    assertEquals(collectHead(KEY), "<title>island</title>");
+    assertEquals(collectHead(KEY), "<title data-aio-head>island</title>");
   });
 });
 
@@ -97,7 +97,7 @@ Deno.test("SSR stream 1.0.9: a stream first read INSIDE a component call is part
       renderToString(h(Outer, null) as VNode),
       '<div id=":r1:">x</div>',
     );
-    assertEquals(collectHead(), "<title>island</title>");
+    assertEquals(collectHead(), "<title data-aio-head>island</title>");
     const r = await first!;
     assertEquals(
       (r.done ? "" : r.value) + await drain(s),

@@ -193,7 +193,8 @@ function tree(p: Page, mid: boolean, boom: boolean, midSeen: string[]): VNode {
 
 const bump = (c: Record<string, number>, k: string) => c[k] = (c[k] ?? 0) + 1;
 
-const headOf = (p: Page | null) => p?.head ? `<title>T${p.id}</title>` : "";
+const headOf = (p: Page | null) =>
+  p?.head ? `<title data-aio-head>T${p.id}</title>` : "";
 
 async function round(
   rnd: (n: number) => number,

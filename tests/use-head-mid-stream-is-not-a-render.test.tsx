@@ -53,7 +53,7 @@ Deno.test("useHead between two stream chunks does not reach the stream's head", 
 
   assertEquals(
     collectHead(),
-    "<title>the page</title>",
+    "<title data-aio-head>the page</title>",
     "the streamed page's head is what its components asked for",
   );
   assert(
@@ -72,7 +72,7 @@ Deno.test("useHead inside a streamed component body is still collected", async (
       // drained, nothing else
     }
   });
-  assertEquals(collectHead(), "<title>the page</title>");
+  assertEquals(collectHead(), "<title data-aio-head>the page</title>");
   assertEquals(warns, [], "a component body is not a mistake");
   _resetHead();
 });

@@ -125,7 +125,7 @@ Deno.test("useHead: SSR collects the head as markup, escaped, and never warns", 
       "the title belongs in <head>, not the body",
     );
     const head = collectHead();
-    assertStringIncludes(head, "<title>Milk — Notes</title>");
+    assertStringIncludes(head, "<title data-aio-head>Milk — Notes</title>");
     assertStringIncludes(
       head,
       '<meta name="description" content="the milk note" data-aio-head>',
@@ -265,7 +265,7 @@ Deno.test("useHead: renderToStream collects the head, like renderToString", asyn
   }
   const head = collectHead();
   assertStringIncludes(streamed, "<article>milk</article>");
-  assertStringIncludes(head, "<title>Milk — Notes</title>");
+  assertStringIncludes(head, "<title data-aio-head>Milk — Notes</title>");
   assertStringIncludes(head, 'content="the milk note"');
   assertStringIncludes(head, 'href="https://notes.example/p/milk"');
   assertEquals(warnings, [], "and it does not accuse the author of anything");
