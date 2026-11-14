@@ -339,7 +339,7 @@ export function createOwnManager(log: Log): {
    *  `disposeAll` had nothing to give shutdown's "own processes" phase to
    *  await: `await app.close()` resolved while an async disposer (a server
    *  draining, a child awaited to exit) was still running, and on a signal
-   *  exit `Deno.exit` cut it off half-done. */
+   *  exit the process exit cut it off half-done. */
   function release(
     id: string,
     dispose: OwnDisposer,
