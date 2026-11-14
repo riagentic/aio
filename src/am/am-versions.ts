@@ -46,6 +46,8 @@ import {
   isComparableVersion,
 } from "../server/updates-core.ts";
 import { basename, dirname, join, resolve, SEPARATOR as SEP } from "@std/path";
+import { parse as parseJsonc } from "@std/jsonc";
+import { codeMask } from "../diagnostics/code-mask.ts";
 import { ageSince } from "../server/single-instance-lock.ts";
 
 /** The moving pin — `origin/main`, refreshed on every link. */
@@ -1066,28 +1068,101 @@ export async function writeDenoJsonPin(
   // stack trace where the report should be.
   const path = readDenoJsonSync(appDir)?.path ?? join(appDir, "deno.json");
   const raw = await Deno.readTextFile(path);
-  const line = `  "aioVersion": ${JSON.stringify(ref)}`;
-  const existing = /^\s*"aioVersion"\s*:\s*"[^"]*"\s*,?\s*$/m;
-  if (existing.test(raw)) {
-    const hadComma = /^\s*"aioVersion"[^\n]*,\s*$/m.test(raw);
-    await Deno.writeTextFile(
-      path,
-      // A replacer FUNCTION: the pin ref is the user's text (a local path),
-      // and `$&` / `$'` in a replacement STRING would splice the match or the
-      // rest of deno.json into it.
-      raw.replace(existing, () => line + (hadComma ? "," : "")),
+  const next = pinnedText(raw, ref, path);
+  // READ BACK what Deno will read before a byte is written. JSON(C) keeps the
+  // LAST duplicate key, so a second `aioVersion` inserted ahead of the old one
+  // (the line-anchored regex this replaced missed a compact or shared-line
+  // member) reported success while the old pin stayed — dep/aio relinked to
+  // one version, deno.json pinning another. A throw here is the caller's
+  // rollback (cmdPin relinks the previous dep/aio).
+  let back: unknown;
+  try {
+    back = (parseJsonc(next) as Record<string, unknown> | null)?.aioVersion;
+  } catch (e) {
+    throw new Error(
+      `${path}: pinning ${ref} would leave it unparseable (${
+        e instanceof Error ? e.message : String(e)
+      }) — not written`,
     );
-    return;
   }
-  // Insert as the first field so it reads as the app's identity, like appId.
-  const open = raw.indexOf("{");
-  if (open < 0) throw new Error(`${path} is not a JSON object`);
+  if (back !== ref) {
+    throw new Error(
+      `${path}: wrote aioVersion ${JSON.stringify(ref)} but it reads back as ` +
+        `${JSON.stringify(back)} — not written; set it by hand`,
+    );
+  }
+  await Deno.writeTextFile(path, next);
+}
+
+/** `raw` (a deno.json/deno.jsonc text) with the TOP-LEVEL `aioVersion`
+ *  member's value replaced by `ref`, or the member inserted after the
+ *  object's opening `{` when absent. Read through `codeMask`, so a key-like
+ *  text in a string or a comment — and a `{` in a leading comment — is not
+ *  the member; nested objects (`"tasks": {"aioVersion": …}`) are skipped by
+ *  depth. Formatting elsewhere is untouched. Pure. */
+function pinnedText(raw: string, ref: string, path: string): string {
+  const mask = codeMask(raw);
+  const value = JSON.stringify(ref);
+  // The next code offset at/after `i` that is not whitespace (comment bodies
+  // are mask 0; their `//` `/*` delimiters are skipped as comment openers).
+  const significant = (i: number): number => {
+    while (i < raw.length) {
+      if (mask[i] !== 1 || /\s/.test(raw[i]!)) i++;
+      else if (raw[i] === "/" && (raw[i + 1] === "/" || raw[i + 1] === "*")) {
+        i += 2;
+      } else if (raw[i] === "*" && raw[i + 1] === "/") i += 2;
+      else return i;
+    }
+    return -1;
+  };
+  const open = significant(0);
+  if (open < 0 || raw[open] !== "{") {
+    throw new Error(`${path} is not a JSON object`);
+  }
+  const spans: [number, number][] = [];
+  let depth = 0;
+  for (let i = open; i < raw.length; i++) {
+    if (mask[i] !== 1) continue;
+    const c = raw[i];
+    if (c === "{" || c === "[") depth++;
+    else if (c === "}" || c === "]") depth--;
+    else if (c === '"') {
+      // A string: its body is mask 0 up to the closing quote (mask 1).
+      let end = i + 1;
+      while (end < raw.length && mask[end] !== 1) end++;
+      const key = depth === 1 && raw.slice(i, end + 1) === '"aioVersion"';
+      const colon = key ? significant(end + 1) : -1;
+      if (colon >= 0 && raw[colon] === ":") { // the member, not a value
+        const start = significant(colon + 1);
+        if (start < 0 || raw[start] !== '"') {
+          throw new Error(
+            `${path}: "aioVersion" is not a string — fix it by hand, then re-pin`,
+          );
+        }
+        let close = start + 1;
+        while (close < raw.length && mask[close] !== 1) close++;
+        spans.push([start, close + 1]);
+        i = close;
+        continue;
+      }
+      i = end;
+    }
+  }
+  // EVERY top-level member: a file the old line-anchored writer left with two
+  // (the stale one last, so winning) is repaired by a re-pin, not refused.
+  if (spans.length > 0) {
+    let out = raw;
+    for (const [a, b] of spans.reverse()) {
+      out = out.slice(0, a) + value + out.slice(b);
+    }
+    return out;
+  }
+  // Absent: insert as the first field so it reads as the app's identity,
+  // like appId.
   const rest = raw.slice(open + 1);
-  const needsComma = /^\s*[}\]]/.test(rest) === false;
-  await Deno.writeTextFile(
-    path,
-    raw.slice(0, open + 1) + "\n" + line + (needsComma ? "," : "") + rest,
-  );
+  const empty = raw[significant(open + 1)] === "}";
+  return raw.slice(0, open + 1) + `\n  "aioVersion": ${value}` +
+    (empty ? "" : ",") + rest;
 }
 
 /** Where `dep/aio` currently points (null when absent or not a symlink). */
