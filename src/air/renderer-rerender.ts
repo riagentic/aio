@@ -39,6 +39,7 @@ import {
   type RootState,
 } from "./renderer-types.ts";
 import {
+  _activeRoot,
   _boundaryStack,
   _currentBoundary,
   _currentCollector,
@@ -161,6 +162,81 @@ function _scheduleLentRender(inst: ComponentInstance): void {
   _scheduleComponentRender(inst);
 }
 
+// ── State set during render ───────────────────────────────────────────
+//
+// React's "storing information from previous renders": a component that
+// sets its OWN state while rendering (`if (prev !== v) { setPrev(v); … }`)
+// is rendered again at once, before anything commits. Here the body drops its
+// subscriptions while it runs and takes the new ones after, so a write it
+// made to a value it had just read notified nobody — the page stayed one
+// render behind (1/0, 2/1, …). Only the compat `useState` setter asks
+// (`_noteRenderWrite`); a signal write in a native body keeps its meaning.
+
+/** The body running now, per collector: passes so far, where the root's
+ *  afterRender queue stood when it started, and whether it set its state. */
+const _passes = new WeakMap<
+  LifecycleCollector,
+  { n: number; q: number; ask?: boolean }
+>();
+/** React's bound — past it the body never settles, and it says so. */
+const RERUN_LIMIT = 25;
+
+/** @internal The compat `useState` setter: the instance whose hook slots are
+ *  `ownerRefs` set its state. Heard only while that instance's own body is
+ *  the one rendering. */
+export function _noteRenderWrite(ownerRefs: unknown[]): void {
+  const c = _currentCollector;
+  const p = c?.refs === ownerRefs && _passes.get(c);
+  if (p) p.ask = true;
+}
+
+function _bodyStart(c: LifecycleCollector): void {
+  _passes.set(c, { n: 0, q: _activeRoot?.afterRenderQueue.length ?? 0 });
+}
+
+/** Ends the body's bookkeeping; true when it set its state on a path that
+ *  did not re-run it. */
+function _bodyEnd(c: LifecycleCollector): boolean {
+  const p = _passes.get(c);
+  _passes.delete(c);
+  return !!p?.ask;
+}
+
+/** Whether the body that just returned must run again — and, if so, the pass
+ *  is thrown away exactly as a re-render throws away the render before it:
+ *  its body cleanups run, its onMount/afterRender requests, computeds,
+ *  effects and reads are dropped, and the hook cursor goes back to 0. Hook
+ *  STATE (the refs) is kept: that is what the write was for. */
+function _rerunPass(
+  c: LifecycleCollector,
+  collected: Parameters<typeof _computedDisposeAll>[0],
+  effectCollected: (() => void)[],
+  deps: Set<unknown>,
+): boolean {
+  const p = _passes.get(c);
+  if (!p?.ask) return false;
+  p.ask = false;
+  if (++p.n > RERUN_LIMIT) {
+    // React stops at the same bound with the same words.
+    throw new Error(
+      `[aio] <${c._component}> set its own state during render ` +
+        `${RERUN_LIMIT} times: too many re-renders. A setState in a ` +
+        `component body must be conditional.`,
+    );
+  }
+  _runCleanups(c.cleanupCallbacks, c._component);
+  c.cleanupCallbacks = [];
+  c.mountCallbacks = [];
+  _computedDisposeAll(collected);
+  _effectDisposeAll(effectCollected);
+  deps.clear();
+  // Everything queued since the body started is this body's: `afterRender`
+  // takes its owner from the collector, which is this one throughout.
+  _activeRoot?.afterRenderQueue.splice(p.q);
+  c.refIndex = 0;
+  return true;
+}
+
 // ── Per-component re-render ───────────────────────────────────────────
 
 /** Dev tripwire: the state hooks (`useRef`/`useSignal`/`useId`, and
@@ -273,6 +349,7 @@ export function _rerenderComponent(inst: ComponentInstance): void {
   const deps = _trackStart();
   inst.refIndex = 0;
   _setCurrentCollector(inst);
+  _bodyStart(inst);
   let rendered: VNode | string | number | null;
   try {
     const pending = inst._fallbackError as Error | undefined;
@@ -287,15 +364,21 @@ export function _rerenderComponent(inst: ComponentInstance): void {
         | number
         | null;
     } else {
-      rendered = (vnode.tag as ComponentFn)({
-        ...vnode.props,
-        children: vnode.children.length > 0
-          ? vnode.children
-          : (vnode.props.children ?? vnode.children),
-      });
+      const body = () =>
+        (vnode.tag as ComponentFn)({
+          ...vnode.props,
+          children: vnode.children.length > 0
+            ? vnode.children
+            : (vnode.props.children ?? vnode.children),
+        });
+      rendered = body();
+      while (_rerunPass(inst, collected, effectCollected, deps)) {
+        rendered = body();
+      }
     }
     _throwIfNotANode(rendered);
   } catch (error) {
+    _bodyEnd(inst);
     // Popped FIRST: the fallback re-entry below rebuilds its own chain.
     popChain();
     // Error during signal-triggered re-render — keep old output (AIO-138)
@@ -367,6 +450,7 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     return;
   }
   _setCurrentCollector(null);
+  _bodyEnd(inst);
   _checkHookOrder(inst, inst.refIndex ?? 0, inst._component ?? "Component");
   _trackEnd(deps);
   // A render that SUCCEEDED clears the pending boundary error, so the very
@@ -898,6 +982,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
       // has finished filling it. Dev-only consumer (air/untracked-read.ts).
       collector._renderDeps = deps;
       _setCurrentCollector(collector);
+      _bodyStart(collector);
 
       return {
         skip: false,
@@ -911,6 +996,17 @@ export function _createHooks(rootState: RootState): VDomHooks {
         // component of every render is not free.
         dtStart: _isDevToolsConnected() ? performance.now() : undefined,
       };
+    },
+
+    rerunComponent(_vnode: VNode, state: unknown): boolean {
+      const hs = state as HookState;
+      if (hs.skip || !hs.collector) return false;
+      return _rerunPass(
+        hs.collector,
+        hs.collected!,
+        hs.effectCollected!,
+        hs.deps!,
+      );
     },
 
     afterComponent(
@@ -1010,6 +1106,10 @@ export function _createHooks(rootState: RootState): VDomHooks {
         inst._dtLastMs = performance.now() - hs.dtStart;
       }
       _subscribeComponentDeps(inst, hs.deps!);
+      // A body that set its own state on a path that does not re-run it
+      // before committing (hydration must match the server's markup first):
+      // render again right after, rather than stay one render behind.
+      if (_bodyEnd(collector)) _scheduleComponentRender(inst);
       if (typeof vnode.tag === "function") {
         _warnIfLostSubscription(vnode.tag as ComponentFn, inst, hs.deps!);
       }
@@ -1087,6 +1187,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
       // Whatever catches this throw may discard work already built around it.
       _noteDiscard();
       const hs = state as HookState | undefined;
+      if (hs?.collector) _bodyEnd(hs.collector);
       if (hs && !hs.skip && hs.deps) {
         _trackEnd(hs.deps);
         _computedCollectEnd(hs.collected!);

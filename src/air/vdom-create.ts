@@ -564,17 +564,31 @@ export function _detachRef(
   if (node && _pendingRefs.length > 0) {
     _pendingRefs = _pendingRefs.filter((p) => p.node !== node);
   }
-  _callRef(ref, null, owner);
+  // React 19: a callback ref that RETURNED a function is detached by calling
+  // that function — INSTEAD of `ref(null)`. One that returned nothing still
+  // gets the null (React 18's contract, and every existing aio app's).
+  const off = node && _refOff.get(node);
+  if (off) _refOff.delete(node!);
+  _callRef(off || ref, null, owner, !!off);
 }
+
+/** The cleanup a node's callback ref returned. Per NODE: a node carries one
+ *  ref at a time, and its detach always comes before the next attach. */
+const _refOff = new WeakMap<Node, () => void>();
 
 export function _callRef(
   ref: unknown,
   value: Node | null,
   owner?: string,
+  /** `ref` is a returned cleanup: called with no argument. */
+  off?: boolean,
 ): void {
   if (typeof ref === "function") {
     try {
-      (ref as (v: Node | null) => void)(value);
+      const out = off ? ref() : ref(value);
+      // Dropped until React 19 made it a contract: `ref={(el) => { …;
+      // return () => … }}` never had its teardown run.
+      if (value && typeof out === "function") _refOff.set(value, out);
     } catch (e) {
       _reportHookError("ref", e, owner);
     }

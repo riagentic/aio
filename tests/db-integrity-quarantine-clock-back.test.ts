@@ -4,6 +4,7 @@
 // database — the only record of everything written since the snapshot — sorts
 // as the "oldest" and is removed in the same call that kept it.
 import { assert } from "@std/assert";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   checkAndRecover,
   QUARANTINE_KEEP,
@@ -11,7 +12,7 @@ import {
 } from "../src/server/db-integrity.ts";
 
 Deno.test("integrity: a clock that went back never prunes the copy just quarantined", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "qclk-" });
+  const dir = await tempDir("qclk-");
   try {
     const path = `${dir}/state.db`;
     // QUARANTINE_KEEP earlier casualties, stamped under the (correct) clock.
@@ -48,6 +49,6 @@ Deno.test("integrity: a clock that went back never prunes the copy just quaranti
         `in the same call:\n  ${out.join("\n  ")}`,
     );
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });

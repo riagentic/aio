@@ -167,7 +167,19 @@ const App = () => (
 );
 ```
 
-Callback refs receive `null` when the element is removed.
+Callback refs receive `null` when the element is removed. A callback ref that
+**returns a function** (React 19) gets that function called instead — on
+removal, or when the ref itself changes — and no `null` call:
+
+```tsx
+<div
+  ref={(el) => {
+    const ro = new ResizeObserver(onResize);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }}
+/>;
+```
 
 ---
 

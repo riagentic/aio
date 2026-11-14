@@ -38,11 +38,24 @@ order after every interaction. It covers state updates batched in one handler,
 effects with deps and cleanup order, `useCallback` identity as an effect dep,
 `useMemo`, `useRef` (a value and a DOM ref), context, keyed lists that keep a
 child's state across a reorder, a controlled input, and a child whose cleanup
-runs on unmount.
+runs on unmount. `tests/react-patterns-edges.test.ts` adds the edges: state set
+during render (the body runs again before anything commits; one that never
+settles throws "too many re-renders" after 25 passes, as React does), a setter
+that compares with `Object.is` only (`force({})` and `setTodos([...todos])`
+re-render), a callback ref's returned cleanup (React 19), and a `useEffect`
+whose deps change shape.
 
 **One known difference:** React also writes a controlled input's value into the
 `value` _attribute_; AIR sets the property only. What the user sees and types is
 identical. It shows only in `form.reset()` and `[value=…]` CSS selectors.
+
+**And one on code React warns about:** a `useEffect` (or `useMemo`) deps array
+that changes LENGTH between renders counts as changed and re-runs; React
+compares only the common prefix (so `[x]` → `[]` does not re-run there).
+`useEffect` warns in dev, as React does — keep a deps array one length.
+
+`useState`'s setter skips only an `Object.is`-identical value, as React's does;
+`useLocal`/`signal()` also skip a shallow-equal object, which their docs say.
 
 ## One way per job
 

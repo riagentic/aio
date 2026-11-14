@@ -230,6 +230,11 @@ export interface VDomHooks {
     parentDom: Node,
     isSvg: boolean,
   ): unknown;
+  /** Called after each run of a component function, before `afterComponent`:
+   *  `true` means the body set its own state while rendering, so its output
+   *  is stale and the caller must run it again (React re-renders before
+   *  committing). Throws when it never settles. */
+  rerunComponent?(vnode: VNode, state: unknown): boolean;
   /** Called after a component function returns. Receives state from before. */
   afterComponent(
     vnode: VNode,

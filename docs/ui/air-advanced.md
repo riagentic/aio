@@ -176,7 +176,10 @@ const ReactChart = island({
 });
 ```
 
-Signal changes in `props()` automatically call `handle.update()`.
+Signal changes in `props()` automatically call `handle.update()`. Props written
+on the island in JSX (`<ReactChart range="1y" />`) are merged over `props()` for
+that instance — JSX wins, `children` is not passed — and a re-render that
+changes them calls `handle.update()` too.
 
 ---
 

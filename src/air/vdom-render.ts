@@ -202,12 +202,16 @@ export function createDom(
     );
     let rendered: VNode | string | number | null;
     try {
-      rendered = (vnode.tag as ComponentFn)({
-        ...vnode.props,
-        children: vnode.children.length > 0
-          ? vnode.children
-          : (vnode.props.children ?? vnode.children),
-      });
+      const body = () =>
+        (vnode.tag as ComponentFn)({
+          ...vnode.props,
+          children: vnode.children.length > 0
+            ? vnode.children
+            : (vnode.props.children ?? vnode.children),
+        });
+      rendered = body();
+      // Set its own state while rendering: run again before committing.
+      while (ctx.hooks?.rerunComponent?.(vnode, hookState)) rendered = body();
       _throwIfNotANode(rendered);
     } catch (e) {
       ctx.hooks?.abortComponent?.(vnode, hookState);

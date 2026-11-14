@@ -8,7 +8,7 @@
 import { h } from "./vdom.ts";
 import type { ComponentFn, VChild, VNode } from "./vdom.ts";
 import { effect, untrack } from "../state/signal.ts";
-import { onCleanup, onMount, useRef } from "./aio-renderer.ts";
+import { afterRender, onCleanup, onMount, useRef } from "./aio-renderer.ts";
 
 /** Handle returned by the mount function — allows update and unmount. */
 export interface IslandHandle {
@@ -26,7 +26,9 @@ export interface IslandConfig<M = unknown> {
     component: M extends { default: infer C } ? C : M,
     props: Record<string, unknown>,
   ) => IslandHandle;
-  /** Reactive props function — re-evaluated when signals change. */
+  /** Reactive props function — re-evaluated when signals change. Props
+   *  written on the island in JSX (`<Chart symbol="A"/>`) are merged OVER
+   *  these, per instance. */
   props: () => Record<string, unknown>;
   /** Optional loading placeholder component. */
   loading?: () => VChild;
@@ -93,11 +95,45 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
   }
 
   return function IslandComponent(
-    _props: Record<string, unknown>,
+    props: Record<string, unknown>,
   ): VNode | null {
     const containerRef = useRef<HTMLElement | null>(null);
     const handleRef = useRef<IslandHandle | null>(null);
     const disposeRef = useRef<(() => void) | null>(null);
+    // The props written on THIS instance in JSX. They were dropped: only
+    // `config.props()` ever reached mount/update, so `<Chart symbol="A"/>`
+    // and `<Chart symbol="B"/>` rendered the same thing, silently. Merged
+    // over `config.props()` (JSX wins, as a prop written at the call site
+    // does), `children` aside — the container's content is the external
+    // framework's.
+    const jsxRef = useRef<Record<string, unknown>>({});
+    /** The JSX props the island last saw, and the props it was last given. */
+    const seenJsxRef = useRef<Record<string, unknown> | null>(null);
+    const appliedRef = useRef<Record<string, unknown> | null>(null);
+    const { children: _children, ...jsx } = props ?? {};
+    jsxRef.current = jsx;
+    const merged = (): Record<string, unknown> => {
+      seenJsxRef.current = jsxRef.current;
+      return { ...config.props(), ...jsxRef.current };
+    };
+    /** Hand `next` to the mounted island. With JSX props, a value that both
+     *  `props()` and the JSX read (`<W n={count.value}/>` beside
+     *  `props: () => ({ n: count.value })`) arrives twice — the effect first,
+     *  still masked by the old JSX, then the re-render — so an update that
+     *  changes nothing is skipped. Without JSX props every effect run still
+     *  updates, exactly as before (a mutated-and-forced object included). */
+    const apply = (next: Record<string, unknown>): void => {
+      const h = handleRef.current;
+      if (!h || disposedRef.current) return;
+      const prev = appliedRef.current;
+      if (
+        prev && Object.keys(jsxRef.current).length > 0 && _sameProps(prev, next)
+      ) {
+        return;
+      }
+      appliedRef.current = next;
+      untrack(() => h.update(next));
+    };
     // Guard against unmount landing between loadModule() resolve and mount().
     // Without this, a late-arriving load calls config.mount() on a detached
     // container and assigns handleRef/disposeRef AFTER onCleanup already ran
@@ -135,26 +171,25 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
           ? (mod as { default: unknown }).default
           : mod;
 
-        const initialProps = untrack(config.props);
+        const initialProps = untrack(merged);
         handleRef.current = config.mount(
           container,
           // deno-lint-ignore no-explicit-any
           component as any,
           initialProps,
         );
+        appliedRef.current = initialProps;
 
         // Set up reactive props watcher — skip first run (mount already applied initial props).
         // Effect runs outside AIR tracking, so signal changes call handle.update() directly.
         let firstRun = true;
         disposeRef.current = effect(() => {
-          const nextProps = config.props();
+          const nextProps = merged();
           if (firstRun) {
             firstRun = false;
             return;
           }
-          if (handleRef.current) {
-            untrack(() => handleRef.current!.update(nextProps));
-          }
+          apply(nextProps);
         });
       }).catch((err) => {
         // "Failed to load module" was printed for a module that loaded fine and
@@ -173,6 +208,15 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
       });
     });
 
+    // A re-render with CHANGED JSX props updates the mounted island in place —
+    // after the commit, never from inside this render.
+    if (
+      handleRef.current && seenJsxRef.current &&
+      !_sameProps(seenJsxRef.current, jsx)
+    ) {
+      afterRender(() => apply(untrack(merged)));
+    }
+
     // Loading placeholder is rendered as initial children of the container div.
     // The external mount() will replace the container contents when ready.
     if (config.loading) {
@@ -181,4 +225,14 @@ export function island<M = unknown>(config: IslandConfig<M>): ComponentFn {
 
     return h("div", { ref: containerRef });
   };
+}
+
+/** Same keys, each `Object.is` — the JSX props of two renders. */
+function _sameProps(
+  a: Record<string, unknown>,
+  b: Record<string, unknown>,
+): boolean {
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  return ka.every((k) => Object.hasOwn(b, k) && Object.is(a[k], b[k]));
 }

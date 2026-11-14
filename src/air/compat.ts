@@ -5,12 +5,15 @@
 // as its React namesake — pinned by tests/react-patterns.test.ts.
 
 import { effect, type Signal, signal, untrack } from "../state/signal.ts";
+import { isDevMode } from "../state/dev-flag.ts";
 import {
   afterRender,
   onCleanup,
   onMount,
   useRef as rendererUseRef,
 } from "./aio-renderer.ts";
+import { _currentCollector } from "./renderer-state.ts";
+import { _noteRenderWrite } from "./renderer-rerender.ts";
 
 /** Re-export useRef from renderer for compat */
 export const useRef = rendererUseRef;
@@ -35,16 +38,32 @@ export function useState<T>(
       ? (initial as () => T)()
       : initial;
     const sig = signal(val);
+    // The instance this state belongs to, by its hook-slot array — the one
+    // thing a first render's collector and the instance it becomes share.
+    const owner = _currentCollector?.refs;
     // Made ONCE, kept beside the signal: React's setter is stable, so React
     // code lists it in deps arrays. A fresh arrow per render was a changed
     // dep per render — `useEffect(() => { load().then(setRows) }, [setRows])`
     // loaded again after every render it caused.
     const set = (next: T | ((prev: T) => T)): void => {
-      if (typeof next === "function") {
-        sig.update(next as (prev: T) => T);
-      } else {
-        sig.set(next);
-      }
+      const prev = sig.peek();
+      const v = typeof next === "function"
+        ? (next as (prev: T) => T)(prev)
+        : next;
+      // React's bail-out is `Object.is` and nothing more. The signal's own
+      // rule also skips a SHALLOW-equal object (right for `signal()`, which
+      // documents it), so the React idioms that hand back a fresh container
+      // — `force({})`, `setTodos([...todos])` after a mutation — re-rendered
+      // nothing here. `force` only when React would render; an identical
+      // value stays the no-op it is in React.
+      if (Object.is(prev, v)) return;
+      sig.set(v, { force: true });
+      // Set during the owner's OWN render — React's "storing information
+      // from previous renders". The body already read the old value and
+      // drops its subscriptions while it runs, so nobody heard this write
+      // and the screen stayed one render behind. The renderer re-runs the
+      // body before committing (renderer-rerender.ts `_noteRenderWrite`).
+      if (owner) _noteRenderWrite(owner);
     };
     ref.current = { sig, set };
   }
@@ -82,114 +101,108 @@ export function useEffect(
   fn: () => void | (() => void),
   deps?: unknown[],
 ): void {
-  if (deps && deps.length > 0) {
-    // AIO-7.1: real React semantics — run after mount, re-run only when deps
-    // differ by Object.is on a later render, cleanup before re-run. Signal
-    // auto-tracking is disabled (untrack): behavior is purely deps-driven.
-    const store = useRef<{
-      deps: unknown[] | null;
-      cleanup: (() => void) | null;
-    }>({ deps: null, cleanup: null });
-    const fnRef = useRef(fn);
-    fnRef.current = fn;
+  // ONE hook-slot layout for every deps form. The forms used to take
+  // different numbers of `useRef` slots (two with deps, one with `[]`, two
+  // with none), and slots are matched by CALL ORDER — so a deps array that
+  // went from `[x]` to `[]`, or from absent to present, moved every hook
+  // after this one onto another's slot: a later `useState` read a ref
+  // record and the render threw. React re-runs the effect (warning in dev);
+  // so does this, because the kind of deps is now data in one record.
+  const st = useRef<_EffectState>({
+    want: null,
+    tok: 0,
+    ran: null,
+    ranTok: -1,
+    off: null,
+    live: false,
+  });
+  const fnRef = useRef(fn);
+  fnRef.current = fn;
+  const s = st.current;
+  const want = deps === undefined ? null : deps;
+  // A changed SHAPE is a bug in the caller (React says so too). Re-running is
+  // the safe reading of it, and the length-first compare already does that;
+  // the warning is observe-only.
+  if (s.tok > 0 && isDevMode()) _warnDepsShape(s.want, want);
+  s.want = want;
+  s.tok++;
 
-    const prev = store.current.deps;
-    const changed = _depsChanged(prev, deps);
-
-    const disposeCleanup = () => {
-      if (store.current.cleanup) {
-        store.current.cleanup();
-        store.current.cleanup = null;
-      }
-    };
-
-    if (changed) {
-      const first = prev === null;
-      store.current.deps = deps.slice(); // record at schedule time — no double-fire
-      const run = () => {
-        disposeCleanup();
-        const cleanup = untrack(() => fnRef.current());
-        if (typeof cleanup === "function") {
-          store.current.cleanup = cleanup;
-        }
-      };
-      if (first) {
-        // The unmount cleanup is registered INSIDE onMount, which makes it
-        // unmount-only. Registered in the component body it would also fire
-        // before every re-render — and a re-render with UNCHANGED deps does
-        // not re-run the effect, so the cleanup tore the effect down and
-        // nothing put it back: a `useEffect(..., [])` listener was removed by
-        // the first unrelated re-render and never re-added.
-        onMount(() => {
-          onCleanup(disposeCleanup);
-          run(); // first run lands after the mount commit
-        });
-      } else {
-        // Re-runs must land AFTER the diff/commit phase so the effect sees the
-        // committed DOM (React semantics). queueMicrotask would fire before
-        // the diff runs, reading stale layout and racing the impending patch.
-        afterRender(run);
-      }
+  const teardown = (): void => {
+    const off = s.off;
+    s.off = null; // cleared FIRST: a cleanup that throws is not run twice
+    if (off) off();
+  };
+  // Runs at most once per committed render, against the deps of the LATEST
+  // render: the comparison is with what the effect last RAN with, decided
+  // here and not when it was scheduled. A render the renderer discards and
+  // re-runs (state set during render) drops what it scheduled, so a decision
+  // recorded at schedule time would be lost with it.
+  const flush = (): void => {
+    const w = s.want;
+    if (w === null ? s.ranTok === s.tok : !_depsChanged(s.ran, w)) return;
+    teardown();
+    s.ran = w && w.slice();
+    s.ranTok = s.tok;
+    if (w === null) {
+      // No deps: a fresh closure after every render, and — as `effect()` —
+      // also re-run by a signal it reads.
+      s.off = effect(() => fnRef.current());
+      return;
     }
+    // Deps: purely deps-driven, so its reads are untracked. `[]` keeps the
+    // plain call it has always had.
+    const c = w.length === 0 ? fnRef.current() : untrack(() => fnRef.current());
+    if (typeof c === "function") s.off = c;
+  };
+
+  if (!s.live) {
+    // The first run lands after the mount commit. Asked for by every render
+    // until it has run (a render the renderer throws away takes its `onMount`
+    // with it; after the instance mounts, extra ones are discarded). The
+    // unmount teardown is registered INSIDE onMount, which makes it
+    // unmount-only: registered in the body it would also fire before every
+    // re-render — and a re-render with UNCHANGED deps does not re-run the
+    // effect, so it tore the effect down and nothing put it back.
+    onMount(() => {
+      s.live = true;
+      onCleanup(teardown);
+      flush();
+    });
     return;
   }
+  // Re-runs land AFTER the diff/commit phase so the effect sees the committed
+  // DOM (React semantics). queueMicrotask would fire before the diff runs,
+  // reading stale layout and racing the impending patch.
+  if (want === null || _depsChanged(s.ran, want)) afterRender(flush);
+}
 
-  if (deps && deps.length === 0) {
-    // Empty deps → mount/cleanup semantics
-    // Capture cleanup ref so onCleanup can dispose it on unmount
-    const cleanupRef = useRef<(() => void) | null>(null);
-    onMount(() => {
-      const cleanup = fn();
-      if (typeof cleanup === "function") {
-        cleanupRef.current = cleanup;
-      }
-      // INSIDE onMount, exactly as the deps-form above does and for exactly the
-      // reason written there: registered in the component body, `onCleanup`
-      // fires before EVERY re-render. With empty deps the effect never re-runs,
-      // so the first unrelated re-render tore it down permanently —
-      // `useEffect(() => subscribe(), [])` silently unsubscribed and nothing
-      // put it back. The deps-form branch was fixed for this; this one was
-      // missed, which is what a comment on one of two twins tends to produce.
-      onCleanup(() => {
-        if (cleanupRef.current) {
-          cleanupRef.current();
-          cleanupRef.current = null;
-        }
-      });
-    });
-  } else {
-    // No deps or non-empty deps → effect with fresh closure each render.
-    // Store fn in ref so the effect always calls the latest closure,
-    // preventing stale captures of non-signal values (props, locals).
-    // AIO-182: Re-create effect every render — _effectDisposeAll kills
-    // the previous one during re-render cleanup, so we must re-create it.
-    // Started AFTER the commit, as React's is (and as the deps form above
-    // is): created in the component body it ran during render, so its first
-    // run read `ref.current` as undefined and every later run saw the
-    // previous render's DOM.
-    const fnRef = useRef(fn);
-    fnRef.current = fn;
-    const live = useRef<{ dispose: (() => void) | null; mounted: boolean }>({
-      dispose: null,
-      mounted: false,
-    });
-    const stop = () => {
-      live.current.dispose?.();
-      live.current.dispose = null;
-    };
-    const start = () => {
-      stop();
-      live.current.dispose = effect(() => fnRef.current());
-    };
-    if (!live.current.mounted) {
-      live.current.mounted = true;
-      onMount(() => {
-        onCleanup(stop); // inside onMount: unmount-only (see the deps form)
-        start();
-      });
-    } else {
-      afterRender(start);
-    }
+type _EffectState = {
+  /** The latest render's deps — `null` when it passed no array. */
+  want: readonly unknown[] | null;
+  /** Renders seen; a no-deps effect runs once per render. */
+  tok: number;
+  /** The deps it last ran with — `null` when it has not run WITH deps. */
+  ran: readonly unknown[] | null;
+  /** The render it last ran for (the no-deps form). */
+  ranTok: number;
+  /** Tears the current run down: the deps form's returned cleanup, or the
+   *  no-deps form's live `effect()`. */
+  off: (() => void) | null;
+  /** Its first run (onMount) has happened. */
+  live: boolean;
+};
+
+function _warnDepsShape(
+  prev: readonly unknown[] | null,
+  next: readonly unknown[] | null,
+): void {
+  // `-1` stands for "no deps array".
+  const a = prev?.length ?? -1, b = next?.length ?? -1;
+  if (a !== b) {
+    console.warn(
+      `[aio] useEffect deps changed shape (${a} → ${b}; -1 = none): it ` +
+        `re-runs. Keep one length, always present or always absent.`,
+    );
   }
 }
 

@@ -473,12 +473,16 @@ function _diffComponent(
 
   let rendered: VNode | string | number | null;
   try {
-    rendered = (nv.tag as ComponentFn)({
-      ...nv.props,
-      children: nv.children.length > 0
-        ? nv.children
-        : (nv.props.children ?? nv.children),
-    });
+    const body = () =>
+      (nv.tag as ComponentFn)({
+        ...nv.props,
+        children: nv.children.length > 0
+          ? nv.children
+          : (nv.props.children ?? nv.children),
+      });
+    rendered = body();
+    // Set its own state while rendering: run again before committing.
+    while (ctx.hooks?.rerunComponent?.(nv, hookState)) rendered = body();
     _throwIfNotANode(rendered);
   } catch (e) {
     ctx.hooks?.abortComponent?.(nv, hookState);
@@ -665,7 +669,8 @@ function _diffElement(
   }
 
   if (nv.props.ref !== ov.props.ref) {
-    if (ov.props.ref) _detachRef(ov.props.ref, null, _componentName(ov.tag));
+    // The node, so a React 19 callback ref's returned cleanup is found.
+    if (ov.props.ref) _detachRef(ov.props.ref, dom, _componentName(ov.tag));
     if (nv.props.ref) _attachRef(nv.props.ref, dom, _componentName(nv.tag));
   }
 

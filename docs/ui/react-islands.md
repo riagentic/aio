@@ -52,6 +52,10 @@ export default function App() {
 - **Reactive props.** `props()` is re-evaluated whenever the cells it reads
   change, and the island re-renders **in place** — no AIR remount, no lost React
   state.
+- **JSX props.** Props written on the island — `<PriceChart symbol="AAPL" />` —
+  reach the component too, per instance, merged over `props()` (JSX wins;
+  `children` is not passed). A re-render that changes them updates the island in
+  place.
 - **Clean teardown.** When AIR unmounts the island, `root.unmount()` runs, so
   React's effects and timers are disposed.
 - **Isolation.** React owns the container's DOM; AIR never diffs inside it, so
