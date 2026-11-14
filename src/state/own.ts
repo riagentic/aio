@@ -348,10 +348,9 @@ export function createOwnManager(log: Log): {
       // The app's OWN code, exactly as the factory is — see the note there.
       const r = inServerOrigin(dispose);
       if (r && typeof (r as PromiseLike<void>).then === "function") {
-        return Promise.resolve(r as PromiseLike<void>).then(
-          () => {},
-          (e) => log.error(`own: async disposer '${id}' failed: ${e}`),
-        );
+        return Promise.resolve(r as PromiseLike<void>).catch((e) =>
+          log.error(`own: async disposer '${id}' failed: ${e}`)
+        ) as Promise<void>;
       }
     } catch (e) {
       log.error(`own: disposer '${id}' threw: ${thrownText(e)}`);
@@ -449,7 +448,9 @@ export function createOwnManager(log: Log): {
       const p = runDisposer(id);
       if (p) pending.push(p);
     }
-    return Promise.allSettled(pending).then(() => {});
+    // Each pending promise logs its own failure and never rejects, so
+    // waiting on all of them is all there is to do.
+    return Promise.all(pending).then(() => undefined);
   }
 
   /** Dispose all resources whose ID is `prefix` or starts with prefix + ":"
