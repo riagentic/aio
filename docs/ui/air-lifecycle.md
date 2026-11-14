@@ -601,5 +601,5 @@ It works from a cold start, before any tap, because the shell calls it through
 standalone APK and in one that talks to a server (`android-client`, a dev
 build). On desktop and in a browser nothing calls it, so registering is inert.
 An app that ships its own `android/…/MainActivity.kt` must keep the template's
-`onBackPressed`. If it does not, the build warns
+`back` callback (an `OnBackPressedCallback`). If it does not, the build warns
 ([targets](../build/targets.md#the-back-button)).

@@ -734,7 +734,7 @@ Deno.test({
       await step(
         "standalone: the page is not drawn under the system bars",
         async () => {
-          // targetSdk 35 makes every activity edge-to-edge by default, and
+          // targetSdk 35+ makes every activity edge-to-edge by default, and
           // measured on API 35 before the frame was inset, the page drew
           // UNDER the status bar: an app's own title and the clock on the
           // same pixels. The viewport must therefore be shorter than the

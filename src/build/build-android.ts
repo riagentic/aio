@@ -290,6 +290,33 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
       console.error(`${NO} ${refusal}`);
       Deno.exit(1);
     }
+    const kotlin = await Promise.all(
+      overlaid.filter((f) => /\.(kt|java)$/.test(f)).map((f) =>
+        Deno.readTextFile(join(androidDir, f))
+      ),
+    );
+    if (legacyBackOverride(kotlin.join("\n"))) {
+      const manifestPath = join(androidDir, "app/src/main/AndroidManifest.xml");
+      const optedOut = _optOutPredictiveBack(
+        await Deno.readTextFile(manifestPath),
+      );
+      if (optedOut !== null) await Deno.writeTextFile(manifestPath, optedOut);
+      console.warn(
+        `${HEY} your android/…/MainActivity.kt takes Back by overriding ` +
+          `onBackPressed, which Android never calls for an app targeting ` +
+          `API 36 (this build does: Google Play requires it). ` +
+          (optedOut !== null
+            ? `This build opts the activity out of predictive back ` +
+              `(android:enableOnBackInvokedCallback="false") so Back works ` +
+              `as before — a later Android may drop that opt-out. `
+            : `Your own AndroidManifest.xml decides it: without ` +
+              `android:enableOnBackInvokedCallback="false" on the activity, ` +
+              `Back closes the app without asking the page. `) +
+          `Move to an OnBackPressedCallback — the "back" callback and its ` +
+          `addCallback line in onCreate in aio's ` +
+          `android-template/app/src/main/java/aio/app/MainActivity.kt.`,
+      );
+    }
   }
 
   // Pin Gradle to the resolved JDK so its toolchain resolver can't wander off to
@@ -614,7 +641,7 @@ android {
 
 /** Does this APK need to talk to a plaintext `http://` / `ws://` server?
  *
- *  Android blocks cleartext by default from targetSdk 28 (this template is 35),
+ *  Android blocks cleartext by default from targetSdk 28 (this template is 36),
  *  so an APK without this attribute reaches a plain-http server not at all —
  *  `net::ERR_CLEARTEXT_NOT_PERMITTED`, on a target whose whole purpose is
  *  "enter your server's URL". It used to be added by the dev rewrite ALONE, so
@@ -1553,7 +1580,7 @@ export function safeDevUrl(devUrl: string): string {
  *   - the durable store — a STANDALONE APK only (a client/dev APK never gets
  *     it, by design): the page looks for the JS global `"AioNativeStore"`, so
  *     the overlay must inject one under that exact name;
- *   - the insets frame — every APK: targetSdk 35 draws edge-to-edge, and
+ *   - the insets frame — every APK: targetSdk 35+ draws edge-to-edge, and
  *     without a listener the page draws under the status bar;
  *   - the splash — only with deno.json `build.splash`: the app asked for one,
  *     and an activity without `AioSplash` shows none, with nothing said. */
@@ -1621,7 +1648,7 @@ export function ownActivityLosses(
   ) {
     out.push(
       `your android/…/MainActivity.kt (and its res/ XML) sets no ` +
-        `window-insets handling, so on Android 15+ (targetSdk 35 is ` +
+        `window-insets handling, so on Android 15+ (targetSdk 35+ is ` +
         `edge-to-edge) the page draws UNDER the status and navigation bars. ` +
         `Wrap the WebView in a FrameLayout that takes the system-bar insets ` +
         `as padding — the frame at the end of onCreate in ${where} — or set ` +
@@ -1632,8 +1659,8 @@ export function ownActivityLosses(
     out.push(
       `your android/…/MainActivity.kt never asks the page about Back ` +
         `(window.__aioBack), so onBackButton handlers from aio/air never run ` +
-        `and Back always does Android's default. Copy onBackPressed and ` +
-        `defaultBack from ${where}.`,
+        `and Back always does Android's default. Copy the "back" callback, its ` +
+        `addCallback line in onCreate, and defaultBack from ${where}.`,
     );
   }
   if (opts.splash && !/AioSplash\.show\s*\(/.test(sources)) {
@@ -1672,6 +1699,31 @@ export function ownActivityRefusal(
     `android/…/MainActivity.kt drops ${count(losses.length, "thing")} the ` +
     `template's activity does (above). Fix the overlay; without "strict" ` +
     `the same build only warns.`;
+}
+
+/** An app's own activity that still takes Back by overriding
+ *  `onBackPressed`, with no dispatcher callback. From targetSdk 36 (the
+ *  template's since 1.0.28, Google Play's floor for updates since 2026-08-31)
+ *  Android never calls `onBackPressed`: Back would close the app without
+ *  asking the page. Such a build opts its activity out of predictive back
+ *  (`android:enableOnBackInvokedCallback="false"`, still honoured by
+ *  Android 16) so Back behaves as it did, and says so. Pure. */
+export function legacyBackOverride(sources: string): boolean {
+  return /override\s+fun\s+onBackPressed\s*\(/.test(sources) &&
+    !/OnBackPressedCallback|OnBackInvokedCallback/.test(sources);
+}
+
+/** Opt the template's activity out of predictive back — see
+ *  {@link legacyBackOverride}. Null when the manifest has no such activity
+ *  tag (an app's own manifest: its own to shape). Pure. */
+export function _optOutPredictiveBack(manifest: string): string | null {
+  const tag = /<activity\b(?=[^>]*android:name="aio\.app\.MainActivity")/;
+  if (!tag.test(manifest)) return null;
+  if (manifest.includes("android:enableOnBackInvokedCallback")) return manifest;
+  return manifest.replace(
+    tag,
+    '<activity android:enableOnBackInvokedCallback="false"',
+  );
 }
 
 /** `fitsSystemWindows` turned ON in XML — the layout attribute

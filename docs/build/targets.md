@@ -2372,15 +2372,16 @@ It takes the same arguments as `fetch` and returns a real `Response`.
 
 ### The system bars
 
-The template targets **API 35** (`compileSdk`/`targetSdk` 35 — Play's floor) and
-installs on **Android 10** or newer (`minSdk` 29). Android 15 makes every
-activity of a targetSdk-35 app **edge-to-edge**: the page would otherwise draw
-underneath the status bar and the navigation bar, and measured on API 35 it did
-exactly that — the app's own title and the system clock on the same pixels. So
-the WebView sits in a frame that carries the system-bar and display-cutout
-insets as padding, which gives back the same layout the app had before the bump
-on every API level. The emulator test asserts it (`screen.height - innerHeight`
-must be at least a status bar).
+The template targets **API 36** (`compileSdk`/`targetSdk` 36 — Google Play's
+floor for new apps and updates since 2026-08-31; 35 before 1.0.28) and installs
+on **Android 10** or newer (`minSdk` 29). Android 15 makes every activity of a
+targetSdk-35+ app **edge-to-edge**: the page would otherwise draw underneath the
+status bar and the navigation bar, and measured on API 35 it did exactly that —
+the app's own title and the system clock on the same pixels. So the WebView sits
+in a frame that carries the system-bar and display-cutout insets as padding,
+which gives back the same layout the app had before the bump on every API level.
+The emulator test asserts it (`screen.height - innerHeight` must be at least a
+status bar).
 
 Full-bleed is a per-app decision, not a default: take it by overlaying your own
 `MainActivity` under `<app>/android/`
@@ -2442,8 +2443,9 @@ that does not exist. The build prints how many files each mount packaged.
 
 ### The Back button
 
-Android Back reaches the page before Android acts on it. The template's
-`onBackPressed` calls `window.__aioBack()` through `evaluateJavascript`, which
+Android Back reaches the page before Android acts on it. The template's `back`
+callback (an `OnBackPressedCallback`, since targetSdk 36 never calls
+`onBackPressed`) calls `window.__aioBack()` through `evaluateJavascript`, which
 needs no user gesture, so the first Back after a cold start is asked too. That
 global runs the app's
 [`onBackButton`](../ui/air-lifecycle.md#android-back-onbackbutton) handlers,
@@ -2687,14 +2689,19 @@ and the build **warns** when an overlay drops any of these:
   `WebViewCompat.addWebMessageListener(…, "AioNativeFetch", …)` line from the
   same file, inside the same standalone-only block.
 
-- **The insets frame** (every APK). targetSdk 35 draws edge-to-edge, so a
+- **The insets frame** (every APK). targetSdk 35+ draws edge-to-edge, so a
   WebView set as the content view draws under the status bar. Keep the
   template's `FrameLayout` + `setOnApplyWindowInsetsListener` block from the end
   of its `onCreate` (see [The system bars](#the-system-bars)).
 
-- **Back asks the page** (every APK). Keep the template's `onBackPressed` and
-  `defaultBack`. Without them no `onBackButton` handler ever runs (see
-  [The Back button](#the-back-button)).
+- **Back asks the page** (every APK). Keep the template's `back` callback, its
+  `onBackPressedDispatcher.addCallback` line in `onCreate`, and `defaultBack`.
+  Without them no `onBackButton` handler ever runs (see
+  [The Back button](#the-back-button)). An activity that still overrides
+  `onBackPressed` (aio 1.0.27 and older) is not called by Android at targetSdk
+  36; the build opts it out of predictive back
+  (`android:enableOnBackInvokedCallback="false"` on the generated manifest's
+  activity) so its Back works as before, and warns.
 
 - **The splash** (only with [`build.splash`](#splash-on-android)). The app asked
   for one, so an activity that never shows it is a loss. It is one

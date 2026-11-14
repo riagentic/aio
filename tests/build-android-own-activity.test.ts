@@ -266,3 +266,61 @@ console.log("CONFIG OK");
     }
   },
 });
+
+// targetSdk 36 (1.0.28): Android never calls `onBackPressed`. An overlay that
+// still takes Back that way keeps working through the predictive-back opt-out
+// on the generated manifest — and is told to move to a dispatcher callback.
+Deno.test("own MainActivity.kt: an onBackPressed override is a legacy Back; a dispatcher callback is not", async () => {
+  const { legacyBackOverride } = await import("../src/build/build-android.ts");
+  assertEquals(legacyBackOverride(BARE_OVERLAY), true);
+  assertEquals(legacyBackOverride(TEMPLATE_ACTIVITY), false);
+  assertEquals(
+    legacyBackOverride(
+      BARE_OVERLAY.replace(
+        "override fun onBackPressed",
+        "private val cb = object : OnBackPressedCallback(true) {}\n    override fun onBackPressed",
+      ),
+    ),
+    false,
+  );
+  // The template itself reaches the page through the dispatcher.
+  assertStringIncludes(
+    TEMPLATE_ACTIVITY,
+    "onBackPressedDispatcher.addCallback(this, back)",
+  );
+  assertEquals(/override fun onBackPressed/.test(TEMPLATE_ACTIVITY), false);
+});
+
+Deno.test("own MainActivity.kt: the predictive-back opt-out lands on the template's activity once; an app's own manifest is left alone", async () => {
+  const { _optOutPredictiveBack } = await import(
+    "../src/build/build-android.ts"
+  );
+  const manifest = ANDROID_TEMPLATE["app/src/main/AndroidManifest.xml"]!;
+  const out = _optOutPredictiveBack(manifest)!;
+  assertEquals(
+    out.match(/android:enableOnBackInvokedCallback="false"/g)?.length,
+    1,
+  );
+  assertStringIncludes(out, 'android:name="aio.app.MainActivity"');
+  assertEquals(_optOutPredictiveBack(out), out);
+  assertEquals(
+    _optOutPredictiveBack(
+      '<manifest><activity android:name=".Other"/></manifest>',
+    ),
+    null,
+  );
+});
+
+Deno.test("android template: targets API 36 (Google Play's floor for updates) on an AGP that knows it", () => {
+  const app = ANDROID_TEMPLATE["app/build.gradle.kts"] ??
+    Object.entries(ANDROID_TEMPLATE).find(([k]) =>
+      k.startsWith("app/build.gradle")
+    )![1];
+  assertStringIncludes(app, "compileSdk = 36");
+  assertStringIncludes(app, "targetSdk = 36");
+  const root =
+    Object.entries(ANDROID_TEMPLATE).find(([k]) =>
+      /^build\.gradle/.test(k)
+    )![1];
+  assertStringIncludes(root, 'id("com.android.application") version "8.13.2"');
+});
