@@ -22,6 +22,7 @@ Deno.test("profile move: the old profile moves whole, once; nothing there is a n
     const old = join(tmp, "config", "notes");
     const dir = join(tmp, ".notes", "electron");
     await Deno.mkdir(join(old, "Local Storage"), { recursive: true });
+    await Deno.writeTextFile(join(old, "Local State"), "{}");
     await Deno.writeTextFile(join(old, "Local Storage", "k"), "signed-in");
     await Deno.writeTextFile(join(old, "window-state.json"), '{"w":900}');
     assertEquals(await moveOldProfile(old, dir), { kind: "moved", from: old });
@@ -50,9 +51,17 @@ async function bothProfiles(tmp: string, oldAt: number, homeAt: number) {
     const [p, text, t] of [[old, "old", oldAt], [dir, "home", homeAt]] as const
   ) {
     await Deno.mkdir(join(p, "Local Storage"), { recursive: true });
+    await Deno.mkdir(join(p, "aio-preload"));
+    await Deno.writeTextFile(join(p, "Local State"), "{}");
     await Deno.writeTextFile(join(p, "Local Storage", "a"), text);
     for (
-      const f of [join(p, "Local Storage", "a"), join(p, "Local Storage"), p]
+      const f of [
+        join(p, "Local Storage", "a"),
+        join(p, "Local Storage"),
+        join(p, "Local State"),
+        join(p, "aio-preload"),
+        p,
+      ]
     ) {
       await Deno.utime(f, t, t);
     }
@@ -154,7 +163,8 @@ Deno.test("profile move: a move that fails (another volume) leaves the old profi
   try {
     const old = join(tmp, "config", "notes");
     const dir = join(tmp, ".notes", "electron");
-    await Deno.mkdir(old, { recursive: true });
+    await Deno.mkdir(join(old, "aio-preload"), { recursive: true });
+    await Deno.writeTextFile(join(old, "Local State"), "{}");
     await Deno.writeTextFile(join(old, "a"), "kept");
     const r = await moveOldProfile(old, dir, {
       rename: () => Promise.reject(new Error("EXDEV: cross-device link")),
@@ -192,4 +202,40 @@ Deno.test("window scripts: the profile is pointed at the app's home right after 
       "setPath('userData'",
     ),
   );
+});
+
+// The old place is named after the app's TITLE, which is not unique to aio:
+// an app titled "Git" took ~/.config/git into its home on its first window
+// start, and a newer foreign folder displaced an app's own profile.
+Deno.test("profile move: a folder that is not an aio window's profile is never moved", async () => {
+  const tmp = await tempDir("profile-foreign-");
+  try {
+    const old = join(tmp, "config", "git");
+    const dir = join(tmp, ".gitviewer", "electron");
+    await Deno.mkdir(old, { recursive: true });
+    await Deno.writeTextFile(join(old, "config"), "[user]\n  name = me\n");
+    assertEquals(await moveOldProfile(old, dir), { kind: "none" });
+    assertEquals(
+      await Deno.readTextFile(join(old, "config")),
+      "[user]\n  name = me\n",
+    );
+    // …nor when the app already has a profile and the foreign one is newer.
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(join(dir, "Local State"), "{}");
+    await Deno.writeTextFile(join(dir, "window-state.json"), "{}");
+    const past = new Date(Date.now() - 86_400_000);
+    for (
+      const f of [join(dir, "Local State"), join(dir, "window-state.json"), dir]
+    ) {
+      await Deno.utime(f, past, past);
+    }
+    await Deno.writeTextFile(join(old, "config"), "touched now");
+    assertEquals(await moveOldProfile(old, dir), { kind: "none" });
+    assertEquals(await Deno.readTextFile(join(dir, "window-state.json")), "{}");
+    // Chromium's Local State alone is not aio's either.
+    await Deno.writeTextFile(join(old, "Local State"), "{}");
+    assertEquals(await moveOldProfile(old, dir), { kind: "none" });
+  } finally {
+    await dropTempDir(tmp);
+  }
 });

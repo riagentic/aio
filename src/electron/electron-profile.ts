@@ -69,6 +69,22 @@ async function backupPath(dir: string, now: Date): Promise<string> {
   return await exists(base) ? `${base}-${now.getTime()}` : base;
 }
 
+/** Is `p` an Electron profile an aio window wrote — Chromium's `Local State`
+ *  plus aio's own `window-state.json` or `aio-preload/` (since 1.0.17)?
+ *
+ *  The old place is named after the app's TITLE (`~/.config/<slug>`), and a
+ *  title is not unique to aio: an app titled "Git" took `~/.config/git` —
+ *  another program's config — into its home on its first window start, and
+ *  Electron wrote into it as a profile. Where both places existed, a newer
+ *  foreign folder displaced the app's own profile. Only a folder with this
+ *  signature is ever moved. */
+export async function isAioProfile(p: string): Promise<boolean> {
+  const has = (name: string) =>
+    Deno.lstat(join(p, name)).then(() => true, () => false);
+  return await has("Local State") &&
+    (await has("window-state.json") || await has("aio-preload"));
+}
+
 /** Move the profile at `old` (Electron's per-OS default for this window) to
  *  `dir` (the app's home), once. Never deletes anything: a profile in both
  *  places keeps the one written last at `dir` and sets the other aside in the
@@ -84,6 +100,8 @@ export async function moveOldProfile(
   const isDir = (p: string) =>
     Deno.stat(p).then((s) => s.isDirectory, () => false);
   if (!(await isDir(old))) return { kind: "none" };
+  // Not an aio window's profile: somebody else's folder under the same name.
+  if (!(await isAioProfile(old))) return { kind: "none" };
   if (await isDir(dir)) {
     try {
       const kept = await newestIn(old) > await newestIn(dir) ? "old" : "home";
