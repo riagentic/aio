@@ -681,7 +681,7 @@ export async function checkAndRecover(opts: {
         `db: restored from ${snapshot} — changes made AFTER that snapshot are ` +
           `not in it; the damaged original is at ${quarantine}`,
       );
-      await pruneQuarantine(opts.dbPath, opts.log, fs);
+      await pruneQuarantine(opts.dbPath, opts.log, fs, quarantine);
       const restored: IntegrityOutcome = {
         action: "restored",
         quarantinedTo: quarantine,
@@ -709,7 +709,7 @@ export async function checkAndRecover(opts: {
       `snapshots with db.snapshot(path) so the next time this happens there ` +
       `is something to come back to.`,
   );
-  await pruneQuarantine(opts.dbPath, opts.log, fs);
+  await pruneQuarantine(opts.dbPath, opts.log, fs, quarantine);
   const emptied: IntegrityOutcome = {
     action: "quarantined",
     quarantinedTo: quarantine,
@@ -744,6 +744,12 @@ async function pruneQuarantine(
   dbPath: string,
   log: { warn: (m: string) => void; error: (m: string) => void },
   fs: { remove: (p: string) => Promise<void> },
+  /** The copy this boot just made: never pruned. Its stamp is the wall
+   *  clock, and a clock that went BACKWARDS (an RTC-less board booting
+   *  before NTP — when SD-card corruption happens) sorted it OLDEST: the
+   *  boot logged "damaged file kept … nothing deleted", then deleted it —
+   *  the only copy of everything since the last snapshot. */
+  justMade?: string,
 ): Promise<void> {
   try {
     // `dirname`/`basename`, not a split on "/": a Windows path has no "/", so
@@ -773,8 +779,14 @@ async function pruneQuarantine(
       else byCopy.set(stamp, [e.name]);
     }
     // The suffix is an ISO timestamp, so lexical order IS chronological order.
-    const stamps = [...byCopy.keys()].sort();
-    const stale = stamps.slice(0, Math.max(0, stamps.length - QUARANTINE_KEEP));
+    const keep = justMade !== undefined && basename(justMade).startsWith(base)
+      ? basename(justMade).slice(base.length)
+      : undefined;
+    const stamps = [...byCopy.keys()].filter((st) => st !== keep).sort();
+    // The copy just made counts toward the kept ones, whatever its stamp.
+    const room = QUARANTINE_KEEP -
+      (keep !== undefined && byCopy.has(keep) ? 1 : 0);
+    const stale = stamps.slice(0, Math.max(0, stamps.length - room));
     for (const stamp of stale) {
       for (const name of byCopy.get(stamp)!) {
         await fs.remove(`${dir}/${name}`);
