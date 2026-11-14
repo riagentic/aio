@@ -32,13 +32,13 @@ async function bootWith(
   const cap = capture();
   try {
     const app = await aio.run({
-      watch: false,
       appId: id + "-test",
       cells: [c],
       libraryMode: true,
       client: "server-only",
       dbPath: ":memory:",
       ...extra,
+      watch: false,
     } as never);
     await app.close();
   } finally {

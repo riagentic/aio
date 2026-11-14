@@ -111,9 +111,8 @@ export function testPageFetch(server: { url: string }): TestPageFetch {
       }
     }
     // RFC 6265 §5.1.4 default-path: the request path up to its last "/".
-    path ??= reqPath.lastIndexOf("/") > 0
-      ? reqPath.slice(0, reqPath.lastIndexOf("/"))
-      : "/";
+    const cut = reqPath.lastIndexOf("/"); // aio-ok: path-split — a URL path, never an OS path
+    path ??= cut > 0 ? reqPath.slice(0, cut) : "/";
     // Max-Age wins over Expires (§5.3 step 3); <= 0 or a past date deletes.
     if (maxAge !== undefined) expires = Date.now() + maxAge * 1000;
     const key = `${name}\0${path}`;

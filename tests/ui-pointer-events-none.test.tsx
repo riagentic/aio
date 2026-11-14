@@ -7,6 +7,7 @@
 import "./store-sandbox.ts";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { testUI } from "../src/testing/ui-test.ts";
+import { closeWindow } from "../src/testing/close-window.ts";
 import {
   pointerEventsNoneReason,
   triggerAction,
@@ -133,5 +134,5 @@ Deno.test("pointerEventsNoneReason reads the nearest value", async () => {
     "mouse cannot reach",
   );
   assertEquals(clicked, 0);
-  await w.happyDOM.close();
+  await closeWindow(w);
 });

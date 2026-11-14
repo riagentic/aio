@@ -16,9 +16,9 @@ await aio.run({
   appId: "crash-after-boot",
   cells: [crashy],
   persist: false,
-  watch: false,
   client: "server-only",
   ...(mode === "rej-noguard" ? { guardDispatches: false } : {}),
+  watch: false,
 });
 setTimeout(() => {
   if (mode === "throw") throw new Error("sync boom after boot");
