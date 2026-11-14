@@ -137,6 +137,18 @@ const claimsExternalNamespace = (id: string): boolean =>
  *
  *  `user_exists` is deliberately NOT here: a collision needs the store, and it
  *  is the id-enumeration channel the account budget exists to bound. */
+/** The password rule (NIST floor — 8 chars), asked as a question: the one
+ *  decider for signup, `setPassword` and a reset, so a route can refuse a
+ *  password BEFORE it spends anything on the request (a one-shot token).
+ *  @internal */
+export function passwordPolicyRefusal(
+  password: unknown,
+): "password_too_short" | null {
+  return typeof password !== "string" || password.length < 8
+    ? "password_too_short"
+    : null;
+}
+
 export function signupPolicyRefusal(
   rawId: unknown,
   password: unknown,
@@ -146,11 +158,7 @@ export function signupPolicyRefusal(
     return "invalid_id";
   }
   if (claimsExternalNamespace(id)) return "reserved_id";
-  // NIST floor — 8 chars minimum.
-  if (typeof password !== "string" || password.length < 8) {
-    return "password_too_short";
-  }
-  return null;
+  return passwordPolicyRefusal(password);
 }
 
 /** The `auth.requireVerified` login gate, asked as a pure QUESTION — the one
@@ -797,9 +805,8 @@ export function openUserStore(
     },
     async setPassword(rawId, newPassword) {
       const id = normId(rawId);
-      if (typeof newPassword !== "string" || newPassword.length < 8) {
-        throw new Error("password_too_short");
-      }
+      const weak = passwordPolicyRefusal(newPassword);
+      if (weak !== null) throw new Error(weak);
       // (1) new hash + (2) lockout cleared + staged-TOTP dropped — one
       // statement, so a rescued account is never half-rescued.
       const r = updPw.run(await hashPassword(newPassword), id);

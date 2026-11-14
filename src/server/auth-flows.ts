@@ -26,6 +26,7 @@
 import {
   accountLockoutOf,
   loginVerificationRefusal,
+  passwordPolicyRefusal,
   signupPolicyRefusal,
   totpReplayOf,
   type UserStore,
@@ -894,6 +895,11 @@ async function authRoute(
       if (!token || !password) {
         return json(400, { error: "token_and_password_required" });
       }
+      // The new password's shape BEFORE the token is spent: refused after
+      // it, a 7-character first try left the user's reset link "used up or
+      // expired" for the corrected one, and cost another mail.
+      const weak = passwordPolicyRefusal(password);
+      if (weak !== null) return json(400, { error: weak });
       const stored = cfg.users.consumeToken("reset", token);
       if (!stored) return json(401, { error: "invalid_or_expired_token" });
       // No reset token is ever minted for an external identity (see
