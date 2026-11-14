@@ -240,8 +240,9 @@ function precheckTestRoot(full: boolean): void {
     `(the tests bind Unix sockets inside it, ~108 bytes at most) and not ` +
     `under /tmp (the build tests refuse a shared /tmp) or /dev (deno asks ` +
     `--allow-all for any path there) — e.g. on Linux ` +
-    `mkdir -m 700 /run/user/$(id -u)/aiot && ` +
-    `AIO_TEST_ROOT=/run/user/$(id -u)/aiot deno task test`;
+    `mkdir -m 700 /run/user/$(id -u)/t && ` +
+    `AIO_TEST_ROOT=/run/user/$(id -u)/t deno task test (a name not starting ` +
+    `with "aio" — the suite sweeps stale aio* lock entries in that folder)`;
   if (!full) {
     console.warn(`${text}\n  (a named run goes ahead)`);
     return;
