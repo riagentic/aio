@@ -1444,7 +1444,11 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // peers editing one note offline lost one edit with no callback and no
     // line anywhere. Same check as the live path; the view is left to the
     // batch's own rebase.
-    return pendingIds.size > 0
+    // An op from this client's OWN queue (an earlier page load's, or one a
+    // twin tab flushed) folding ahead of its ack is not remote: checked
+    // against the rest of the queue it reported the user's first edit as a
+    // conflict with their second ("a" vs "ab", nobody else writing).
+    return pendingIds.size > 0 && !pendingIds.has(op.id)
       ? conflictWork(cell, confirmed, next, op.hlc, undefined)
       : Promise.resolve();
   }
@@ -1542,7 +1546,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     }
     if (isDup) return;
     const optimistic = (await rebaseCell(op.cell)).optimistic;
-    if (next != null) {
+    // Not for an op from this client's own queue — see foldCatchupOp.
+    if (next != null && !queued) {
       await conflictWork(op.cell, confirmed, next, op.hlc, optimistic);
     }
   }
@@ -2029,6 +2034,20 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         if (
           reason.startsWith(STALE_OP_REASON) && await reissueStale(cell, opId)
         ) return;
+        // Another tab's op, already gone from the shared queue: that tab got
+        // the same refusal and dealt with it (a stale op is re-made there and
+        // applied). Reporting it here as rejected — "the change can be made
+        // again" — invited the user to make a change twice that was kept.
+        if (
+          !isOwnSessionOp(opId) &&
+          !(await deps.buffer.getUnconfirmed(cell)).some((o) => o.id === opId)
+        ) {
+          deps.log?.debug?.(
+            `[sync] ${cell}: the server refused op ${opId} (${reason}) — ` +
+              `another tab's, no longer queued here; that tab handles it`,
+          );
+          return;
+        }
         _madeAt.delete(opId);
         untrackOwn(cell, opId);
         // Drop the rejected op — it will never be confirmed. A refusal for
