@@ -424,7 +424,9 @@ export interface ShutdownRefs {
   /** `close` cancels every schedule and refuses new ones; optional so a
    *  hand-built refs object with only `cancelAll` still works. */
   scheduleManager: { cancelAll: () => void; close?: () => void };
-  ownManager: { disposeAll: () => void };
+  /** Settles once every ASYNC disposer has (the "own processes" phase
+   *  awaits it, within its budget). */
+  ownManager: { disposeAll: () => void | Promise<unknown> };
   dispatch: { close: () => void; drain: (timeoutMs?: number) => Promise<void> };
   /** THIS app's cell names — late-bound, the cells bridge fills them in after
    *  compose. Shutdown aborts and waits for its OWN cells only: a second app
@@ -642,6 +644,9 @@ export function createShutdownOrchestrator(
       tLeft,
       () => refs.scheduleManager.cancelAll(),
     );
+    // Returns the async disposers' settlement — awaited here (bounded by
+    // tLeft), so `await app.close()` and a signal exit no longer outrun an
+    // `own` resource's async teardown.
     await phase(
       log,
       "own processes",

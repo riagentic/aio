@@ -234,7 +234,7 @@ const VALID_ID = /^[\w\-:.]+$/;
 /** Create the runtime manager that handles own effects and final cleanup. */
 export function createOwnManager(log: Log): {
   handle: (effect: OwnEffect) => void;
-  disposeAll: () => void;
+  disposeAll: () => Promise<void>;
   disposeByPrefix: (prefix: string) => void;
   active: () => string[];
 } {
@@ -326,21 +326,31 @@ export function createOwnManager(log: Log): {
     });
   }
 
-  function runDisposer(id: string): void {
+  function runDisposer(id: string): Promise<void> | undefined {
     opening.delete(id); // an async acquisition still opening is superseded
     const dispose = disposers.get(id);
     if (!dispose) return;
     disposers.delete(id);
-    release(id, dispose);
+    return release(id, dispose);
   }
 
-  function release(id: string, dispose: OwnDisposer): void {
+  /** Runs the disposer; an ASYNC one's settlement is RETURNED (never
+   *  rejecting — a failure is logged here). It used to be dropped, so
+   *  `disposeAll` had nothing to give shutdown's "own processes" phase to
+   *  await: `await app.close()` resolved while an async disposer (a server
+   *  draining, a child awaited to exit) was still running, and on a signal
+   *  exit `Deno.exit` cut it off half-done. */
+  function release(
+    id: string,
+    dispose: OwnDisposer,
+  ): Promise<void> | undefined {
     try {
       // The app's OWN code, exactly as the factory is — see the note there.
       const r = inServerOrigin(dispose);
-      if (r && typeof (r as Promise<void>).catch === "function") {
-        (r as Promise<void>).catch((e) =>
-          log.error(`own: async disposer '${id}' failed: ${e}`)
+      if (r && typeof (r as PromiseLike<void>).then === "function") {
+        return Promise.resolve(r as PromiseLike<void>).then(
+          () => {},
+          (e) => log.error(`own: async disposer '${id}' failed: ${e}`),
         );
       }
     } catch (e) {
@@ -426,10 +436,20 @@ export function createOwnManager(log: Log): {
    *  down while its dependent is still live — and it disagreed with the
    *  framework's own rule one level up, where `destroyAll` walks cells in
    *  reverse dependency order. A Map preserves insertion order, so the fix is
-   *  to walk it backwards. */
-  function disposeAll(): void {
+   *  to walk it backwards.
+   *
+   *  Every disposer STARTS synchronously, in that order (a sync caller that
+   *  ignores the result still finds everything released); the returned
+   *  promise settles once every async one has — shutdown awaits it within
+   *  its budget. It never rejects: a failure is logged by `release`. */
+  function disposeAll(): Promise<void> {
     opening.clear(); // still opening: released on arrival
-    for (const id of [...disposers.keys()].reverse()) runDisposer(id);
+    const pending: Promise<void>[] = [];
+    for (const id of [...disposers.keys()].reverse()) {
+      const p = runDisposer(id);
+      if (p) pending.push(p);
+    }
+    return Promise.allSettled(pending).then(() => {});
   }
 
   /** Dispose all resources whose ID is `prefix` or starts with prefix + ":"

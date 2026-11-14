@@ -2508,8 +2508,12 @@ function bootStandalone(
     // dispatch.
     _sched?.cancelAll();
     if (_own) {
-      _own.disposeAll();
+      // Awaited, as the server's "own processes" phase awaits it: an async
+      // disposer (`proc.kill(); await proc.status`, a last flush) finishes
+      // before close() resolves instead of being cut off behind it.
+      const own = _own;
       _own = null;
+      await own.disposeAll();
     }
   };
   return app;

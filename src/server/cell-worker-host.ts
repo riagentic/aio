@@ -567,7 +567,20 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       });
       // After onDestroy (which may itself dispose): the watchers, sockets and
       // subprocesses this thread opened die with it, not silently outlive it.
-      ownWorker.disposeAll();
+      // Awaited: `closed` is the host's signal that this thread is done, and
+      // `self.close()` ends it — an async disposer still running was cut off.
+      // Within this close's own budget, so the ack still beats the host's
+      // WORKER_CLOSE_DEADLINE_MS (past it the host reports a thread stuck in
+      // synchronous code, which an awaited disposer is not).
+      let ownTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        ownWorker.disposeAll(),
+        // aiol-ok: the close's deadline — a bare timer bounding teardown.
+        new Promise<void>((r) =>
+          ownTimer = setTimeout(r, Math.max(50, deadline - Date.now()))
+        ),
+      ]);
+      if (ownTimer !== undefined) clearTimeout(ownTimer);
       post({ t: "closed" });
       self.close();
       return;
