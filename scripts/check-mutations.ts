@@ -4116,9 +4116,9 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "the update's smoke probe spawns on the app's thread — Windows' antivirus scan inside CreateProcess freezes the app 16–20 s",
     file: "src/server/updates-apply.ts",
-    find: "    out = await probeOffThread(path, args, timeoutMs);",
+    find: "    out = await probeOffThread(path, args, timeoutMs, {",
     replace:
-      '    new Deno.Command(path, { args, stdout: "null", stderr: "null" }).spawn();\n    out = await probeOffThread(path, args, timeoutMs);',
+      '    new Deno.Command(path, { args, stdout: "null", stderr: "null" }).spawn();\n    out = await probeOffThread(path, args, timeoutMs, {',
     test: "tests/updates-apply.test.ts",
     filter: "smoke test: the probe's spawn never blocks the app's thread",
   },

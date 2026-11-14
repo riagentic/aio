@@ -4,6 +4,7 @@
 // next page without a useHead. A client mount drops it.
 import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { type ComponentFn, h, renderToString } from "../src/air/vdom.ts";
 import {
   _setDocument,
@@ -67,7 +68,7 @@ async function run(
   };
   _unmount(handle);
   _setDocument(null as never);
-  await win.happyDOM.close();
+  await closeWindow(win);
   return out;
 }
 

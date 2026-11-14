@@ -574,7 +574,10 @@ Deno.test("build-version: the update check treats major.minor.build as THE newer
       canInstall: ["binary"],
     });
   // installed 1.2.345, channel 1.2.346 → offered (the build number is newer).
-  assertEquals((await ask("1.2.346", 1)).kind, "offer");
+  // Its own bytes: the SAME bytes signed as another version are the install
+  // itself reporting another version — not offered again (see
+  // tests/updates-version-mismatch-loop.test.ts).
+  assertEquals((await ask("1.2.346", 4)).kind, "offer");
   // channel 1.2.345, DIFFERENT digest → offered (same version, new build).
   const rebuilt = await ask("1.2.345", 2);
   assertEquals(rebuilt.kind, "offer");

@@ -5,6 +5,7 @@
 // noscript with scripting off, so the browser's DOM is reproduced by hand.
 import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
+import { closeWindow } from "../src/testing/close-window.ts";
 import { type ComponentFn, h, renderToString } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, hydrate } from "../src/air/aio-renderer.ts";
 import { signal } from "../src/state/signal.ts";
@@ -63,6 +64,6 @@ Deno.test("hydrate: a <noscript> with element children keeps the server page", a
     console.warn = ow;
     console.error = oe;
     _setDocument(null as never);
-    await win.happyDOM.close();
+    await closeWindow(win);
   }
 });
