@@ -204,6 +204,19 @@ or is small and known.
       `-FilePath`/`-RedirectStandardOutput` are not LiteralPath (a path with
       `[`/`]`); AUMID of a >128-unit title cut at a surrogate (TS keeps a lone
       surrogate, the stub's format.rs gives U+FFFD).
+- [x] Bug-hunt round 8 (2026-11-14): kit (Tabs disabled stop, Modal initial
+      focus, empty Pagination), React compat vs real React 19 (set-state during
+      render, Object.is setter, ref cleanups, deps shape, island JSX props),
+      workers (transactional return lacked its writes, a self-exiting worker
+      hung callers, crash during close), crash recovery (byte-level fault
+      injection found no lost/duplicated/ghost write; two edge bugs: quarantine
+      pruned under a backwards clock, legacy Kv retry).
+- [ ] Decide: compat `useEffect` deps of ANOTHER LENGTH count as changed (`[2]`
+      → `[]` re-runs); React compares only the shared prefix. Kept as is (one
+      compare rule with useMemo), documented in docs/ui/react.md.
+- [ ] Gate gap: `check:home-clean` did not flag `~/.test-app-modes` (a test app
+      home left by a bare `deno test tests/app-modes.test.ts` without
+      AIO_APPS_DIR) — find why its content signature missed it.
 
 ### Owner decides (each has a recommendation)
 

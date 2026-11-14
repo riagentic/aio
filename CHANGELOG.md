@@ -71,6 +71,20 @@
   its case.
 - Sync: a set merge in another order no longer warns "replaces the whole value".
 
+### Round 8: kit, React compat, workers, crash recovery
+
+- Kit: a disabled active tab is not the tab stop; a Modal opens on a radio
+  group's checked radio; an empty Pagination does nothing.
+- React compat (differentials vs React 19): state set during render is rendered
+  (with React's "too many re-renders" guard); the `useState` setter compares
+  with `Object.is`; a callback ref's returned cleanup runs; `useEffect` survives
+  deps changing shape; island JSX props reach the React component.
+- Transactional methods return their own writes. A worker cell or blocking task
+  that exits on its own fails its callers by name; a crash during a worker's
+  close no longer stalls shutdown.
+- Integrity recovery never prunes the copy it just quarantined (a clock that
+  went backwards); a failed legacy Deno.Kv migration is retried.
+
 ### Tools and diagnostics
 
 - The crash handler's line reaches `app.log` before the process dies;
