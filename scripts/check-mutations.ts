@@ -4832,10 +4832,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "lock prune: dropping a temp dir judged its lock dirs as if the root still lived",
     file: "src/server/lock-dir.ts",
-    find:
-      "    if (name.includes(tag) && pruneDeadLockDirAt(join(base, name), true)) n++;",
-    replace:
-      "    if (name.includes(tag) && pruneDeadLockDirAt(join(base, name))) n++;",
+    find: "      pruneDeadLockDirAt(join(base, name), true)\n    ) n++;",
+    replace: "      pruneDeadLockDirAt(join(base, name))\n    ) n++;",
     test: "tests/lock-prune-untagged-root-gone.test.ts",
     filter:
       "lock prune: dropping a temp dir removes its tagged lock dir holding an untagged dead watch file",

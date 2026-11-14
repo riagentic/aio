@@ -102,6 +102,7 @@ Deno.test("testPageFetch: a redirect loop fails loud; redirect modes are honoure
     );
     const manual = await page.fetch("/once", { redirect: "manual" });
     assertEquals(manual.status, 302);
+    await manual.body?.cancel(); // the 3xx is the caller's to consume
     assertEquals(page.cookies.get("m"), "1", "a manual hop still sets cookies");
     await assertRejects(
       () => page.fetch("/once", { redirect: "error" }),

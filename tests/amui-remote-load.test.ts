@@ -4,6 +4,7 @@
 // it OUTSIDE selfPaths()'s try — discovery threw and amui listed nothing; the
 // self check of start/stop/restart and createApp threw the same way.
 // Stand-in for jsr.io: the checkout served read-only over http on loopback.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
