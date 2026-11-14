@@ -449,6 +449,16 @@ export function isComparableVersion(v: string): boolean {
   return ORDERABLE.test(v.trim());
 }
 
+/** The version tokens a `--version` answer names. Pure.
+ *
+ *  The answer is `versionLine()`'s `<appId> <version> (aio <x>)`; the
+ *  framework's own `(aio …)` is left out, so an app whose version happens to
+ *  equal aio's cannot pass on aio's. Whole tokens: `1.2.3` is not `1.2.30`. */
+export function reportedVersions(stdout: string): string[] {
+  return stdout.replace(/\(aio [^)]*\)/g, " ").split(/\s+/)
+    .filter((t) => t !== "" && isComparableVersion(t));
+}
+
 function requireComparable(v: string): void {
   if (isComparableVersion(v)) return;
   throw new Error(
@@ -700,6 +710,14 @@ export function dataCompatibility(
         `release v${contract.schema}); an older store format cannot read ` +
         `data this one wrote`,
     );
+  } else if (contract.schema > local.schema) {
+    // A store-format bump IS a migration: the new build rewrites the store at
+    // boot (`migrateSchema`), and the old build refuses a newer-schema store
+    // (the blocker above, from its side). This verdict only weighed per-cell
+    // versions, so a PERSIST_SCHEMA_VERSION bump with no cell bump reported
+    // `migrates: false` — no backup was taken, and a rollback then put back a
+    // build that could not read the store it left behind.
+    migrates = true;
   }
 
   for (const [id, onDisk] of persisted) {
@@ -1015,6 +1033,30 @@ export function decide(opts: {
       kind: "current",
       reason: `${current} is the latest (${m.channel} is serving an older ` +
         `build of it, released ${m.releasedAt} — a stale or replayed manifest)`,
+    };
+  }
+
+  // ── the same bytes, a different version ────────────────────────────────
+  //
+  // The installed artifact IS the release (digests agree), but its signed
+  // version is not the one the binary reports — `aio ship` stamped the version
+  // from the repo, not from the artifact (a commit later, or `--version=`).
+  // Offering it installed the identical bytes, which booted reporting the
+  // same old version, which was offered again: with `auto: true` a
+  // download→swap→restart loop forever. Not an offer — there is nothing to
+  // install — and said by name, because the release itself is mis-signed.
+  if (
+    cmp !== 0 && !!m.sha256 && !!localSha &&
+    localSha.toLowerCase() === m.sha256.toLowerCase()
+  ) {
+    return {
+      kind: "current",
+      reason: `this install already runs ${m.channel}'s ${m.version} ` +
+        `artifact (same digest ${m.sha256.slice(0, 12)}…), but that build ` +
+        `reports itself as ${current} — the release was signed with a ` +
+        `version its binary does not carry, so installing it again changes ` +
+        `nothing. Fix (publisher): re-ship it with \`aio ship\` from the ` +
+        `build that reports ${m.version} (ship now refuses the mismatch).`,
     };
   }
 

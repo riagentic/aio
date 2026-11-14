@@ -59,6 +59,7 @@ import {
   relocate,
   sumOf,
 } from "./updates-owned.ts";
+import { reportedVersions } from "./updates-core.ts";
 import {
   neutralCwd,
   outlivingParent,
@@ -1020,7 +1021,13 @@ export function swapStrategy(os: string = Deno.build.os): SwapStrategy {
  *  non-zero exit refuses the update by name. */
 export async function smokeTestArtifact(
   path: string,
-  opts: { timeoutMs?: number; args?: string[] } = {},
+  opts: {
+    timeoutMs?: number;
+    args?: string[];
+    /** The version the signed manifest says this artifact IS. When given, the
+     *  `--version` answer must name it — see {@linkcode reportedVersions}. */
+    expectVersion?: string;
+  } = {},
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const args = opts.args ?? ["--version"];
   const timeoutMs = opts.timeoutMs ?? 30_000;
@@ -1031,7 +1038,9 @@ export async function smokeTestArtifact(
   }
   let out: ProbeResult;
   try {
-    out = await probeOffThread(path, args, timeoutMs);
+    out = await probeOffThread(path, args, timeoutMs, {
+      stdout: opts.expectVersion !== undefined,
+    });
   } catch (e) {
     return {
       ok: false,
@@ -1069,6 +1078,42 @@ export async function smokeTestArtifact(
           stderr ? ` — ${stderr}` : ""
         }. It cannot run on this machine, so ` +
         `the update was NOT installed; the running version is untouched.`,
+    };
+  }
+  // It runs — and it must BE the release it was signed as. A manifest signed
+  // with a version its binary does not report (shipped a commit later, or
+  // with `--version=`) installed cleanly, booted as the OLD version, and was
+  // offered again on the next check: with `auto: true` a download→swap→
+  // restart loop. Refused here, before the swap, naming both.
+  //
+  // Only a version that DIFFERS is refused: every aio build answers
+  // `--version` with one (`versionLine`), so an answer naming none is not
+  // this loop — it is said, and installed on the signature.
+  const reported = opts.expectVersion === undefined
+    ? []
+    : reportedVersions(out.stdout ?? "");
+  const said = (out.stdout ?? "").trim().split("\n")[0] ?? "";
+  if (opts.expectVersion !== undefined && reported.length === 0) {
+    log.warn(
+      "updates",
+      `the downloaded artifact answers \`${args.join(" ")}\` with ${
+        said ? `"${said}"` : "nothing"
+      } — no version to hold to the signed ${opts.expectVersion}; ` +
+        `installing it on the manifest's signature alone.`,
+    );
+  } else if (
+    opts.expectVersion !== undefined &&
+    !reported.includes(opts.expectVersion)
+  ) {
+    return {
+      ok: false,
+      error: `the downloaded artifact is signed as ${opts.expectVersion}, ` +
+        `but \`${args.join(" ")}\` reports "${said}" — the release's ` +
+        `manifest and its binary disagree, and installing ` +
+        `it would offer the same update again forever. The update was NOT ` +
+        `installed; the running version is untouched. Fix (publisher): ` +
+        `re-ship with \`aio ship\` from the build that reports ` +
+        `${opts.expectVersion}.`,
     };
   }
   return { ok: true };
@@ -1216,6 +1261,11 @@ export async function swapArtifact(opts: {
   /** Refuse an artifact that cannot exec (default on). `false` only for a
    *  caller whose `staged` is a stand-in rather than a real program. */
   smoke?: boolean;
+  /** The SIGNED version being installed: the smoke test then also refuses an
+   *  artifact whose `--version` does not report it. Only a manifest install
+   *  passes it — `toVersion` is a commit sha on the git path, which no
+   *  binary reports. */
+  expectVersion?: string;
   /** Overridable so the Windows ordering is exercised from any host. */
   strategy?: SwapStrategy;
   /** Where the new version goes (default `current`): its own versioned name
@@ -1224,7 +1274,9 @@ export async function swapArtifact(opts: {
   next?: string;
 }): Promise<{ previous: string; installed: string; notes: string[] }> {
   if (opts.smoke !== false) {
-    const smoked = await smokeTestArtifact(opts.staged);
+    const smoked = await smokeTestArtifact(opts.staged, {
+      expectVersion: opts.expectVersion,
+    });
     if (!smoked.ok) {
       await Deno.remove(opts.staged).catch(() => {});
       throw new Error(smoked.error);

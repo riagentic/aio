@@ -13,6 +13,7 @@ import {
   markedDataContract,
   PROBE_NONCE_ENV,
   probedFact,
+  reportedVersions,
 } from "../server/updates-core.ts";
 import { basename, dirname, join, resolve as resolvePath } from "@std/path";
 // Synchronous SHA-256 for `keyFingerprint`: WebCrypto's digest is async, and a
@@ -957,6 +958,24 @@ export async function probeArtifact(
   return /^\S+$/.test(appId) ? { contract, appId } : { contract };
 }
 
+/** What `<binary> --version` prints — `""` when it does not answer (exits
+ *  non-zero, or cannot run: the data-contract probe already said so). */
+async function probeVersionAnswer(binaryPath: string): Promise<string> {
+  try {
+    const out = await new Deno.Command(binaryPath, {
+      args: ["--version"],
+      stdin: "null",
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    return out.success ? new TextDecoder().decode(out.stdout) : "";
+  } catch {
+    // aio-ok: an artifact that cannot be spawned was refused by the
+    // data-contract probe already; "" is reported as "reports no version".
+    return "";
+  }
+}
+
 /** Why a release signed for `name` would be refused by every install of a
  *  build that runs as `runsAs` — or null when the two agree. Pure.
  *  `explicit`: the name came from `--name` / `shipApp({ name })`. */
@@ -1500,6 +1519,38 @@ export async function shipRelease(
   const bad = runsAs &&
     identityMismatch(name, runsAs, opts.name !== undefined);
   if (bad) throw new Error(`${NO} ${bad}`);
+  // …and the VERSION it reports, which must be the version this release is
+  // signed as. The version above comes from the repo (or `--version=`), not
+  // from the artifact: shipped a commit after the build, it named a release
+  // the binary does not carry. Every install then took it, booted reporting
+  // the OLD version, and was offered it again — with `auto: true` a
+  // download→swap→restart loop. Probed where the app id is, so the same
+  // escapes (`--data=`, `--no-data`) skip it for an artifact this machine
+  // cannot run.
+  if (!opts.data && !opts.dataPath && !opts.noData) {
+    const answer = await probeVersionAnswer(opts.binaryPath);
+    const reported = reportedVersions(answer);
+    if (reported.length === 0) {
+      console.warn(
+        `${HEY} ${fileName} reports no version on \`--version\` ` +
+          `(${
+            answer.trim() ? `"${answer.trim().split("\n")[0]}"` : "nothing"
+          }) ` +
+          `— the release is signed as ${version} unchecked; every install ` +
+          `refuses an artifact that does not report the version it is ` +
+          `signed as.`,
+      );
+    } else if (!reported.includes(version)) {
+      throw new Error(
+        `${NO} ${fileName} reports version ${reported[0]}, but the release ` +
+          `would be signed as ${version} — every install compares the two ` +
+          `and refuses a mismatch (an install that took it would be offered ` +
+          `it again forever).\n       Fix: ship the artifact built from this ` +
+          `tree (rebuild it, then ship), or pass --version=${reported[0]} ` +
+          `(shipApp: version: "${reported[0]}").`,
+      );
+    }
+  }
   const manifest = await withPatches(
     await buildReleaseManifest({
       platform: opts.platform,

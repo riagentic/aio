@@ -250,16 +250,26 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       return undefined;
     }
     const known = readTrust(deps.dataDir).installedSha256;
-    if (known) return known;
+    // A record that says this install IS the release while the versions
+    // differ is the one case `decide()` stops an offer on the digest alone
+    // (a binary that does not report its signed version). The record is a
+    // cache, though — a build put back by hand over the same data dir keeps
+    // the digest of the one it replaced, and would never be offered anything
+    // again. So that verdict is re-measured where it can be, never trusted.
+    const claimsRelease = !!known && !!m.sha256 &&
+      known.toLowerCase() === m.sha256.toLowerCase() &&
+      m.version !== deps.appVersion;
+    if (known && !claimsRelease) return known;
     if (!m.sha256) return undefined;
     const t = releaseTarget(m);
     if (t === "electron-zip" || t === "electron-app" || t === "android") {
-      return undefined;
+      return known;
     }
     const path = targetOf();
     try {
-      if (!(await Deno.stat(path)).isFile) return undefined;
+      if (!(await Deno.stat(path)).isFile) return known;
       const sha = await fileSha256(path);
+      if (known && sha === known.toLowerCase()) return known;
       recordInstalledSha256(deps.dataDir, sha);
       log.info(
         "updates",
@@ -269,6 +279,8 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       );
       return sha;
     } catch (e) {
+      // The record stands when it cannot be checked — as it did before.
+      if (known) return known;
       // Loud, not silent: the consequence is a whole class of update this
       // install can no longer see, and the user would otherwise be told
       // "you are the latest" forever.
@@ -905,7 +917,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
             ` — the update was NOT installed; the running version is ` +
             `untouched.`,
         }
-        : await smokeTestArtifact(exe);
+        : await smokeTestArtifact(exe, { expectVersion: m.version });
       if (!smoked.ok) {
         await Deno.remove(download).catch(() => {
           // aio-ok: the throw below carries the reason. An archive that
@@ -979,9 +991,11 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
 
     progressOf(null);
 
-    const migrates = !!m.data && Object.entries(m.data.cells).some(
-      ([id, c]) => c.version > (deps.local.cells[id] ?? 0),
-    );
+    // THE verdict's `migrates`, from the one decider `decide()` used — not a
+    // second, narrower recomputation over cell versions. That copy missed a
+    // persistence-schema bump (`dataCompatibility` weighs it), so the release
+    // that rewrites the store format was the one installed with no backup.
+    const migrates = dataCompatibility(deps.local, m.data).migrates;
     const backup = forcedBackup ??
       (migrates ? await backupBeforeMigration(deps.appVersion) : undefined);
     noteBackup(backup);
@@ -1122,6 +1136,10 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         // (~/app/<name>/<name>-<version>) — without it the swap would flatten
         // that layout into a single file and lose every earlier version.
         toVersion: m.version,
+        // …and the smoke test holds the artifact to it: a binary that does
+        // not report the version it was signed as would be offered again on
+        // every check after it installs.
+        expectVersion: m.version,
         // The marker goes down BEFORE the first rename — the swap owns that
         // ordering, so nothing here can get it wrong.
         pending,
