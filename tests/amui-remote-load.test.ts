@@ -35,24 +35,31 @@ Deno.test("amui discovery works when amui is loaded from a remote (https) URL", 
     },
   );
   const sandbox = await tempDir("amui-remote-");
-  const keys = ["HOME", "AMUI_ROOTS"] as const;
-  const prev = keys.map((k) => Deno.env.get(k));
   try {
-    Deno.env.set("HOME", sandbox);
-    Deno.env.set("AMUI_ROOTS", sandbox);
-    const scan = await import(
-      `http://127.0.0.1:${port}/amui/src/server/scan.server.ts`
-    );
-    assertEquals(scan.selfDir(), null, "no local dir behind an https module");
-    const found = await scan.discoverProjects();
-    assert(Array.isArray(found.projects));
-    assert(await scan.selfPaths() instanceof Set);
+    // In a CHILD with --no-lock: an in-process import of the stand-in origin
+    // wrote its URLs into the repository's deno.lock on every suite run.
+    const code = `
+      const scan = await import("http://127.0.0.1:${port}/amui/src/server/scan.server.ts");
+      const found = await scan.discoverProjects();
+      console.log(JSON.stringify({
+        selfDir: scan.selfDir(),
+        projects: Array.isArray(found.projects),
+        selfPaths: (await scan.selfPaths()) instanceof Set,
+      }));`;
+    const out = await new Deno.Command(Deno.execPath(), {
+      args: ["eval", "--no-lock", "--config", REPO + "deno.json", code],
+      env: { ...Deno.env.toObject(), HOME: sandbox, AMUI_ROOTS: sandbox },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const text =
+      new TextDecoder().decode(out.stdout).trim().split("\n").at(-1) ?? "";
+    assert(out.success, new TextDecoder().decode(out.stderr));
+    const r = JSON.parse(text);
+    assertEquals(r.selfDir, null, "no local dir behind an https module");
+    assert(r.projects);
+    assert(r.selfPaths);
   } finally {
-    keys.forEach((k, i) => {
-      const v = prev[i];
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    });
     ac.abort();
     await server.finished;
     await dropTempDir(sandbox);
