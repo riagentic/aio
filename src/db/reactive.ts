@@ -13,6 +13,7 @@ import type { DB, QueryResult, Tx } from "./types.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { WRITE_FEED, type WriteListener } from "./async-db.ts";
 import {
+  controlsTransaction,
   readTablesIn,
   statementVerb,
   writesRows,
@@ -263,6 +264,16 @@ export function reactiveDB(db: DB): ReactiveDB {
     }
   }
 
+  /** Tables written since the app's OWN `execute("BEGIN")` (or an outermost
+   *  SAVEPOINT); null while none is known to be open. COMMIT and ROLLBACK
+   *  name no table, so they refreshed nothing: with no reader pool a live
+   *  query kept a ROLLED-BACK row (the writer had shown it the uncommitted
+   *  INSERT), and with `readers: 1` a committed row never appeared (the
+   *  INSERT's refresh read the reader's pre-commit snapshot). Silently. The
+   *  boundary now refreshes what the transaction wrote. Reset whenever the
+   *  feed is (re)subscribed: a BEGIN it never heard must not be trusted. */
+  let txWrites: Set<string> | null = null;
+
   async function invalidateAll(): Promise<void> {
     for (const e of entries) await refreshAfterWrite(e);
   }
@@ -276,9 +287,27 @@ export function reactiveDB(db: DB): ReactiveDB {
     if (ddl.some((s) => statementVerb(s) !== "CREATE")) return schemaChanged();
     if (ddl.length) graph = null;
     const written = new Set<string>();
+    let everything = false;
     for (const s of sqls) {
-      if (!isDDL(s)) { for (const t of _written(s)) written.add(t); }
+      const verb = statementVerb(s);
+      if (verb === "BEGIN" || (verb === "SAVEPOINT" && !txWrites)) {
+        txWrites = new Set();
+      } else if (/^(COMMIT|END|ROLLBACK|RELEASE)$/.test(verb)) {
+        // The boundary itself names no table: refresh what the transaction
+        // wrote — or everything, when its BEGIN came before we listened.
+        if (txWrites) { for (const t of txWrites) written.add(t); }
+        else everything = true;
+        // A rolled-back CREATE/DROP leaves the cached graph wrong.
+        if (verb === "ROLLBACK") graph = null;
+        if (controlsTransaction(s)) txWrites = null;
+      } else if (!isDDL(s)) {
+        for (const t of _written(s)) {
+          written.add(t);
+          txWrites?.add(t);
+        }
+      }
     }
+    if (everything) return invalidateAll();
     await invalidate(written);
   }
 
@@ -295,7 +324,10 @@ export function reactiveDB(db: DB): ReactiveDB {
   let unfeed: (() => void) | null = null;
   const track = (e: Entry) => {
     entries.add(e);
-    if (feed && !unfeed) unfeed = feed((sqls) => onWrites(sqls));
+    if (feed && !unfeed) {
+      txWrites = null;
+      unfeed = feed((sqls) => onWrites(sqls));
+    }
   };
   const untrack = (e: Entry) => {
     entries.delete(e);
