@@ -43,6 +43,7 @@ import {
 import {
   _exists,
   _lockDirCandidates,
+  _lockDirInUse,
   _lockDirParts,
   lockDir,
   lockKey,
@@ -1386,7 +1387,9 @@ export function instances(appId?: string): InstanceInfo[] {
  *  its own, and `peer(id, { instance })`. */
 export function liveInstancesUnder(appsRoot: string): InstanceInfo[] {
   const root = appsRoot ? resolve(appsRoot) : "";
-  const { base, scope } = _lockDirParts(root);
+  // The dir in use: the case-folded scope, or an older build's as-typed one
+  // on a case-sensitive volume (see `_lockDirInUse`).
+  const { base, scope } = _lockDirInUse(_lockDirParts(root));
   const results: InstanceInfo[] = [];
   for (const dir of _lockDirCandidates(base, scope).filter(_exists)) {
     try {
