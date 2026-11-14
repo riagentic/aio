@@ -15,7 +15,7 @@ import {
   log,
   setLogger,
 } from "../diagnostics/logger-api.ts";
-import { teachableError } from "../diagnostics/error.ts";
+import { teachableError, teachMessage } from "../diagnostics/error.ts";
 import { isDevBoot } from "./aio-boot.ts";
 import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
 import { validateSchedules } from "../state/schedule.ts";
@@ -71,6 +71,7 @@ import { releaseProcessListenersIfIdle } from "./shutdown.ts";
 import type { AioApp, CellsConfig } from "./aio-types.ts";
 import {
   refuseWrongShapes,
+  tuningBlockProblems,
   VALID_FEATURES_CONFIG_KEYS,
   VALID_UI_KEYS,
   validateCallableConfig,
@@ -406,6 +407,15 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     }
   } else if (fc.memory) {
     validateMemoryConfig(fc.memory as Record<string, unknown>);
+  }
+  // The tuning blocks (`circuitBreaker`, `dispatchStorm`, `budgets`,
+  // `perfBudget`, `renderBudget`): a misspelled key or an unusable number
+  // there turned the guard off in silence. Said, not refused — each booted
+  // through 1.0.24. Once per boot: this is the one place `fc` is checked.
+  for (
+    const p of tuningBlockProblems(fc as unknown as Record<string, unknown>)
+  ) {
+    log.warn(teachMessage(p.what, p.fix));
   }
   // …and the OTHER file people put aio config in. `aio.run()` refuses an
   // unknown key loudly; deno.json accepted `ui: { width, height }` at the top

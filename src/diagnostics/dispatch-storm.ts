@@ -22,6 +22,62 @@ export type StormConfig = {
   breaker?: boolean;
 };
 
+/** The values {@linkcode createStormDetector} uses when `rate`/`sustain` are
+ *  omitted — or are not a value it can act on. */
+export const STORM_DEFAULTS = { rate: 200, sustain: 5 } as const;
+
+function validStormRate(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 1;
+}
+
+function validStormSustain(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 1;
+}
+
+/** Why `aio.run({ dispatchStorm })` would not do what it says — one sentence
+ *  per problem, empty when it is fine. Warned at boot, never refused: every
+ *  one of these booted through 1.0.24 (the compatibility rule). An unusable
+ *  `rate`/`sustain` is replaced by its default at runtime, and the sentence
+ *  says so. Pure. */
+export function stormConfigProblems(v: unknown): string[] {
+  if (v === undefined || v === null || typeof v === "boolean") return [];
+  if (typeof v !== "object" || Array.isArray(v)) {
+    return [
+      `dispatchStorm is ${
+        JSON.stringify(v)
+      }, which is neither true/false nor { rate, sustain, breaker } — the ` +
+      `guard runs with its defaults`,
+    ];
+  }
+  const out: string[] = [];
+  const c = v as Record<string, unknown>;
+  if (c.rate !== undefined && !validStormRate(c.rate)) {
+    out.push(
+      `dispatchStorm.rate is ${
+        JSON.stringify(c.rate)
+      }, which is not a number of dispatches per second ≥ 1 — using the ` +
+        `default ${STORM_DEFAULTS.rate} (write rate: 200, not "200/s")`,
+    );
+  }
+  if (c.sustain !== undefined && !validStormSustain(c.sustain)) {
+    out.push(
+      `dispatchStorm.sustain is ${
+        JSON.stringify(c.sustain)
+      }, which is not a whole number of seconds ≥ 1 — using the default ` +
+        `${STORM_DEFAULTS.sustain}`,
+    );
+  }
+  if (c.breaker !== undefined && typeof c.breaker !== "boolean") {
+    out.push(
+      `dispatchStorm.breaker is ${
+        JSON.stringify(c.breaker)
+      }, which is not true or false — it is read for truthiness, so ` +
+        `"false" turns the breaker ON`,
+    );
+  }
+  return out;
+}
+
 /** Storm notification passed to the `onStorm` callback. */
 export type StormInfo = {
   /** Offending action type, e.g. "workspace:fsChanged" */
@@ -80,8 +136,16 @@ export function createStormDetector(
     now?: () => number;
   } = {},
 ): StormDetector {
-  const rate = cfg.rate ?? 200;
-  const sustain = cfg.sustain ?? 5;
+  // A value the comparisons below cannot act on is read as the default, not
+  // as written: `rate: "200/s"` compared as NaN and no storm was ever named,
+  // and `rate: 0` made EVERY type "storm" after `sustain` seconds — with
+  // `breaker`, each was then dropped for good. Both booted silently; the boot
+  // now says so (`stormConfigProblems`, warned by aio-run-entry.ts) and this
+  // is what that warning promises.
+  const rate = validStormRate(cfg.rate) ? cfg.rate : STORM_DEFAULTS.rate;
+  const sustain = validStormSustain(cfg.sustain)
+    ? cfg.sustain
+    : STORM_DEFAULTS.sustain;
   const breaker = cfg.breaker ?? false;
   const now = cfg.now ?? Date.now;
   const types = new Map<string, TypeState>();

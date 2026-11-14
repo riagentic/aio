@@ -338,6 +338,29 @@ export function cell(name: string, config: any): any {
   // at compose time by the same rule (aio-composition `refuseFilteredSyncCells`).
   refuseUnreadValues(name, config as Record<string, unknown>);
 
+  // `version: "2.0.0"` (the app's semver, the natural mistake) is compared
+  // against the stored integer as NaN — every comparison false — so
+  // `onMigrate` never runs and the gate that refuses `onMigrate` without
+  // `version >= 1` is passed too. WARNED, not thrown: such a cell boots today
+  // (the compatibility rule), and an integer behaves exactly as before.
+  const version = (config as { version?: unknown }).version;
+  if (
+    version !== undefined &&
+    !(typeof version === "number" && Number.isInteger(version) && version >= 0)
+  ) {
+    log.warn(
+      "cell",
+      `[${name}] cell(): version is ${
+        JSON.stringify(version) ?? String(version)
+      }, which is not a whole number ≥ 0 — migrations compare it as a ` +
+        `number, so onMigrate${
+          (config as { onMigrate?: unknown }).onMigrate ? "" : " (if added)"
+        } would never run. version is the cell's data-shape counter: 1, 2, ` +
+        `3 — not the app's semver. Write version: 1 and bump it on every ` +
+        `state-shape change.`,
+    );
+  }
+
   if (config.sync && config.persist !== undefined && config.persist !== "all") {
     throw new Error(persistFilterOnSyncCellMessage(name, config.persist));
   }

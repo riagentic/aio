@@ -13,6 +13,7 @@ import { classifySource } from "./updates-core.ts";
 import { declaredMaxHeapOf } from "./heap-policy.ts";
 import { type Removal, removalsInDenoJson } from "../state/removals.ts";
 import { MAX_TIMER_DELAY } from "../state/timer-ceiling.ts";
+import { stormConfigProblems } from "../diagnostics/dispatch-storm.ts";
 
 // Runtime config validation & documentation — extracted from aio.ts (AIO-52)
 // Types are erased at runtime. These sets are the runtime source of truth.
@@ -1978,6 +1979,192 @@ export const VALID_UPDATES_KEYS: Set<string> = new Set([
   "prerelease",
   "keepOld",
 ]);
+
+// ─── The tuning blocks: said, not refused ───────────────────────────────────
+//
+// `circuitBreaker`, `dispatchStorm`, `budgets`, `perfBudget` and
+// `renderBudget` had only their SHAPE checked (SHAPE_VALUES), so a misspelled
+// key inside one was dropped in silence and the guard it named did nothing:
+// `circuitBreaker: { maxErorrs: 3 }` never tripped, `perfBudget.methods[m]:
+// { timout }` kept the 30 s default ceiling, `circuitBreaker.window: "1m"`
+// made the cutoff NaN and the count silently cumulative. They are NOT in
+// NESTED_CONFIGS on purpose: that walk exits(1), and every one of these booted
+// through 1.0.24 — so they are WARNED at boot (aio-run-entry.ts, beside
+// `memory`), with the same did-you-mean.
+
+/** Every key of `CircuitBreakerConfig` (state/cell-compose-types.ts). */
+export const VALID_CIRCUIT_BREAKER_KEYS: Set<string> = new Set([
+  "maxErrors",
+  "onTrip",
+  "window",
+]);
+
+/** Every key of `StormConfig` (diagnostics/dispatch-storm.ts). */
+export const VALID_DISPATCH_STORM_KEYS: Set<string> = new Set([
+  "rate",
+  "sustain",
+  "breaker",
+]);
+
+/** Every key of `Budgets` (state/budgets.ts). */
+export const VALID_BUDGETS_KEYS: Set<string> = new Set([
+  "cellState",
+  "broadcastRate",
+  "payload",
+]);
+
+/** Every key of `PerfBudget` (state/dispatch.ts). */
+export const VALID_PERF_BUDGET_KEYS: Set<string> = new Set([
+  "reduce",
+  "effect",
+  "methods",
+]);
+
+/** Every key of one `PerfBudget.methods["cell:method"]` entry. */
+export const VALID_PERF_BUDGET_METHOD_KEYS: Set<string> = new Set([
+  "effect",
+  "timeout",
+]);
+
+/** Every key of `RenderBudget` (vitals/types.ts). */
+export const VALID_RENDER_BUDGET_KEYS: Set<string> = new Set([
+  "staleness",
+  "pendingPatches",
+]);
+
+/** The tuning blocks above and the allowlist each is checked against. */
+const TUNING_BLOCKS: Record<string, Set<string>> = {
+  circuitBreaker: VALID_CIRCUIT_BREAKER_KEYS,
+  dispatchStorm: VALID_DISPATCH_STORM_KEYS,
+  budgets: VALID_BUDGETS_KEYS,
+  perfBudget: VALID_PERF_BUDGET_KEYS,
+  renderBudget: VALID_RENDER_BUDGET_KEYS,
+};
+
+/** Numeric keys inside the tuning blocks, by dotted path. */
+const TUNING_NUMBERS: Record<string, NumericSpec> = {
+  "circuitBreaker.maxErrors": {
+    min: 0,
+    integer: true,
+    what: "a whole number of errors (0 = never trip)",
+  },
+  "circuitBreaker.window": {
+    min: 1,
+    what: "a number of milliseconds, e.g. window: 60_000 for one minute — " +
+      "or leave it out to count errors cumulatively",
+  },
+  "perfBudget.reduce": { min: 0, what: "a number of milliseconds" },
+  "perfBudget.effect": { min: 0, what: "a number of milliseconds" },
+  "renderBudget.staleness": { min: 0, what: "a number of milliseconds" },
+  "renderBudget.pendingPatches": {
+    min: 0,
+    integer: true,
+    what: "a whole number of patches",
+  },
+};
+
+/** One problem in a tuning block: what is wrong, and the fix. */
+export type BlockProblem = { what: string; fix: string };
+
+function unknownKeysIn(
+  obj: Record<string, unknown>,
+  valid: Set<string>,
+  label: string,
+): BlockProblem | null {
+  const unknown = Object.keys(obj).filter((k) => !valid.has(k));
+  if (unknown.length === 0) return null;
+  const named = unknown.map((k) => {
+    const near = nearestOf(k, valid);
+    return near ? `${k} (did you mean "${near}"?)` : k;
+  });
+  return {
+    what: `unknown ${label} key(s): ${named.join(", ")} — IGNORED, so the ` +
+      `setting they name is NOT applied`,
+    fix: `fix the spelling; valid keys: ${[...valid].join(", ")}`,
+  };
+}
+
+/** Every problem in `circuitBreaker` / `dispatchStorm` / `budgets` /
+ *  `perfBudget` / `renderBudget`: unknown keys (with did-you-mean, also inside
+ *  each `perfBudget.methods` entry) and numbers the reader cannot act on.
+ *  Pure — the caller warns. Never a refusal (see the section comment). */
+export function tuningBlockProblems(
+  cfg: Record<string, unknown>,
+): BlockProblem[] {
+  const out: BlockProblem[] = [];
+  const isObj = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === "object" && !Array.isArray(v);
+  for (const [block, valid] of Object.entries(TUNING_BLOCKS)) {
+    const v = cfg[block];
+    if (!isObj(v)) continue;
+    const bad = unknownKeysIn(v, valid, block);
+    if (bad) out.push(bad);
+  }
+  for (const [path, spec] of Object.entries(TUNING_NUMBERS)) {
+    const [block, key] = path.split(".") as [string, string];
+    const b = cfg[block];
+    if (!isObj(b) || b[key] === undefined) continue;
+    const bad = numericRefusal(b[key], spec);
+    if (bad) {
+      out.push({
+        what: `${path} is ${JSON.stringify(b[key])}, which is ${bad}`,
+        fix: `use ${spec.what}`,
+      });
+    }
+  }
+  const pb = cfg.perfBudget;
+  const methods = isObj(pb) ? pb.methods : undefined;
+  if (isObj(methods)) {
+    for (const [m, entry] of Object.entries(methods)) {
+      const where = `perfBudget.methods[${JSON.stringify(m)}]`;
+      if (!isObj(entry)) {
+        if (entry !== undefined) {
+          out.push({
+            what: `${where} is ${JSON.stringify(entry)}, not an object`,
+            fix: 'use { effect: <ms>, timeout: <ms> | "warn" }',
+          });
+        }
+        continue;
+      }
+      const bad = unknownKeysIn(entry, VALID_PERF_BUDGET_METHOD_KEYS, where);
+      if (bad) out.push(bad);
+      if (entry.effect !== undefined) {
+        const e = numericRefusal(entry.effect, {
+          min: 0,
+          what: "a number of milliseconds",
+        });
+        if (e) {
+          out.push({
+            what: `${where}.effect is ${
+              JSON.stringify(entry.effect)
+            }, which is ${e}`,
+            fix: "use a number of milliseconds",
+          });
+        }
+      }
+      // NaN is said by `clampTimerDelays`, which also replaces it — not twice.
+      const t = entry.timeout;
+      if (
+        t !== undefined && t !== "warn" &&
+        !(typeof t === "number" && (Number.isNaN(t) || t >= 0))
+      ) {
+        out.push({
+          what: `${where}.timeout is ${
+            JSON.stringify(t)
+          }, which is neither a number of milliseconds nor "warn"`,
+          fix: 'use a number of milliseconds, or "warn" to remove the ceiling',
+        });
+      }
+    }
+  }
+  for (const what of stormConfigProblems(cfg.dispatchStorm)) {
+    out.push({
+      what,
+      fix: "use dispatchStorm: { rate: 200, sustain: 5, breaker: true }",
+    });
+  }
+  return out;
+}
 
 /** The runtime SHAPE a config value must have. */
 export type ConfigShape = "boolean" | "object" | "array";
