@@ -188,12 +188,6 @@ or is small and known.
       HTTP/WS/auth transport, visible/access/forUser filtering. Left as decided
       (low value, behaviour change): compat `useEffect` update ORDER
       (parent-first, React runs child cleanups first).
-- [ ] The mutation-ledger entry "testPageFetch drops the cookie the server
-      sets…" (scripts/mutations/ledger-1.ts ~7442) still names the jar line the
-      cookie-jar rewrite replaced; its new form is
-      `} else jar.set(key, { name, value, path, expires });` (owner's OK pending
-      — see the 2026-11-14 session).
-
 ### Owner decides (each has a recommendation)
 
 - [x] A refused kit Checkbox/Switch/Input keeps the user's pick (memo-skipped;

@@ -7439,8 +7439,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "testPageFetch drops the cookie the server sets — the mount after a sign-in is anonymous",
     file: "src/testing/server-test.ts",
-    find: "      } else cookies.set(name, value);",
-    replace: "      }",
+    find: "    } else jar.set(key, { name, value, path, expires });",
+    replace: "    }",
     test: "tests/auth-login-joined.test.tsx",
     filter:
       "login, joined: the form signs up, in and out against the real endpoints — cookie carried, each side reading what the other sent",
