@@ -27,7 +27,13 @@ import {
   androidLocalHTML,
   oldEngineNotice,
 } from "../server/server-html-gen.ts";
-import { APP_ICON, APP_STYLE, BUNDLE_JS } from "../server/app-files.ts";
+import {
+  APP_ICON,
+  APP_STYLE,
+  BUNDLE_JS,
+  workerBundleName,
+  workerBundlesIn,
+} from "../server/app-files.ts";
 import { escHtml } from "../server/server-html-constants.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
 import { targetSplash } from "../electron/splash.ts";
@@ -128,7 +134,9 @@ const REUSE_MAX = 16 * 1024 * 1024;
  *  has no file for (a reload on a client route: 404) or cannot answer
  *  (offline) — with a `<base>` of its scope, so a route two levels deep loads
  *  the build from the deploy root, not from the route's directory — and
- *  drops the caches of older builds when it takes over. A new
+ *  drops the caches of older builds when it takes over, all but the one it
+ *  replaces: a tab it takes over still runs that build, and a file only that
+ *  build holds (its content-named browser worker) is answered from there. A new
  *  build is a new `sw.js` byte-for-byte, which is what makes the browser
  *  install it.
  *
@@ -215,11 +223,18 @@ const precacheAssets = (c, from) => {
   };
   return Promise.all(Array.from({ length: ${ASSETS_AT_ONCE} }, next));
 };
-// The newest other cache of this app at this scope — what reuse copies from.
-const newestOwn = () => caches.keys().then((ks) => ks.filter((k) => {
+// The other caches of this app at this scope, oldest first (creation order).
+const others = () => caches.keys().then((ks) => ks.filter((k) => {
   const m = OWN.exec(k);
   return k !== V && m && m[2] === self.registration.scope;
-}).pop());
+}));
+// The newest of them — what reuse copies from. Every one older than it is
+// dropped first: the activate keeps the build this one replaces (see PREV),
+// and an install still needs room for two builds, not three.
+const newestOwn = () => others().then((ks) => {
+  const from = ks.pop();
+  return Promise.all(ks.map((k) => caches.delete(k))).then(() => from);
+});
 self.addEventListener("install", (e) => {
   e.waitUntil(newestOwn().then((from) => caches.open(V)
     .then((c) => c.addAll(FILES.map(req)).then(() => precacheAssets(c, from))))
@@ -237,6 +252,10 @@ self.addEventListener("install", (e) => {
 // another path — that one offline, dead. A pre-scope name carries no scope, so
 // what it HOLDS says whose it is: dropped only when every entry is under this
 // scope (an /app-staging/ one is left to its own worker's update).
+// The newest older one — the build this one replaces — is KEPT: skipWaiting +
+// claim take over tabs still running it, and what such a tab fetches later
+// (its browser worker) must be ITS build's file, not the new build's or a 404
+// (see the "fetch" handler). The next build's install drops it.
 const OWN = new RegExp(${
     JSON.stringify(
       "^" + prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "[^@-]+(@(.*))?$",
@@ -251,12 +270,33 @@ self.addEventListener("activate", (e) => {
     return caches.open(k).then((c) => c.keys())
       .then((rs) => rs.every((r) => r.url.startsWith(scope)));
   };
-  e.waitUntil(caches.keys().then((ks) => Promise.all(ks.map((k, i) =>
-    mine(k, ks.indexOf(V) < 0 || i < ks.indexOf(V))
-      .then((drop) => drop && caches.delete(k))
-  )))
+  e.waitUntil(caches.keys().then((ks) => {
+    const prev = previous(ks);
+    return Promise.all(ks.map((k, i) =>
+      mine(k, k !== prev && (ks.indexOf(V) < 0 || i < ks.indexOf(V)))
+        .then((drop) => drop && caches.delete(k))
+    ));
+  })
     .then(() => self.clients.claim()));
 });
+// The build this one replaced: the newest cache of this app at this scope made
+// before this one's (undefined if none).
+const previous = (ks) => ks.slice(0, ks.indexOf(V) < 0 ? 0 : ks.indexOf(V))
+  .filter((k) => { const m = OWN.exec(k); return m && m[2] === self.registration.scope; })
+  .pop();
+let PREV;
+// A tab this build took over (skipWaiting + claim) still runs the previous
+// build: a file it asks for that this build does not hold — its own browser
+// worker, content-named — is answered from that build's cache. caches.match
+// with a cacheName never creates the cache, so a dropped one is a plain miss.
+const fromPrevious = (r) => (PREV || (PREV = caches.keys().then(previous)))
+  .then((p) => p ? caches.match(r, { cacheName: p, ignoreSearch: true }) : undefined);
+// A host that redirects /index.html → / (Cloudflare Pages, Vercel cleanUrls,
+// npx serve) has the precache store a REDIRECTED response, and the browser refuses
+// one as a navigation's answer (ERR_FAILED: the installed app dead offline on
+// a reload of /settings). A navigation gets a copy that is not one, as Workbox does.
+const plain = (res) => !res || !res.redirected ? res
+  : new Response(res.body, { status: res.status, statusText: res.statusText, headers: res.headers });
 // The shell for a client route: its relative refs (./app.js, css, manifest,
 // icons, sw.js) must resolve against the deploy root — this worker's scope —
 // not against the route's directory (/a/b → /a/app.js). Only a route whose
@@ -264,7 +304,7 @@ self.addEventListener("activate", (e) => {
 // a <base> would re-point its "#section" links at the root.
 const shell = (c, url) => c.match("./index.html").then((s) => {
   const scope = self.registration.scope;
-  if (!s || new URL(".", url).href === scope) return s;
+  if (!s || new URL(".", url).href === scope) return plain(s);
   return s.text().then((t) =>
     new Response(t.replace("<head>", "<head><base href=\\"" + scope + "\\">"),
       { headers: { "content-type": "text/html; charset=utf-8" } }));
@@ -272,8 +312,11 @@ const shell = (c, url) => c.match("./index.html").then((s) => {
 self.addEventListener("fetch", (e) => {
   const r = e.request;
   if (r.method !== "GET" || new URL(r.url).origin !== location.origin) return;
+  const nav = r.mode === "navigate";
   e.respondWith(caches.open(V).then((c) =>
-    c.match(r, { ignoreSearch: true }).then((hit) => hit || fetch(r).then((res) =>
+    c.match(r, { ignoreSearch: true })
+      .then((hit) => hit || (nav ? undefined : fromPrevious(r)))
+      .then((hit) => hit ? (nav ? plain(hit) : hit) : fetch(r).then((res) =>
       r.mode === "navigate" && res.status === 404
         ? shell(c, r.url).then((s) => s || res)
         : res, (err) => {
@@ -368,6 +411,58 @@ async function contentHash(
     .map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** Renames the browser workers copied into `dir` (`names`) by their CONTENT,
+ *  and rewrites every reference to them in the bundle and in each other.
+ *
+ *  `workerBundleName`'s hash is of the script's PATH: build B's worker has
+ *  build A's name. The worker takes over every open tab (skipWaiting + claim),
+ *  so a tab still running A that starts its worker got B's — two builds in one
+ *  page. Named by content, A's page asks for A's file, which B's cache does
+ *  not hold and the previous build's does (see `serviceWorker`). A worker's
+ *  hash covers every worker it starts, transitively, so a changed nested
+ *  worker renames the ones that name it. The `isWorkerBundle` shape is kept.
+ *  Web only: the other targets ship one build per install. */
+export async function nameWorkersByContent(
+  dir: string,
+  names: readonly string[],
+): Promise<Record<string, string>> {
+  if (names.length === 0) return {};
+  const code = new Map<string, string>();
+  for (const n of names) code.set(n, await Deno.readTextFile(join(dir, n)));
+  const starts = (n: string) =>
+    workerBundlesIn(code.get(n)!).filter((m) => code.has(m));
+  const renamed: Record<string, string> = {};
+  for (const n of names) {
+    const seen = new Set([n]);
+    for (const m of seen) for (const x of starts(m)) seen.add(x);
+    const parts: string[] = [];
+    for (const m of [...seen].sort()) parts.push(m, "\0", code.get(m)!, "\0");
+    const digest = new Uint8Array(
+      await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(parts.join("")),
+      ),
+    );
+    const hash8 = [...digest.slice(0, 4)]
+      .map((b) => b.toString(16).padStart(2, "0")).join("");
+    const stem = /^worker-(.+)-[0-9a-f]{8}\.js$/.exec(n)![1]!;
+    renamed[n] = workerBundleName(stem, hash8);
+  }
+  // One pass over every old name at once: a new name is never re-rewritten.
+  const any = new RegExp(
+    names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
+    "g",
+  );
+  const rewrite = (t: string) => t.replace(any, (n) => renamed[n] ?? n);
+  const bundle = join(dir, BUNDLE_JS);
+  await Deno.writeTextFile(bundle, rewrite(await Deno.readTextFile(bundle)));
+  for (const n of names) {
+    await Deno.remove(join(dir, n));
+    await Deno.writeTextFile(join(dir, renamed[n]!), rewrite(code.get(n)!));
+  }
+  return renamed;
+}
+
 export async function buildWeb(cfg: BuildConfig): Promise<void> {
   const { root, dist, binaryName, appTitle } = cfg;
   const title = appTitle ?? binaryName;
@@ -393,7 +488,10 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
   await Deno.copyFile(join(dist, BUNDLE_JS), join(outDir, BUNDLE_JS));
   // …and the browser workers it starts, beside it: `listFiles` below then
   // precaches and digest-pins them like the bundle.
-  await copyWorkerBundles(dist, outDir);
+  await nameWorkersByContent(
+    outDir,
+    await copyWorkerBundles(dist, outDir),
+  );
 
   let hasCSS = false;
   try {

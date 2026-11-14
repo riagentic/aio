@@ -156,7 +156,9 @@ Deno.test({
       };
       const cached = (f: string) =>
         js<string | null>(
-          `caches.match(${JSON.stringify(f)}).then((r) => r ? r.text() : null)`,
+          // The NEWEST build of this app here: the one it replaced is kept.
+          `caches.keys().then((ks) => ks.filter((k) => /^aio-t-[^@-]+@/.test(k) && k.endsWith("@" + location.origin + "/")).pop())` +
+            `.then((k) => caches.match(${JSON.stringify(f)}, { cacheName: k })).then((r) => r ? r.text() : null)`,
         );
 
       await deploy(site, "a", {
@@ -234,7 +236,9 @@ Deno.test({
         "build B's cache to be this app's only one, the others' kept",
         async () =>
           JSON.stringify((await js<string[]>(`caches.keys()`)).sort()) ===
-            JSON.stringify([...others, `aio-t-b@${scope}`].sort()),
+            JSON.stringify(
+              [...others, `aio-t-a@${scope}`, `aio-t-b@${scope}`].sort(),
+            ),
       );
       assertEquals(await cached("./app.js"), "B", "the new build's bytes");
       assertEquals(await cached("./gone.js"), null, "a removed file is gone");

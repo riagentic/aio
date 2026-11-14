@@ -214,10 +214,10 @@ Deno.test({
       gets.clear();
       await update();
       await waitFor(
-        "build B's cache to be the only one",
+        "build B to take over, A's cache kept beside it",
         async () =>
           JSON.stringify(await js<string[]>(`caches.keys()`)) ===
-            JSON.stringify([V("b")]),
+            JSON.stringify([V("a"), V("b")]) && (await settled()),
       );
       assertEquals(gets.get("/packs/p1.bin") ?? 0, 0, "unchanged: copied");
       assertEquals(gets.get("/packs/p2.bin"), 1, "changed: downloaded");
@@ -254,12 +254,12 @@ Deno.test({
       hold = null;
       await waitFor("C to activate", async () => {
         const ks = await js<string[]>(`caches.keys()`);
-        return !ks.includes(V("b")) && (await settled());
+        return !ks.includes(V("a")) && (await settled());
       });
       assertEquals(
         await js<string[]>(`caches.keys()`),
-        [V("c"), V("newer")],
-        "the older build dropped, the newer cache kept",
+        [V("b"), V("c"), V("newer")],
+        "the build C replaced kept, the older one dropped, the newer cache kept",
       );
       await js(`caches.delete(${JSON.stringify(V("newer"))})`);
 

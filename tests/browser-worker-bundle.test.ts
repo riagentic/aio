@@ -829,11 +829,20 @@ Deno.test("targets: the web folder and the APK's assets carry every worker bundl
     const web = join(root, webArtifactName("probe"));
     const sw = await Deno.readTextFile(join(web, "sw.js"));
     assertEquals(names.length, 2);
+    // The web folder names each worker by its CONTENT (`nameWorkersByContent`):
+    // a tab a deploy took over must still get its own build's worker.
+    const inWeb = [...Deno.readDirSync(web)].map((e) => e.name)
+      .filter((n) => /^worker-/.test(n)).sort();
+    assertEquals(inWeb.length, names.length);
     for (const n of names) {
-      assertEquals(await Deno.readTextFile(join(web, n)), `// ${n}`);
+      const stem = n.slice(0, -"0a1b2c3d.js".length);
+      const w = inWeb.find((x) => x.startsWith(stem))!;
+      assert(w && w !== n, `${n} is not renamed by content: ${inWeb}`);
+      // Its own name in its text follows the rename, as every reference does.
+      assertEquals(await Deno.readTextFile(join(web, w)), `// ${w}`);
       assert(
-        sw.includes(`"./${n}":"sha256-`),
-        `${n} is not digest-pinned in the precache:\n${sw.slice(0, 600)}`,
+        sw.includes(`"./${w}":"sha256-`),
+        `${w} is not digest-pinned in the precache:\n${sw.slice(0, 600)}`,
       );
     }
     assert(!sw.includes("notes.js"));

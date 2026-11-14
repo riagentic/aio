@@ -74,7 +74,10 @@ export const BUNDLE_MAP = `.${BUNDLE_JS}.map`;
  *  one is staged, served or packaged: `worker-<name>-<hash8>.js`. `name` is
  *  the script's own (for a reader of the network tab), the hash is of its
  *  path in the project and its format — two `worker.ts` in two folders are
- *  two files, and a rebuild keeps the name. */
+ *  two files, and a rebuild keeps the name. The `web` target renames each by
+ *  its CONTENT (`nameWorkersByContent` in build-web.ts): a deploy takes over
+ *  open tabs, and a tab still running the previous build must get that
+ *  build's worker, not one of the same name. */
 export function workerBundleName(name: string, hash8: string): string {
   return `worker-${name.replace(/[^A-Za-z0-9_]+/g, "-")}-${hash8}.js`;
 }

@@ -2024,33 +2024,44 @@ sw.js                  the offline cache
   a hash of all of them, answers from it first, serves the shell for a
   navigation the host has no file for (a reload on a client route, however deep)
   or cannot reach (offline) — loading the build from the deploy root, not from
-  the route's directory — and drops older builds' caches when it takes over. A
-  new build is a new `sw.js`, which is what makes a browser install it —
-  deploying the directory **is** the update. Every script, stylesheet and wasm
-  file is checked against its digest as it is cached (pages and images are not:
-  a host may rewrite those — an injected snippet, an image optimizer): a CDN
-  edge still serving the previous build fails the update, the previous build
-  keeps serving whole, and the browser tries again later — never the new version
-  holding the old bytes. The page's own files are fetched first, all at once;
-  the `assets` mounts' files after them, two at a time — a first visit's page
-  (not yet controlled by the worker) keeps most of the bandwidth for its own
-  requests. The update is still all or nothing: any file that fails fails it.
-  Each build is cached whole, but an `assets` mount file whose bytes did not
-  change is not downloaded again: the new build's install copies it from the
-  cache of the build it replaces when the stored bytes hash to the new build's
-  SHA-256 (measured in Chromium and WebKit: an unchanged pack, 0 downloads).
-  Everything else is fetched as before — the page's own files every deploy (the
-  version in the page, `appVersion()`, moves with every commit), a changed
-  asset, a file over 16 MiB (the copy is hashed in memory: two 60 MB copies took
-  a WebKit web process to ~620 MB), and an image a host rewrites (its bytes
-  never match). While a build installs, the previous one stays whole beside it:
-  an update needs room for both, and a store too small fails the install
+  the route's directory, and never as a redirect (a host that redirects
+  `/index.html` to `/` — Cloudflare Pages, Vercel `cleanUrls`, `npx serve` —
+  still gets the shell offline) — and drops older builds' caches when it takes
+  over, all but the build it replaces (see **Open tabs** below). A new build is
+  a new `sw.js`, which is what makes a browser install it — deploying the
+  directory **is** the update. Every script, stylesheet and wasm file is checked
+  against its digest as it is cached (pages and images are not: a host may
+  rewrite those — an injected snippet, an image optimizer): a CDN edge still
+  serving the previous build fails the update, the previous build keeps serving
+  whole, and the browser tries again later — never the new version holding the
+  old bytes. The page's own files are fetched first, all at once; the `assets`
+  mounts' files after them, two at a time — a first visit's page (not yet
+  controlled by the worker) keeps most of the bandwidth for its own requests.
+  The update is still all or nothing: any file that fails fails it. Each build
+  is cached whole, but an `assets` mount file whose bytes did not change is not
+  downloaded again: the new build's install copies it from the cache of the
+  build it replaces when the stored bytes hash to the new build's SHA-256
+  (measured in Chromium and WebKit: an unchanged pack, 0 downloads). Everything
+  else is fetched as before — the page's own files every deploy (the version in
+  the page, `appVersion()`, moves with every commit), a changed asset, a file
+  over 16 MiB (the copy is hashed in memory: two 60 MB copies took a WebKit web
+  process to ~620 MB), and an image a host rewrites (its bytes never match).
+  While a build installs, the previous one stays whole beside it: an update
+  needs room for both, and a store too small fails the install
   (`✗ [aio] offline cache: this build was not installed — …` in the worker's
   console) and the previous build keeps serving. Only caches made before the new
   build's are dropped when it takes over. A browser that refuses the worker
   (plain `http` off localhost, `file://`) logs
   `[aio] offline cache (service worker) not registered` in the console; the app
   still runs online.
+- **Open tabs across a deploy.** The new build takes over open tabs at once, but
+  a tab keeps running the build it loaded until it reloads, and what it fetches
+  later is that build's: each browser worker's file is named by its content
+  (`worker-<name>-<hash8>.js`, the hash of its bytes and of every worker it
+  starts), so a tab asks for its own build's worker, and the build that took
+  over keeps the cache of the build it replaced to answer it — the build after
+  it drops that one. So two builds are kept between deploys (and three never: an
+  install drops all but the newest before filling its own).
 - **Deploy it as it is** — copy the directory to the host, at the origin's root
   or under a sub-path (a GitHub Pages project site at `/repo/`): routes are read
   relative to the directory `app.js` is served from, so `<Route path="/">`
