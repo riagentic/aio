@@ -88,14 +88,48 @@ export interface DiscoveredProject {
   self?: boolean;
 }
 
+/** THE spelling of a directory every comparison here uses: its physical
+ *  path. A project reached through a symlink (a symlinked `AMUI_ROOTS` entry,
+ *  a symlinked `~/aio-apps`) was keyed by the spelled path, while the lock an
+ *  app writes records its physical `Deno.cwd()` — so a project amui started
+ *  never matched its own boot ("failed to start" over a running app) and was
+ *  listed twice, once idle with a Start button. The spelled path when it
+ *  cannot be resolved (gone, unreadable): a comparison still happens, on what
+ *  was given. */
+export function canonDir(p: string): string {
+  try {
+    return Deno.realPathSync(p);
+  } catch {
+    return p; // aio-ok: unresolvable — compared as spelled
+  }
+}
+
+/** The directory `rel` names relative to this module, or null when amui was
+ *  loaded from a non-file: URL (`deno run jsr:@riagentic/aio/amui` — an
+ *  https: import.meta.url). fromFileUrl THROWS on one, and it was called
+ *  outside every guard: discovery threw and amui listed nothing, and every
+ *  start/stop/restart threw in its self check. */
+function moduleDir(rel: string): string | null {
+  const url = new URL(rel, import.meta.url);
+  if (url.protocol !== "file:") return null;
+  try {
+    return canonDir(
+      decodeURIComponent(fromFileUrl(url))
+        // The host's separator: on Windows the path ends in `\`, and left on
+        // it matched no lock cwd — amui did not recognise itself.
+        .replace(/[\\/]$/, ""),
+    );
+  } catch {
+    return null; // aio-ok: not a local path — the lock registry decides
+  }
+}
+
 /** amui's own project directory, from the module path. Correct while running
  *  from source; inside a compiled binary this points into the compile VFS, so
- *  it is only ONE of the signals `selfPaths()` uses. */
-export function selfDir(): string {
-  return decodeURIComponent(fromFileUrl(new URL("../..", import.meta.url)))
-    // The host's separator: on Windows the path ends in `\`, and left on it
-    // matched no lock cwd — amui did not recognise itself.
-    .replace(/[\\/]$/, "");
+ *  it is only ONE of the signals `selfPaths()` uses. Null when amui runs from a
+ *  remote (jsr/https) URL — then the lock registry is the only signal. */
+export function selfDir(): string | null {
+  return moduleDir("../..");
 }
 
 /** Every path that IS this amui process. The authoritative signal is the lock
@@ -104,13 +138,15 @@ export function selfDir(): string {
  *  cosmetic: an unmarked self entry offers a Stop button that kills the manager
  *  you are clicking in. */
 export async function selfPaths(): Promise<Set<string>> {
-  const paths = new Set<string>([selfDir()]);
+  const paths = new Set<string>();
+  const dir = selfDir();
+  if (dir) paths.add(dir);
   try {
     const { instances } = await import(
       "./control.server.ts"
     );
     for (const i of instances()) {
-      if (i.pid === Deno.pid && i.cwd) paths.add(i.cwd);
+      if (i.pid === Deno.pid && i.cwd) paths.add(canonDir(i.cwd));
     }
   } catch { /* registry unreadable — fall back to the module path */ }
   return paths;
@@ -177,7 +213,12 @@ async function scanDisk(
 ): Promise<Map<string, DiscoveredProject>> {
   const out = new Map<string, DiscoveredProject>();
   const seenRoots = new Set<string>();
-  const never = neverWalk(Deno.build.os, homedir(), (k) => Deno.env.get(k));
+  // The physical home: the walk below runs on physical paths.
+  const never = neverWalk(
+    Deno.build.os,
+    canonDir(homedir()),
+    (k) => Deno.env.get(k),
+  );
 
   async function walk(dir: string, left: number): Promise<void> {
     if (left < 0) return;
@@ -207,7 +248,9 @@ async function scanDisk(
   }
 
   for (const root of roots) {
-    const abs = root;
+    // Physical, like every lock's cwd — the walk does not follow symlinks
+    // below a root, so a canonical root yields canonical project dirs.
+    const abs = canonDir(root);
     if (seenRoots.has(abs) || !(await isDir(abs))) continue;
     seenRoots.add(abs);
     await walk(abs, depth);
@@ -335,7 +378,8 @@ function rootsFor(
 const defaultRoots = (runningCwds: string[]): string[] =>
   rootsFor(
     Deno.build.os,
-    homedir(),
+    // Physical, like the running cwds it is compared with.
+    canonDir(homedir()),
     Deno.env.get("AMUI_ROOTS") ?? "",
     runningCwds,
   );
@@ -362,7 +406,12 @@ export async function discoverProjects(): Promise<
   // amui is itself an aio app — it stays in the list so it can monitor its own
   // cells, state, metrics and logs like any other app. Only its LIFECYCLE is
   // special (no start/stop/restart on yourself), which `self` marks below.
-  const running = instances().filter((i) => i.alive);
+  // Each cwd in its physical spelling (see canonDir) — what the disk walk
+  // keys by, so an instance and its idle on-disk entry are one directory.
+  const running = instances().filter((i) => i.alive).map((i) => ({
+    ...i,
+    cwd: canonDir(i.cwd),
+  }));
   const roots = defaultRoots(running.map((i) => i.cwd));
   // Depth 3 from each root: `~/code/gen/wallet` is three levels under $HOME,
   // which is where projects actually sit. The walk stops at the first project it
@@ -372,13 +421,10 @@ export async function discoverProjects(): Promise<
   // Drop the aio framework repo root (amui lives inside it) — the framework is
   // not an app. decodeURIComponent so a path with spaces still matches the
   // decoded disk-path keys.
-  const dirOf = (rel: string) =>
-    decodeURIComponent(fromFileUrl(new URL(rel, import.meta.url))).replace(
-      /[\\/]$/,
-      "",
-    );
+  // Null from a remote (jsr) amui: no local framework checkout to drop.
   const self = await selfPaths();
-  byPath.delete(dirOf("../../..")); // repo root — the framework
+  const repo = moduleDir("../../..");
+  if (repo) byPath.delete(repo); // repo root — the framework
 
   // amui's own project dir is never reached by the disk walk: the framework
   // repo root is itself an aio project, and the walk deliberately does not

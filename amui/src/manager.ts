@@ -611,8 +611,10 @@ async function refuseSelf(
   path: string,
 ): Promise<string | null> {
   if (proj?.running?.pid === Deno.pid) return SELF_REFUSAL;
-  const { selfPaths } = await import("./server/scan.server.ts");
-  return (await selfPaths()).has(proj?.path ?? path) ? SELF_REFUSAL : null;
+  const { selfPaths, canonDir } = await import("./server/scan.server.ts");
+  return (await selfPaths()).has(canonDir(proj?.path ?? path))
+    ? SELF_REFUSAL
+    : null;
 }
 
 const ambiguous = (path: string) =>
@@ -1001,6 +1003,11 @@ export const manager = cell("manager", {
       // it a crashed app's Logs read "no log found" over its crash log.
       // Plain, before any await (`proj` is a live draft).
       const ident = plain(proj.running ?? proj.lastRun ?? null);
+      // Two instances running from this directory: its per-directory files
+      // are neither's, so they are not read as this one's.
+      const sharedCwd = s.projects.filter((p) =>
+        p.running && p.path === path
+      ).length > 1;
       s.logSource = src;
       s.logLoading = true;
       s.logError = null;
@@ -1014,6 +1021,7 @@ export const manager = cell("manager", {
           500,
           ident?.appId ?? null,
           ident?.home ?? null,
+          sharedCwd,
         );
         if (s.selectedId !== id) return;
         s.logPath = r.path;
@@ -1213,9 +1221,8 @@ export const manager = cell("manager", {
       }
       const name = path.split("/").pop();
       s.actionMsg = `starting ${name}…`;
-      const { startApp, awaitBoot, pidsAt, launchClient } = await import(
-        "./server/proc.server.ts"
-      );
+      const { startApp, awaitBoot, pidsAt, launchClient, recordLaunch } =
+        await import("./server/proc.server.ts");
       const client = launchClient(undefined, declared);
       const before = await pidsAt(path);
       const r = await startApp(path, client);
@@ -1224,10 +1231,21 @@ export const manager = cell("manager", {
         return;
       }
       s.actionMsg = `started (pid ${r.pid ?? "?"}) — waiting for boot…`;
-      const boot = await awaitBoot(path, r.pid, undefined, before);
+      const boot = await awaitBoot(
+        path,
+        r.pid,
+        undefined,
+        before,
+        undefined,
+        r.logFile,
+      );
+      // Recorded like `am start` records, so a later Restart replays it.
+      const unrecorded = boot.up && r.launch
+        ? recordLaunch(path, before, r.launch)
+        : null;
       await rescanInto(s).catch(() => {});
       s.actionMsg = boot.up
-        ? `started ${name}`
+        ? `started ${name}${unrecorded ? ` · ⚠ ${unrecorded}` : ""}`
         : `${name} failed to start: ${boot.reason}`;
     },
 
@@ -1298,10 +1316,23 @@ export const manager = cell("manager", {
         return;
       }
       s.actionMsg = `restarting…`;
-      const { startApp, stopApp, awaitBoot, awaitDown, pidsAt, launchClient } =
-        await import("./server/proc.server.ts");
+      const {
+        startApp,
+        stopApp,
+        awaitBoot,
+        awaitDown,
+        pidsAt,
+        launchClient,
+        launchRecordFor,
+        recordLaunch,
+      } = await import("./server/proc.server.ts");
       // THIS instance's client again — `browser` was forced on every restart.
       const client = launchClient(running?.client, declared);
+      // …and the launch it was started with (`--env-file`, `--port`,
+      // `--expose`, a custom entry), read BEFORE the stop, as `am restart`
+      // does: amui relaunched with only `--client`, so the app came back on
+      // another port, unexposed, without its env file.
+      const recorded = running ? launchRecordFor(path, running) : null;
       if (running) {
         const { appId, port, pid } = running;
         await stopApp(port, appId, pid);
@@ -1321,16 +1352,38 @@ export const manager = cell("manager", {
       const r = await startApp(path, client, running?.profile, {
         home: running?.home,
         appId: running?.appId,
-      });
+      }, recorded);
       if (!r.ok) {
         s.actionMsg = `restart failed: ${r.error}`;
         return;
       }
       s.actionMsg = `restarted (pid ${r.pid ?? "?"}) — waiting for boot…`;
-      const boot = await awaitBoot(path, r.pid, undefined, before);
+      const boot = await awaitBoot(
+        path,
+        r.pid,
+        undefined,
+        before,
+        undefined,
+        r.logFile,
+      );
+      const unrecorded = boot.up && r.launch
+        ? recordLaunch(path, before, r.launch)
+        : null;
       await rescanInto(s).catch(() => {});
+      const said = [
+        // Names only: a flag's value can be a key (`--key=…`), and this
+        // message is synced state.
+        recorded?.flags.length
+          ? `replayed ${
+            [...new Set(recorded.flags.map((f) => f.split("=", 1)[0]))]
+              .join(" ")
+          }`
+          : "",
+        ...(r.notes ?? []),
+        unrecorded ? `⚠ ${unrecorded}` : "",
+      ].filter(Boolean).join(" · ");
       s.actionMsg = boot.up
-        ? `restarted ${name}`
+        ? `restarted ${name}${said ? ` · ${said}` : ""}`
         : `${name} failed to restart: ${boot.reason}`;
     },
 
@@ -1369,7 +1422,29 @@ export const manager = cell("manager", {
      *  `rel` is relative to (the app dir for App Files, the repo root for the
      *  Codebase tab). Oversized/binary files are refused with a message. */
     async openFile(s, base: string, rel: string) {
+      // `base` arrives in a dispatch, and readFile's "outside project" check
+      // is relative to it — `openFile($HOME, ".<appId>/app.key")` copied a
+      // secret into synced state. Only a root amui itself offers: a listed
+      // project directory, or the selected app's runtime/repo root (computed
+      // server-side by select).
+      const allowed = [
+        ...s.projects.map((p) => p.path),
+        s.runtime?.root,
+        s.repoRoot,
+      ].filter((p): p is string => typeof p === "string");
       const { readFile } = await import("./server/proc.server.ts");
+      const { canonDir } = await import("./server/scan.server.ts");
+      const want = canonDir(base);
+      if (!allowed.some((p) => canonDir(p) === want)) {
+        s.openFilePath = rel;
+        s.openFileBase = null;
+        s.fileContent = null;
+        s.fileNotice = `refusing to open ${rel}: ${base} is not a listed ` +
+          `project directory (nor the selected app's runtime or repo root) — ` +
+          `amui only opens files inside the projects it lists`;
+        s.fileTruncated = false;
+        return;
+      }
       const r = await readFile(base, rel);
       s.openFilePath = rel;
       s.openFileBase = base;

@@ -24,10 +24,30 @@ import {
   SLOW_START_WAIT_MS,
   slowStartReason,
 } from "../../../src/am/am-cmd-process.ts";
-// THE command word an app's `dev` task gives its entry (`serve`).
-import { entryTaskWords } from "../../../src/am/am-launch.ts";
+// THE command word an app's `dev` task gives its entry (`serve`), and THE
+// rule for which flags are Deno's (they go before the entry).
+import {
+  entryTaskWords,
+  isDenoRuntimeFlag,
+} from "../../../src/am/am-launch.ts";
+// THE launch record `am start` writes and `am restart` replays — read,
+// merged, matched to an instance and written by `am`'s own functions.
+import {
+  instances as instancesSync,
+  type LaunchInfo,
+  readLaunchInfo,
+  writeLaunchInfo,
+} from "../../../src/server/single-instance-lock.ts";
+import { mergeLaunchFlags } from "../../../src/am/am-cmd-process.ts";
+import { restartEntry } from "../../../src/am/am-cmd-start.ts";
+import {
+  captureLaunchEnv,
+  envReplay,
+  startedByOf,
+  withEnv,
+} from "../../../src/am/am-instance.ts";
 import { readDenoJsonSync } from "../../../src/server/deno-json.ts";
-import { pathKey, pathOf, readProjectMeta } from "./scan.server.ts";
+import { canonDir, pathKey, pathOf, readProjectMeta } from "./scan.server.ts";
 
 type OS = typeof Deno.build.os;
 
@@ -95,6 +115,43 @@ export async function resolveEntry(
 export const startLogPath = (dir: string): string =>
   join(dir, ".aio-amui-start.log");
 
+/** amui's launcher capture for a KNOWN instance (a restart: the lock named
+ *  its appId and home) — in that instance's own log dir, beside `am start`'s
+ *  `stdout.log`. The per-directory {@link startLogPath} is one file for every
+ *  instance run from a directory: a restart of a `--profile=dev` instance
+ *  wrote its stdout there, and the DEFAULT instance's Logs tab showed it under
+ *  the default instance's name. Null when that home is not there (never
+ *  created here: a home is the app's to make) — the per-directory file then. */
+export function instanceLogPath(appId: string, home?: string): string | null {
+  const dirs = appDirs(appId, home);
+  try {
+    if (!Deno.statSync(dirs.home).isDirectory) return null;
+    Deno.mkdirSync(dirs.logs, { recursive: true });
+    return join(dirs.logs, "amui-stdout.log");
+  } catch {
+    return null; // aio-ok: no home to write into — the per-directory capture
+  }
+}
+
+/** The recorded launch (`~/.<appId>/launch.json`, what `am start` — or an
+ *  earlier amui start — wrote) when it is THIS instance's: same directory,
+ *  the default home (the only one the record lives in), and a process the
+ *  record names, by `am`'s own decider (`startedByOf`: a record of a
+ *  DIFFERENT process — an app later run from a terminal — is not replayed;
+ *  an older record without a pid is, exactly as `am restart` does). */
+export function launchRecordFor(
+  dir: string,
+  inst: { appId: string; pid: number; home?: string },
+): LaunchInfo | null {
+  const info = readLaunchInfo(inst.appId);
+  if (!info?.cwd || canonDir(info.cwd) !== canonDir(dir)) return null;
+  const home = inst.home ?? appDirs(inst.appId).home;
+  if (canonDir(home) !== canonDir(appDirs(inst.appId).home)) return null;
+  const lock = instancesSync(inst.appId).find((i) => i.pid === inst.pid);
+  if (lock && startedByOf(lock, info) === "other") return null;
+  return info;
+}
+
 /** The environment a process amui launches for a project runs with: amui's
  *  own, minus what describes AMUI's process. After a dev restart amui is a
  *  supervised child whose env carries its port (`AIO_PORT`), its supervisor's
@@ -121,15 +178,64 @@ export async function startApp(
    *  instance — another state.db under the same row. Passed as `--home` when
    *  it is not the app's default home (the rule `am`'s stopCommandFor uses). */
   instance?: { home?: string; appId?: string },
-): Promise<{ ok: boolean; pid?: number; error?: string }> {
-  const resolved = await resolveEntry(dir);
+  /** The launch this instance was started with ({@link launchRecordFor}) —
+   *  its flags (`--env-file`, `--port`, `--expose`, …), entry and start env
+   *  are replayed, as `am restart` replays them. A restart that dropped them
+   *  came back on another port, unexposed, without its env file. */
+  recorded?: LaunchInfo | null,
+): Promise<{
+  ok: boolean;
+  pid?: number;
+  error?: string;
+  /** Where the child's stdout went — what `awaitBoot` reads back. */
+  logFile?: string;
+  /** What was launched, as a launch record states it (see recordLaunch). */
+  launch?: { flags: string[]; entry: string; env: Record<string, string> };
+  /** What the replay could not honour — said to the user, never dropped. */
+  notes?: string[];
+}> {
+  const notes: string[] = [];
+  const re = restartEntry(undefined, recorded ?? null, dir, (p) => {
+    try {
+      return Deno.statSync(p).isFile;
+    } catch {
+      return false; // aio-ok: missing — said below as `gone`
+    }
+  });
+  if (re.gone) {
+    notes.push(`the recorded entry ${re.gone} is gone — the default entry`);
+  }
+  const resolved = re.entry !== undefined
+    ? { ok: true as const, entry: re.entry }
+    : await resolveEntry(dir);
   if (!resolved.ok) return { ok: false, error: resolved.error };
   const entry = resolved.entry;
-  const logFile = startLogPath(dir);
+  const logFile = (instance?.appId &&
+    instanceLogPath(instance.appId, instance.home)) || startLogPath(dir);
   const home = !profile && instance?.home && instance.appId &&
       normalize(instance.home) !== normalize(appDirs(instance.appId).home)
     ? instance.home
     : undefined;
+  // amui's own flags win over a recorded one of the same name (they name THIS
+  // instance); every other recorded flag is replayed — `am`'s merge rule.
+  const own = [
+    `--client=${client}`,
+    ...(profile ? [`--profile=${profile}`] : []),
+    ...(home ? [`--home=${home}`] : []),
+  ];
+  const flags = recorded?.flags.length
+    ? mergeLaunchFlags(recorded.flags, own).launch
+    : own;
+  // Deno's own flags (`--env-file`, …) before the entry, where Deno reads
+  // them; everything after a bare `--` is the app's, verbatim.
+  const end = flags.indexOf("--");
+  const head = end === -1 ? flags : flags.slice(0, end);
+  const tail = end === -1 ? [] : flags.slice(end);
+  const env = envReplay(recorded?.env, projectEnv());
+  if (env.notReplayed.length) {
+    notes.push(`start env not replayed: ${env.notReplayed.join(", ")}`);
+  }
+  const childEnv = withEnv(projectEnv(), env.set);
   // THE launcher `am start` uses, called rather than restated: amui built its
   // own `sh -c "nohup … & echo $!"` line here, and there is no `sh` on
   // Windows — Start and Restart failed outright there. `"deno"` from PATH, not
@@ -140,13 +246,13 @@ export async function startApp(
       "run",
       "-A",
       "--unstable-kv",
+      ...head.filter(isDenoRuntimeFlag),
       entry,
       // The cli scaffold routes on `Deno.args[0]`: without its dev task's
       // `serve` it exited "missing command" and Start never came up.
       ...entryTaskWords(devTaskOf(dir), join(dir, entry), dir),
-      `--client=${client}`,
-      ...(profile ? [`--profile=${profile}`] : []),
-      ...(home ? [`--home=${home}`] : []),
+      ...head.filter((a) => !isDenoRuntimeFlag(a)),
+      ...tail,
     ],
     logFile,
     "deno",
@@ -157,13 +263,51 @@ export async function startApp(
       // Told, exactly as `am start` tells it, that its stdout is a log FILE:
       // without this an `--expose` banner's share-link token and pair code
       // were written to `.aio-amui-start.log` in clear.
-      env: { ...projectEnv(), [STDOUT_IS_LOG_ENV]: "1" },
+      env: { ...childEnv, [STDOUT_IS_LOG_ENV]: "1" },
       clearEnv: true,
     });
-    return { ok: true, pid };
+    return {
+      ok: true,
+      pid,
+      logFile,
+      launch: { flags, entry, env: childEnv },
+      ...(notes.length ? { notes } : {}),
+    };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** Leave a launch record for the instance amui just booted from `dir`, as
+ *  `am start` does — so a later Restart (amui's or `am restart`) replays
+ *  what it was started with. Only for a default-home instance: that is the
+ *  one home the record lives in, and writing it for a profile instance would
+ *  replace the default instance's. Returns `writeLaunchInfo`'s refusal, said
+ *  by the caller, or null. */
+export function recordLaunch(
+  dir: string,
+  before: readonly number[],
+  launch: { flags: string[]; entry: string; env: Record<string, string> },
+): string | null {
+  const cd = canonDir(dir);
+  const inst = instancesSync().find((i) =>
+    i.alive && i.status === "started" && canonDir(i.cwd) === cd &&
+    !before.includes(i.pid)
+  );
+  if (!inst) return null;
+  if (canonDir(inst.home ?? "") !== canonDir(appDirs(inst.appId).home)) {
+    return null;
+  }
+  return writeLaunchInfo(inst.appId, {
+    flags: launch.flags,
+    entry: launch.entry,
+    cwd: cd,
+    env: captureLaunchEnv(launch.env),
+    // The lock's own identity — what `startedByOf` matches a record to.
+    pid: inst.pid,
+    ...(inst.startToken !== undefined ? { startToken: inst.startToken } : {}),
+    ...(inst.startEpoch !== undefined ? { startEpoch: inst.startEpoch } : {}),
+  });
 }
 
 /** The project's `dev` task line, if it declares one. */
@@ -240,7 +384,12 @@ export async function pidsAt(dir: string): Promise<number[]> {
   const { instances } = await import(
     "./control.server.ts"
   );
-  return instances().filter((i) => i.alive && i.cwd === dir).map((i) => i.pid);
+  // Physical paths on both sides: the lock records `Deno.cwd()`, and `dir`
+  // may be spelled through a symlink (see canonDir).
+  const cd = canonDir(dir);
+  return instances().filter((i) => i.alive && canonDir(i.cwd) === cd).map((
+    i,
+  ) => i.pid);
 }
 
 /** Is an app registered as running from `dir` — `pid` when given (one
@@ -257,8 +406,9 @@ async function registeredAt(
   served = false,
 ): Promise<boolean> {
   const { instances } = await import("./control.server.ts");
+  const cd = canonDir(dir);
   return instances().some((i) =>
-    i.alive && i.cwd === dir && (!served || i.status === "started") &&
+    i.alive && canonDir(i.cwd) === cd && (!served || i.status === "started") &&
     (pid === undefined || i.pid === pid) && !except?.includes(i.pid)
   );
 }
@@ -308,11 +458,16 @@ export function startFailureReason(text: string, n = 6): string {
  *  {@link startFailureReason}. The launcher's capture is the only place that
  *  reason exists (the app died before it could write its own logs). Empty when
  *  nothing was captured. */
-export function startLogTail(dir: string, n = 6): Promise<string> {
+export function startLogTail(
+  dir: string,
+  n = 6,
+  /** The capture this launch wrote (`startApp`'s `logFile`). */
+  logFile = startLogPath(dir),
+): Promise<string> {
   // Both files: on Windows the launcher splits stderr into `<log>.err`, and
   // the reason a boot failed is there.
   return Promise.resolve(
-    startFailureReason(childSaid(startLogPath(dir)).text, n),
+    startFailureReason(childSaid(logFile).text, n),
   );
 }
 
@@ -333,6 +488,8 @@ export async function awaitBoot(
   before?: readonly number[],
   /** The bound for a start whose log says it is still fetching. */
   slowWaitMs = SLOW_START_WAIT_MS,
+  /** The capture this launch wrote (`startApp`'s `logFile`). */
+  logFile = startLogPath(dir),
 ): Promise<{ up: true } | { up: false; reason: string }> {
   const { isProcessAlive } = await import(
     "./control.server.ts"
@@ -348,13 +505,13 @@ export async function awaitBoot(
       died = true;
       break;
     }
-    if (!slow && slowStartReason(childSaid(startLogPath(dir)).text)) {
+    if (!slow && slowStartReason(childSaid(logFile).text)) {
       slow = true;
       timeoutMs = Math.max(timeoutMs, slowWaitMs);
       deadline = startedAt + timeoutMs;
     }
   }
-  const tail = await startLogTail(dir);
+  const tail = await startLogTail(dir, 6, logFile);
   const why = died
     ? "the process exited before the app came up"
     : `no app came up from this directory within ${
@@ -362,7 +519,7 @@ export async function awaitBoot(
     }s`;
   return {
     up: false,
-    reason: tail ? `${why} — ${tail}` : `${why} (check ${startLogPath(dir)})`,
+    reason: tail ? `${why} — ${tail}` : `${why} (check ${logFile})`,
   };
 }
 
@@ -778,6 +935,43 @@ export async function readFile(
   }
 }
 
+/** How `createApp` runs `am create`, from where amui itself was loaded
+ *  (`moduleUrl` — this module's `import.meta.url`). From a checkout: that
+ *  checkout's `src/am.ts`, mirrored into the new app. From JSR
+ *  (`jsr:@riagentic/aio/amui` resolves to `https://jsr.io/@scope/pkg/<ver>/…`):
+ *  the SAME release's `am` export — fromFileUrl threw on that URL, so Create
+ *  failed with a URL error. Anything else is refused with what to run
+ *  instead, rather than guessed. Pure. */
+export function amCommand(
+  moduleUrl: string,
+): { args: (name: string) => string[] } | { error: string } {
+  const url = new URL(moduleUrl);
+  if (url.protocol === "file:") {
+    // decodeURIComponent: a repo path with spaces arrives as %20 in
+    // .pathname; passed raw as CLI args it would resolve to a non-existent
+    // path.
+    const amPath = decodeURIComponent(
+      fromFileUrl(new URL("../../../src/am.ts", url)),
+    );
+    const repoPath = decodeURIComponent(
+      fromFileUrl(new URL("../../../", url)),
+    );
+    return { args: (name) => [amPath, "create", name, `--mirror=${repoPath}`] };
+  }
+  const jsr = /^https:\/\/jsr\.io\/(@[^/]+\/[^/]+)\/([^/]+)\//.exec(
+    url.href,
+  );
+  if (jsr) {
+    return { args: (name) => [`jsr:${jsr[1]}@${jsr[2]}/am`, "create", name] };
+  }
+  return {
+    error: `amui is running from ${url.origin}, not a local checkout or ` +
+      `JSR, so it cannot locate \`am\` — create the app from a shell: ` +
+      `\`deno run -A jsr:@riagentic/aio/am create <name>\` (or \`am create ` +
+      `<name>\` where am is installed)`,
+  };
+}
+
 /** Scaffold a new aio app via `am create` in ~/aio-apps/<name>. `name` must be
  *  a pre-sanitized slug. Server-only (spawns a process) — dynamic-imported from
  *  the cell so no Deno.* lands in the browser bundle. */
@@ -785,25 +979,12 @@ export async function createApp(
   name: string,
 ): Promise<{ ok: boolean; dir?: string; error?: string }> {
   try {
-    // decodeURIComponent: a repo path with spaces arrives as %20 in .pathname;
-    // passed raw as CLI args it would resolve to a non-existent path.
-    const amPath = decodeURIComponent(
-      fromFileUrl(new URL("../../../src/am.ts", import.meta.url)),
-    );
-    const repoPath = decodeURIComponent(
-      fromFileUrl(new URL("../../../", import.meta.url)),
-    );
+    const am = amCommand(import.meta.url);
+    if ("error" in am) return { ok: false, error: am.error };
     const workspace = join(homedir(), "aio-apps");
     await Deno.mkdir(workspace, { recursive: true });
     const out = await new Deno.Command("deno", {
-      args: [
-        "run",
-        "-A",
-        amPath,
-        "create",
-        name,
-        `--mirror=${repoPath}`,
-      ],
+      args: ["run", "-A", ...am.args(name)],
       cwd: workspace,
       stdout: "piped",
       stderr: "piped",
@@ -980,6 +1161,7 @@ function logCandidates(
   source: LogSource,
   appId: string | null,
   home: string | null,
+  sharedCwd = false,
 ): string[] {
   const file = source === "combined" ? "app.log" : `${source}.log`;
   // The INSTANCE's home, not the appId's default one: a profile instance
@@ -988,22 +1170,29 @@ function logCandidates(
   // the dev instance showed its sibling's log, under the dev instance's name.
   const logs = appId ? appDirs(appId, home ?? undefined).logs : null;
   const own = logs ? [join(logs, file)] : [];
+  // A cwd-relative file is ONE per directory, whichever instance wrote it:
+  // with two instances running from this cwd it is nobody's in particular,
+  // and the default instance's Logs tab showed its sibling's stdout under its
+  // own name. Never attributed then — only the instance's own files are read.
+  const cwdRel = (rel: string[]) => sharedCwd ? [] : rel;
   switch (source) {
     case "app":
     case "error":
     case "client":
-      return [...own, `.aio/log/${file}`];
+      return [...own, ...cwdRel([`.aio/log/${file}`])];
     default: // combined — the merged stdout capture is richer when it exists
       // Richest first: the stdout capture (cell console.log + pre-logger
       // stack traces), then the framework log. The two cwd-relative names are
       // the pre-alpha38 locations, kept so an app still running from before the
       // move is readable.
+      // amui's per-instance capture (`instanceLogPath`, a restart's) sits
+      // beside `am start`'s; freshness ranks the two.
       return [
-        ...(logs ? [join(logs, "stdout.log")] : []),
+        ...(logs
+          ? [join(logs, "stdout.log"), join(logs, "amui-stdout.log")]
+          : []),
         ...own,
-        ".aio.log",
-        ".aio-amui-start.log",
-        ".aio/log/app.log",
+        ...cwdRel([".aio.log", ".aio-amui-start.log", ".aio/log/app.log"]),
       ];
   }
 }
@@ -1095,9 +1284,12 @@ export async function readLogs(
   tailLines = 500,
   appId: string | null = null,
   home: string | null = null,
+  /** More than one instance runs from `cwd` — its per-directory files are
+   *  then nobody's in particular (see logCandidates). */
+  sharedCwd = false,
 ): Promise<RawLog> {
   // `own` candidates are already absolute; join() leaves those untouched.
-  let paths = logCandidates(source, appId, home).map((rel) =>
+  let paths = logCandidates(source, appId, home, sharedCwd).map((rel) =>
     isAbsolute(rel) ? rel : join(cwd, rel)
   );
   if (source === "combined") {

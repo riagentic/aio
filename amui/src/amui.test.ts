@@ -150,7 +150,7 @@ testCell(
   async (t) => {
     const { selfDir } = await import("./server/scan.server.ts");
     await t.send.discover();
-    await t.send.select(selfDir());
+    await t.send.select(selfDir()!);
     t.expect.state((s) =>
       s.detail?.self === true && s.detail?.path === selfDir()
     );
@@ -165,7 +165,7 @@ for (const action of ["start", "stop", "restart"] as const) {
       const { selfDir } = await import("./server/scan.server.ts");
       await t.send.discover();
       const before = t.getState().projects.length;
-      await t.send[action](selfDir());
+      await t.send[action](selfDir()!);
       t.expect.state((s) =>
         // The refusal is reported, and nothing was spawned or killed.
         (s.actionMsg ?? "").includes("amui itself") &&
@@ -207,7 +207,7 @@ Deno.test("discoverProjects: roots cover ~/aio-apps + cwd; excludes the framewor
   // the moment the package was renamed, while still listing the framework repo
   // as a manageable app.
   const { selfDir } = await import("./server/scan.server.ts");
-  const repoRoot = selfDir().split("/").slice(0, -1).join("/");
+  const repoRoot = selfDir()!.split("/").slice(0, -1).join("/");
   assert(
     !projects.some((p) => p.path === repoRoot),
     `the framework repo (${repoRoot}) is not an app — it must never be listed`,
