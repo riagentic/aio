@@ -21,7 +21,7 @@ import {
 } from "../entries.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out, sayErr } from "./am-output.ts";
-import { dirLinkType, reservedAppNameError } from "./am-utils.ts";
+import { APP_NAME_RE, dirLinkType, reservedAppNameError } from "./am-utils.ts";
 import { join, resolve } from "@std/path";
 import { colorEnabled } from "../diagnostics/color.ts";
 import { styleWith } from "../diagnostics/fmt.ts";
@@ -1445,9 +1445,11 @@ export async function cmdCreate(
       mode,
     );
   }
-  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(opts.name)) {
+  // THE app-name rule (am-utils' APP_NAME_RE) — this used to be a copy of
+  // the old one, so `am create notes.` made a folder Windows reads as "notes".
+  if (!APP_NAME_RE.test(opts.name)) {
     fail(
-      `invalid project name '${opts.name}' — start with a letter/digit, then letters, digits, '-', '_', '.'`,
+      `invalid project name '${opts.name}' — start with a letter/digit, then letters, digits, '-', '_', '.', and do not end in '.'`,
       mode,
     );
   }

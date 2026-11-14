@@ -54,7 +54,14 @@ const V1_0_19: [string, string][] = [
 ];
 
 Deno.test("lock dir scope: every root has the name 1.0.19 gave it", () => {
-  for (const [root, want] of V1_0_19) assertEquals(scope(root), want, root);
+  // The AS-GIVEN name, which is the contract: Windows and macOS fold the scope
+  // to lowercase (their paths are case-insensitive, so it names the same lock
+  // dir and pipe) and keep this one as `legacyScope` for a case-sensitive
+  // volume — tests/lock-scope-path-case.test.ts.
+  for (const [root, want] of V1_0_19) {
+    const p = _lockDirParts(root);
+    assertEquals(p.legacyScope ?? p.scope, want, root);
+  }
 });
 
 Deno.test("lock dir scope: a start refused by ANOTHER apps root's app is told so, by path", () => {

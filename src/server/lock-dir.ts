@@ -55,7 +55,7 @@ export function lockDir(): string {
   // an app whose data it could see.
   const appsRoot = appsDirEnv() ?? "";
   if (_lockDir && _lockDirKey === appsRoot) return _lockDir;
-  const { base, scope } = _lockDirParts(appsRoot);
+  const { base, scope } = _lockDirInUse(_lockDirParts(appsRoot));
   _lockDirKey = appsRoot;
   // Which candidates were already there — the preferred path AND the private
   // `aio-u<uid>` fallback `_chooseLockDir` may pick instead: "did this
@@ -159,18 +159,65 @@ function unregisterRoot(dir: string): void {
  *  that differ only in what the scope drops (letters of another script, a
  *  prefix past 48 characters) are one lock dir, by design of that contract —
  *  the start that loses says so by name (`_alreadyRunningMessage`), and the
- *  data folder's own claim (`claimHome`) keeps the two apart. @internal */
+ *  data folder's own claim (`claimHome`) keeps the two apart.
+ *
+ *  On Windows and macOS the scope is LOWERCASED: their paths are
+ *  case-insensitive by default, so `C:\Users\me\Apps` and `c:\users\me\apps`
+ *  are one apps root — and the Windows pipe NAME carries this scope
+ *  (`_pipeName`), so the string must be one too. Linux is case-sensitive:
+ *  two spellings there are two roots, and its scope is what it always was.
+ *
+ *  Cross-build interop (the contract above): an app on an OLDER build names
+ *  its lock dir with the case as given. With the defaults that is still the
+ *  same OS object — the lock dir sits on a case-insensitive volume (`%TEMP%`,
+ *  macOS `/tmp`), and pipe names are not case-sensitive (CreateNamedPipe) —
+ *  so old and new meet with nothing more. On a case-SENSITIVE volume (an
+ *  opt-in APFS format, a Windows folder flagged case-sensitive) they would
+ *  not, so `legacyScope` is the as-given spelling whenever folding changed
+ *  it, and {@linkcode _lockDirInUse} takes it when only IT is on disk.
+ *  @internal */
 // aio-ok: exported for its test (tests/lock-dir-scope-of-a-root.test.ts) — the product reaches it through `lockDir()`
 export function _lockDirParts(
   appsRoot: string,
-): { base: string; scope: string } {
-  const base = Deno.build.os === "windows"
+  os: typeof Deno.build.os = Deno.build.os,
+): { base: string; scope: string; legacyScope?: string } {
+  const base = os === "windows"
     ? (Deno.env.get("TEMP") ?? Deno.env.get("TMP") ?? "C:\\Temp")
     : (Deno.env.get("XDG_RUNTIME_DIR") ?? "/tmp");
-  const scope = appsRoot
+  const asGiven = appsRoot
     ? "-" + appsRoot.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "")
       .slice(-48)
     : "";
+  const scope = _foldPathCase(asGiven, os);
+  return scope === asGiven
+    ? { base, scope }
+    : { base, scope, legacyScope: asGiven };
+}
+
+/** `s` as the OS compares paths: lowercased where paths are case-insensitive
+ *  by default (Windows, macOS), unchanged elsewhere. Pure. @internal */
+export function _foldPathCase(
+  s: string,
+  os: typeof Deno.build.os = Deno.build.os,
+): string {
+  return os === "windows" || os === "darwin" ? s.toLowerCase() : s;
+}
+
+/** The parts of the lock dir to USE: the case-folded scope, unless only an
+ *  older build's as-given spelling is on disk (a case-sensitive volume —
+ *  see {@linkcode _lockDirParts}); then that one, so a new `am` still finds
+ *  an app started before the upgrade and a new start still meets its lock.
+ *  On a case-insensitive volume both spellings exist or neither does, and
+ *  the folded one wins. @internal */
+export function _lockDirInUse(
+  parts: { base: string; scope: string; legacyScope?: string },
+): { base: string; scope: string } {
+  const { base, scope, legacyScope } = parts;
+  if (
+    legacyScope !== undefined &&
+    !_lockDirCandidates(base, scope).some(_exists) &&
+    _lockDirCandidates(base, legacyScope).some(_exists)
+  ) return { base, scope: legacyScope };
   return { base, scope };
 }
 
@@ -180,7 +227,7 @@ export function _lockDirParts(
 // aio-ok: a seam for the test runner (scripts/test-shards.ts), not the product
 export function pruneDeadLockDir(appsRoot: string): boolean {
   if (!appsRoot) return false;
-  const { base, scope } = _lockDirParts(appsRoot);
+  const { base, scope } = _lockDirInUse(_lockDirParts(appsRoot));
   return pruneDeadLockDirAt(join(base, "aio" + scope));
 }
 
@@ -202,7 +249,12 @@ export function pruneDeadLockDirsTagged(tag: string): number {
   }
   for (const name of names) {
     // The temp dir is gone before this runs: its root is gone.
-    if (name.includes(tag) && pruneDeadLockDirAt(join(base, name), true)) n++;
+    // Case-folded where the scope is (`_lockDirParts`): a tag with a capital
+    // letter is in a lowercased dir name there.
+    if (
+      _foldPathCase(name).includes(_foldPathCase(tag)) &&
+      pruneDeadLockDirAt(join(base, name), true)
+    ) n++;
   }
   return n;
 }
@@ -1053,10 +1105,19 @@ export function lockKey(
   appId: string,
   home?: string,
   profile?: string,
+  os: typeof Deno.build.os = Deno.build.os,
 ): string {
   if (!home) return appId;
   const want = resolve(home);
-  if (want === resolve(appHome(appId))) return appId;
+  // The default home under another CASE is the default home where paths are
+  // case-insensitive: an app started with `AIO_APPS_DIR=C:\Apps` records home
+  // `C:\Apps\notes`, and an `am` under `c:\apps` keyed that `notes@<hash>`
+  // — a lock file that does not exist, so `am stop` said "not running". The
+  // hash below is NOT folded: it names an existing non-default lock, and an
+  // app on an older build filed it under the hash of the case as given.
+  if (_foldPathCase(want, os) === _foldPathCase(resolve(appHome(appId)), os)) {
+    return appId;
+  }
   // A PROFILE's home is filed under its name — `myapp@dev` — never a hash: a
   // name cannot look like one (profileNameError refuses 8 hex digits). The
   // default base (`~/.myapp-dev`) is recognised from the home alone; an

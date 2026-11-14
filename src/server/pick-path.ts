@@ -612,10 +612,15 @@ function _asDirectory(p: string, os: typeof Deno.build.os): string {
     // Does not exist (yet) — fall through and treat it as a file path, which
     // is the only reading left that can help.
   }
-  const cut = p.replace(/[/\\]+$/, "").lastIndexOf(
-    os === "windows" ? "\\" : "/",
-  );
-  return cut > 0 ? p.slice(0, cut) : p;
+  // ONE decider for "the folder of a typed path": `_splitSavePath`'s cut and
+  // root rule. This had its own — a cut at `\` only on Windows (so
+  // `C:/Users/me/report.txt` went out unchanged as the FOLDER) and a root that
+  // lost its separator (`C:\report.txt` → `C:`, the drive's current
+  // directory, not its root). A trailing separator is dropped first, as
+  // before: `C:\gone\` names a folder that is not there, and its parent is
+  // the nearest one that can be.
+  const trimmed = p.replace(/[/\\]+$/, "");
+  return (trimmed && _splitSavePath(trimmed, os).dir) || p;
 }
 
 const _bareExt = (e: string) => e.replace(/^[.*]+/, "");

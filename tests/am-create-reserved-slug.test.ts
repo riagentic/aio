@@ -43,8 +43,13 @@ Deno.test("am create: a name whose appId SLUG is reserved is refused, before any
       }).output();
       const text = new TextDecoder().decode(out.stdout);
       assertEquals(out.code, 1, `${name}: ${text}`);
-      assertStringIncludes(text, "reserved");
-      assertStringIncludes(text, `appId \\"${resolveAppId(name)}\\"`);
+      if (name.endsWith(".")) {
+        // Refused earlier, by the name rule itself (no trailing '.').
+        assertStringIncludes(text, "do not end in '.'");
+      } else {
+        assertStringIncludes(text, "reserved");
+        assertStringIncludes(text, `appId \\"${resolveAppId(name)}\\"`);
+      }
       assertEquals(
         await there(join(cwd, name)),
         false,

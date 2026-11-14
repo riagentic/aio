@@ -1643,8 +1643,15 @@ export async function runTrojanGet(
  *  into `rm -rf $HOME`.
  *
  *  Leading `.` is excluded on purpose: that is what makes `.`, `..` and
- *  `../../..` unrepresentable rather than merely unlikely. */
-export const APP_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/i;
+ *  `../../..` unrepresentable rather than merely unlikely.
+ *
+ *  So is a TRAILING `.`, on every OS (one rule): Win32 strips it from each
+ *  path segment, so on Windows `…\Programs\notes.` IS `…\Programs\notes`.
+ *  `am remove notes.` passed this check, missed the "notes is running" guard
+ *  (appId `notes` is not the string `notes.`), reached notes' install through
+ *  the folded path and deleted it. No installed name ends in `.` — an install
+ *  is named by the slug, which never keeps one. */
+export const APP_NAME_RE = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9_-])?$/i;
 
 /** `null` when `name` is a plain app name, else the refusal — cause AND fix. */
 export function appNameError(name: string, verb: string): string | null {
@@ -1652,7 +1659,8 @@ export function appNameError(name: string, verb: string): string | null {
   return `"${name}" is not an app name — ${verb} takes the NAME of an ` +
     `installed app, never a path.\n` +
     `  A name starts with a letter or digit, then letters, digits, '-', ` +
-    `'_', '.'\n` +
+    `'_', '.', and does not end in '.'\n` +
+    `  (Windows drops a trailing '.': "notes." would be "notes")\n` +
     `  (".", ".." and "a/b" are refused because join() normalizes them: ` +
     `am remove .. would delete $HOME)\n` +
     `  fix: am installed   # lists the names this machine has`;

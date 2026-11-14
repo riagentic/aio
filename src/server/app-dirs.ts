@@ -85,11 +85,18 @@ export function instanceAppsDir(name: string): string {
 
 /** Why `name` cannot name an instance, or null. It becomes ONE directory
  *  segment: a separator nests or escapes, and `.`/`..` ARE escapes
- *  (`--instance=..` was the user's home). Pure. */
+ *  (`--instance=..` was the user's home). A trailing `.` or space is refused
+ *  on every OS: Win32 strips both from a segment, so `--instance=agent1.` IS
+ *  `agent1`'s root there — two names, one world. Pure. */
 export function instanceNameError(name: string): string | null {
   return !name || /[\\/]/.test(name) || name === "." || name === ".."
     ? `--instance needs a simple name: --instance=agent1 ` +
       `(got ${JSON.stringify(name)})`
+    : /[. ]$/.test(name)
+    ? `--instance name ${JSON.stringify(name)} ends in ` +
+      `${name.endsWith(".") ? "'.'" : "a space"} — Windows drops it, so it ` +
+      `would be ${JSON.stringify(name.replace(/[. ]+$/, ""))}'s instance.\n` +
+      `  fix: --instance=${name.replace(/[. ]+$/, "") || "agent1"}`
     : null;
 }
 
