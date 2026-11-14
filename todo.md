@@ -188,6 +188,23 @@ or is small and known.
       HTTP/WS/auth transport, visible/access/forUser filtering. Left as decided
       (low value, behaviour change): compat `useEffect` update ORDER
       (parent-first, React runs child cleanups first).
+- [x] Bug-hunt round 7 (2026-11-14): amui (5), mobile templates (6),
+      Windows/macOS paths (4), multi-client concurrency (1 false warning —
+      ~1,500 seeded randomized rounds over real servers, forUser, backpressure,
+      CRDT and crash recovery found no divergence, loss or hang).
+- [ ] Device/VM checks the round left (owner): `test:android` on API 35/36 + the
+      phone (Back via OnBackPressedCallback, subframe navigation stays in the
+      frame, a second camera request is denied); an Xcode build of the
+      ios-client (a self-signed server now shows "untrusted"; check whether
+      recent iOS reports it as -1200, which still reads "unreachable").
+      Windows-only suspects, unproven on Linux: an ELEVATED app vs a
+      non-elevated am (PIPE_SDDL OW/SY, app.key DACL — ACCESS_DENIED?); a
+      symlinked versioned install launched in another case (`versionedInstall`
+      compares realPath case-sensitively); Start-Process
+      `-FilePath`/`-RedirectStandardOutput` are not LiteralPath (a path with
+      `[`/`]`); AUMID of a >128-unit title cut at a surrogate (TS keeps a lone
+      surrogate, the stub's format.rs gives U+FFFD).
+
 ### Owner decides (each has a recommendation)
 
 - [x] A refused kit Checkbox/Switch/Input keeps the user's pick (memo-skipped;

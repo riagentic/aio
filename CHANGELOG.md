@@ -56,6 +56,21 @@
   ignores a malformed LAN reply; the CLI client masks the share-link token in
   its refusals.
 
+### Round 7: amui, mobile, Windows/macOS
+
+- amui: canonical project paths (a symlinked root no longer starts "failed" or
+  lists twice); restart replays the recorded launch flags; per-instance logs;
+  loads from `jsr:`; `openFile` only under a listed project.
+- Mobile: one-pass template filling (a title holding a token name no longer
+  breaks the manifest); the dev URL is pasted as an escaped Kotlin literal; the
+  connect page accepts a capitalised "Https://"; iOS names an untrusted
+  certificate; a subframe navigation stays in its frame; a second camera request
+  is denied instead of hanging.
+- Windows/macOS: no trailing "." in app or instance names; the file dialog opens
+  a drive root and a forward-slash path; one lock scope per apps root whatever
+  its case.
+- Sync: a set merge in another order no longer warns "replaces the whole value".
+
 ### Tools and diagnostics
 
 - The crash handler's line reaches `app.log` before the process dies;
