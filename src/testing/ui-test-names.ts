@@ -11,7 +11,7 @@ import {
   serializeSurface,
 } from "../air/ui-surface.ts";
 import type { UIElementInfo, UISurfaceNode } from "../air/ui-surface.ts";
-import type { KeyModifiers } from "../air/ui-trigger.ts";
+import { hiddenReason, type KeyModifiers } from "../air/ui-trigger.ts";
 import { isMacPlatform, pressChord } from "../air/key-chord.ts";
 import { _missSurface, _traceSource } from "./ui-test-build.ts";
 
@@ -59,11 +59,41 @@ export function resolveKey(
  *  Showing = it contributes an element, a child that shows something, or text.
  *  A component that renders only non-interactive, textless markup is therefore
  *  absent from the SEMANTIC surface — which is the right answer for an API whose
- *  whole premise is "what can be seen and done here". */
+ *  whole premise is "what can be seen and done here".
+ *
+ *  And it must be SEEN: an element counts only when `hiddenReason` passes it,
+ *  text only when it sits in an element that is not hidden — the one decider
+ *  `present`'s element branch and `ui.X.click()` already use. Counting raw
+ *  elements/text made `<div hidden>Saved</div>` (or `display:none`) a
+ *  `present("Toast")`, so `waitFor(() => ui.absent("Toast"))` never fired for
+ *  a toast hidden by CSS. A node with no live DOM (a deserialized surface)
+ *  keeps the structural answer. */
 export function showsSomething(n: UISurfaceNode): boolean {
-  if (n.elements.length > 0) return true;
-  if (typeof n.text === "string" && n.text.trim().length > 0) return true;
+  if (n.elements.some((e) => !e._el || hiddenReason(e._el) === null)) {
+    return true;
+  }
+  if (typeof n.text === "string" && n.text.trim().length > 0) {
+    if (!n._dom || visibleText(n._dom as Node)) return true;
+  }
   return n.children.some(showsSomething);
+}
+
+/** Some non-blank text in `node`'s subtree whose element is not hidden. */
+function visibleText(node: Node): boolean {
+  if (node.nodeType === 3) {
+    const at = node.parentElement;
+    return !!node.textContent?.trim() && (!at || hiddenReason(at) === null);
+  }
+  if (node.nodeType !== 1 || !node.textContent?.trim()) return false;
+  // `display:none`/`hidden` hides the whole subtree — no walk below it.
+  // `visibility` does not: a descendant may set it back to `visible`, so
+  // that case is decided per text node.
+  const why = hiddenReason(node);
+  if (why !== null && !why.startsWith("`visibility")) return false;
+  for (let c = node.firstChild; c; c = c.nextSibling) {
+    if (visibleText(c)) return true;
+  }
+  return false;
 }
 
 /** A failure message you can actually read.
