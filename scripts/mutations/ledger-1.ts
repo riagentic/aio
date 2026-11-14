@@ -831,9 +831,10 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "an unhandled rejection from a fire-and-forget dispatch kills a long-running server that owns persisted state instead of being logged and survived",
     file: "src/diagnostics/crash-handler.ts",
-    find: "    if (guardRejections && (isBootComplete?.() ?? true)) {",
+    find:
+      "    const guard = !!guardRejections && (isBootComplete?.() ?? true);",
     replace:
-      "    if (false && guardRejections && (isBootComplete?.() ?? true)) {",
+      "    const guard = false && !!guardRejections && (isBootComplete?.() ?? true);",
     test: "tests/guard-dispatches.test.ts",
     filter:
       "guardDispatches: a rejection is logged AND prevented from crashing",
@@ -6259,8 +6260,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "the standalone restore drops a renamed stored field with no version bump in silence, where the server warns",
     file: "src/standalone-air.ts",
-    find: "if (drift.length > 0) {\n        console.warn(",
-    replace: "if (drift.length < 0) {\n        console.warn(",
+    find: "if (drift.length > 0) {\n          console.warn(",
+    replace: "if (drift.length < 0) {\n          console.warn(",
     test: "tests/standalone-migrate-restore.test.ts",
     filter:
       "standalone restore: a renamed field with no version bump is said, not dropped in silence",

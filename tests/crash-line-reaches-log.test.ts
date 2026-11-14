@@ -6,6 +6,7 @@
 // (`crashOfLog`) read the crash as a kill. The handler now flushes the
 // loggers synchronously when the fault is fatal. Child processes, because the
 // failure is the death.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { crashOfLog } from "../src/am/am-cmd-status.ts";

@@ -453,9 +453,9 @@ export const LEDGER: readonly Mutation[] = [
       "a standalone store from before version stamps, already in the declared shape, runs onMigrate from v0 and corrupts current data",
     file: "src/standalone-air.ts",
     find:
-      "          if (drift.length === 0) {\n            storedVersions[c] = info.version;",
+      "            if (drift.length === 0) {\n              storedVersions[c] = info.version;",
     replace:
-      "          if (drift.length < 0) {\n            storedVersions[c] = info.version;",
+      "            if (drift.length < 0) {\n              storedVersions[c] = info.version;",
     test: "tests/standalone-migrate-restore.test.ts",
     filter:
       "standalone restore: a store from before version stamps, already in the declared shape, is not migrated from v0",
@@ -4614,8 +4614,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "logger: a line logged right before Deno.exit() never reached app.log (the file sink's timer never ran)",
     file: "src/diagnostics/logger-core.ts",
-    find: "    for (const l of [..._unflushed]) flushAtExit(l);",
-    replace: "    for (const l of [..._unflushed]) void l;",
+    find: "  for (const l of [..._unflushed]) flushAtExit(l);",
+    replace: "  for (const l of [..._unflushed]) void l;",
     test: "tests/logger-flush-at-exit.test.ts",
     filter: "logger: a line logged right before Deno.exit() reaches app.log",
   },
@@ -6271,8 +6271,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "browser worker: the web build leaves the worker bundles out of the site — not copied, not precached, not digest-pinned",
     file: "src/build/build-web.ts",
-    find: "  await copyWorkerBundles(dist, outDir);",
-    replace: "",
+    find: "    await copyWorkerBundles(dist, outDir),\n",
+    replace: "    [] as string[],\n",
     test: "tests/browser-worker-bundle.test.ts",
     filter:
       "targets: the web folder and the APK's assets carry every worker bundle, and the service worker precaches and pins them",
