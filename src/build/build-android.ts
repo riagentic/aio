@@ -912,7 +912,7 @@ ${htmlOpen()}
   <div class="card">
     <h1>aio</h1>
     <form id="f">
-      <input id="addr" type="text" placeholder="server address or share link" autofocus spellcheck="false" />
+      <input id="addr" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="server address or share link" autofocus spellcheck="false" />
 ${
     ios
       ? ""
@@ -1020,10 +1020,14 @@ ${
     // The address as it will be opened. Typed without a scheme it is http —
     // unless it carries a key (?token=): a share link is https unless it
     // says otherwise, and a key must not leave in clear text by default.
+    // The scheme is matched case-blind and written back lower-case: a phone
+    // keyboard capitalises the first letter, and \`Https://h:8443\` read as
+    // bare made \`http://Https://h:8443\` — host "https".
     function parse(v){
-      var bare=v.indexOf('http://')!==0&&v.indexOf('https://')!==0,u=null;
+      var m=/^(https?):\\/\\//i.exec(v);if(m)v=m[1].toLowerCase()+v.slice(m[1].length);
+      var bare=!m,u=null;
       try{u=new URL(bare?'http://'+v:v);if(bare&&u.searchParams.get('token'))u=new URL('https://'+v)}catch(x){u=null}
-      return {bare:bare,u:u};
+      return {bare:bare,u:u,v:v};
     }
     // A keyed link over plain http to another machine: allowed (a keyed LAN
     // app served with --no-tls must keep working), and SAID — whoever shares
@@ -1049,7 +1053,7 @@ ${
     ios ? "''" : "document.getElementById('pin').value.trim()"
   };
       if(!v)return;
-      var p=parse(v),bare=p.bare,u=p.u;
+      var p=parse(v),bare=p.bare,u=p.u;v=p.v;
       if(!u){err.textContent='Invalid URL';return}
       err.textContent='';
       if(pin){pair(bare?['https://'+u.host].concat(strict&&clear(u)?[]:['http://'+u.host]):[u.origin],pin,0);return}
@@ -1459,11 +1463,17 @@ export function _fillTemplate(
   // `{{ APP_NAME }}`, `{{\tAPP_NAME\n}}` → `{{APP_NAME}}`, before any lookup.
   // Only `[A-Z_]` names are tokens, so `{{ somethingLowercase }}` is left
   // exactly as written.
-  let out = content.replace(/\{\{\s*([A-Z_]+)\s*\}\}/g, "{{$1}}");
-  for (const [token, value] of Object.entries(subs)) {
-    out = out.replaceAll(token, () => value);
-  }
-  return out;
+  //
+  // ONE pass over the template, never one pass per token: a value is inserted
+  // verbatim and never scanned again. Per-token passes re-expanded a title
+  // that spells a later token — `Pick {{ICON_ATTR}} here` became
+  // `android:label="Pick android:icon="@mipmap/ic_launcher" here"`, a
+  // manifest that does not parse. A token with no value is left exactly as
+  // written, so `_leftoverTokens` still names it.
+  return content.replace(
+    /\{\{\s*([A-Z_]+)\s*\}\}/g,
+    (_m, name: string) => subs[`{{${name}}}`] ?? `{{${name}}}`,
+  );
 }
 
 /** The `{{UPPER_CASE}}` tokens left after {@link _fillTemplate}, once each.
@@ -1568,6 +1578,16 @@ export function safeDevUrl(devUrl: string): string {
     );
   }
   return parsed.href;
+}
+
+/** The `loadUrl(…)` argument a dev APK opens: {@link safeDevUrl}'s URL as a
+ *  Kotlin string LITERAL, through `kotlinString`. `safeDevUrl` alone is not
+ *  enough to paste: a URL keeps `$`, `{`, `}` and `\` in its query and
+ *  fragment, and inside `"…"` Kotlin reads `${…}` as code — `?x=${…}` ran
+ *  whatever it held, and a lone `\` broke the build. Escaping (not refusing)
+ *  keeps every working dev URL working, byte for byte. Pure. @internal */
+export function _devUrlLiteral(devUrl: string): string {
+  return kotlinString(safeDevUrl(devUrl));
 }
 
 /** What an app's own `android/…/MainActivity.kt` drops of the template's.
@@ -1767,6 +1787,7 @@ async function _applyDevUrl(
 ): Promise<void> {
   const actPath = join(androidDir, MAIN_ACTIVITY);
   const safeUrl = safeDevUrl(devUrl);
+  const literal = _devUrlLiteral(devUrl);
   const act = await Deno.readTextFile(actPath);
   const anchor =
     'loadUrl("https://appassets.androidplatform.net/assets/index.html")';
@@ -1793,7 +1814,7 @@ async function _applyDevUrl(
   // dev server's pages in the WebView.
   await Deno.writeTextFile(
     actPath,
-    act.replace(anchor, () => `loadUrl("${safeUrl}")`),
+    act.replace(anchor, () => `loadUrl(${literal})`),
   );
   // Cleartext is NOT patched in here — see `_cleartextAttr`, which decides it
   // for the dev build and the remote client alike, at placeholder time.

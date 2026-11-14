@@ -997,6 +997,11 @@ class MainActivity : AppCompatActivity() {
                 }
                 override fun shouldOverrideUrlLoading(view: WebView?, request: android.webkit.WebResourceRequest?): Boolean {
                     val uri = request?.url ?: return false
+                    // A SUBFRAME navigation (an embedded iframe, often a third
+                    // party's) stays in its frame: only the page itself may
+                    // send the user out of the app. Without this an iframe's
+                    // own navigation launched an external ACTION_VIEW.
+                    if (request?.isForMainFrame != true) return false
                     if (uri.host == ASSET_HOST) return false
                     // An APK that talks to a server (a client, or a dev build):
                     // the connect page opening that server, and the server's own
@@ -1129,6 +1134,15 @@ class MainActivity : AppCompatActivity() {
                         == PackageManager.PERMISSION_GRANTED
                     ) {
                         request.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+                    } else if (pendingCameraRequest != null) {
+                        // One runtime-permission prompt at a time: the one
+                        // pending is answered by onRequestPermissionsResult.
+                        // Overwriting it left ITS getUserMedia promise
+                        // unanswered forever; the newer request is denied
+                        // instead (a NotAllowedError the page can retry on).
+                        android.util.Log.w("aio", "camera: a permission prompt is already open — " +
+                            "this request is denied; retry once it is answered")
+                        request.deny()
                     } else {
                         pendingCameraRequest = request
                         ActivityCompat.requestPermissions(this@MainActivity, arrayOf(Manifest.permission.CAMERA), 1)

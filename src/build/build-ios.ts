@@ -99,29 +99,27 @@ export function renderIosTemplate(facts: {
   // `` "Cost $` Saver" `` spliced the preceding file content into
   // CFBundleDisplayName. A function replacement is not a pattern. Applied to
   // all six, because a version string comes from deno.json.
-  const lit = (v: string) => () => v;
+  //
+  // ONE pass per file, never one `replaceAll` per token: a value is inserted
+  // verbatim and never scanned again. Per-token passes re-expanded a title
+  // that spells a later token (`Pick {{BUNDLE_ID}} here` became the bundle
+  // id inside CFBundleDisplayName). Same rule as android's `_fillTemplate`.
+  const subs: Record<string, string> = {
+    APP_NAME: plistText(facts.appName),
+    BUNDLE_ID: facts.bundleId,
+    VERSION_NAME: iosMarketingVersion(facts.versionName),
+    VERSION_CODE: String(facts.versionCode),
+    ATS_ARBITRARY: facts.allowArbitraryLoads ? "true" : "false",
+    ATS_COMMENT: facts.allowArbitraryLoads
+      ? "No server is baked in, so any address the user types must be reachable."
+      : "The baked-in server is https, so only local networking is opened.",
+  };
   const out: Record<string, string> = {};
   for (const [rel, content] of Object.entries(IOS_TEMPLATE)) {
-    out[rel] = content
-      .replaceAll("{{APP_NAME}}", lit(plistText(facts.appName)))
-      .replaceAll("{{BUNDLE_ID}}", lit(facts.bundleId))
-      .replaceAll(
-        "{{VERSION_NAME}}",
-        lit(iosMarketingVersion(facts.versionName)),
-      )
-      .replaceAll("{{VERSION_CODE}}", lit(String(facts.versionCode)))
-      .replaceAll(
-        "{{ATS_ARBITRARY}}",
-        lit(facts.allowArbitraryLoads ? "true" : "false"),
-      )
-      .replaceAll(
-        "{{ATS_COMMENT}}",
-        lit(
-          facts.allowArbitraryLoads
-            ? "No server is baked in, so any address the user types must be reachable."
-            : "The baked-in server is https, so only local networking is opened.",
-        ),
-      );
+    out[rel] = content.replace(
+      /\{\{([A-Z_]+)\}\}/g,
+      (m, name: string) => Object.hasOwn(subs, name) ? subs[name]! : m,
+    );
   }
   return out;
 }

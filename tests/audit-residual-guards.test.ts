@@ -124,6 +124,25 @@ Deno.test("android: an injectable --android-dev-url is refused", async () => {
 
   // A real dev URL passes through, normalised.
   assertEquals(safeDevUrl("http://10.0.2.2:8000"), "http://10.0.2.2:8000/");
+
+  // What is PASTED is `_devUrlLiteral` — and a URL keeps `$`, `{`, `}` and
+  // `\` in its query/fragment: inside a Kotlin `"…"` an unescaped `${…}` is
+  // code and a lone `\` breaks the build. Every `$`/`\` must be escaped.
+  const { _devUrlLiteral } = await import("../src/build/build-android.ts");
+  for (
+    const u of [
+      "http://10.0.2.2:8000/?x=${Runtime.getRuntime().exec(\"id\")}",
+      "http://10.0.2.2:8000/#$x",
+      "http://10.0.2.2:8000/?a=\\",
+    ]
+  ) {
+    const body = _devUrlLiteral(u).slice(1, -1);
+    assert(
+      !/(^|[^\\])(\\\\)*[$"]/.test(body) &&
+        !/(^|[^\\])(\\\\)*\\$/.test(body),
+      `an unescaped $, " or \\ reaches the Kotlin literal: ${body}`,
+    );
+  }
 });
 
 // ── ship: paths are joined, not concatenated ─────────────────────────────

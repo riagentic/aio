@@ -50,7 +50,19 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         let e = error as NSError
         guard e.domain == NSURLErrorDomain, e.code != NSURLErrorCancelled else { return }
         guard let failed = e.userInfo[NSURLErrorFailingURLErrorKey] as? URL, !failed.isFileURL else { return }
-        showForm("unreachable")
+        // A certificate this device does not trust (a server run with
+        // --expose signs its own) is not "unreachable": the server answered.
+        // These went to "unreachable" too, and the page's #untrusted
+        // explanation was never shown.
+        switch e.code {
+        case NSURLErrorServerCertificateUntrusted,
+             NSURLErrorServerCertificateHasBadDate,
+             NSURLErrorServerCertificateHasUnknownRoot,
+             NSURLErrorServerCertificateNotYetValid:
+            showForm("untrusted")
+        default:
+            showForm("unreachable")
+        }
     }
 
     // …and one that answers 401 at its root: a keyed server opened without
