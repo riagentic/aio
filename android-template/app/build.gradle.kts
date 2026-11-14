@@ -5,12 +5,12 @@ plugins {
 
 android {
     namespace = "aio.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "{{APPLICATION_ID}}"
         minSdk = 29 // Android 10: the oldest whose WebView still gets updates
-        targetSdk = 35
+        targetSdk = 36
         versionCode = {{VERSION_CODE}}
         versionName = "{{VERSION_NAME}}"
     }

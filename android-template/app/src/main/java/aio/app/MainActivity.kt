@@ -15,6 +15,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -830,6 +831,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        onBackPressedDispatcher.addCallback(this, back)
         if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
         // Packaged assets are served from an https origin via WebViewAssetLoader:
         // file:// is not a secure context, so navigator.mediaDevices (camera /
@@ -1231,15 +1233,19 @@ class MainActivity : AppCompatActivity() {
      *  `onBackButton` (src/air/back-button.ts), true when a handler took it.
      *  `evaluateJavascript` needs no user gesture, so the first Back after a
      *  cold start reaches the app too — `history.pushState` cannot promise
-     *  that. No handler, a page without aio, or one still loading → default. */
-    @Suppress("DEPRECATION")
-    override fun onBackPressed() {
-        webView.evaluateJavascript(
-            "typeof __aioBack == 'function' && __aioBack() === true"
-        ) { handled -> if (handled != "true") defaultBack() }
+     *  that. No handler, a page without aio, or one still loading → default.
+     *
+     *  A dispatcher callback, not `onBackPressed`: from targetSdk 36 Android
+     *  never calls `onBackPressed` (predictive back), and Back would close
+     *  the app without asking the page. */
+    private val back = object : OnBackPressedCallback(true) {
+        override fun handleOnBackPressed() {
+            webView.evaluateJavascript(
+                "typeof __aioBack == 'function' && __aioBack() === true"
+            ) { handled -> if (handled != "true") defaultBack() }
+        }
     }
 
-    @Suppress("DEPRECATION")
     private fun defaultBack() {
         if (webView.canGoBack()) webView.goBack()
         // A client APK: the connect page sends every launch straight to the
@@ -1248,7 +1254,13 @@ class MainActivity : AppCompatActivity() {
         // moved, or an error page when it is gone). `#change` = stay on it.
         else if (IS_CLIENT && Uri.parse(webView.url ?: "").host != ASSET_HOST) {
             webView.loadUrl("https://$ASSET_HOST/assets/index.html#change")
-        } else super.onBackPressed()
+        } else {
+            // Android's own Back (leave the app): this callback steps aside
+            // for one dispatch, then takes Back again for the next launch.
+            back.isEnabled = false
+            onBackPressedDispatcher.onBackPressed()
+            back.isEnabled = true
+        }
     }
 }
 
