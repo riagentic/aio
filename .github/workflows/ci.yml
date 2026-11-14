@@ -12,6 +12,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  # Weekly, with nothing pushed: aio is in maintenance (1.0.x), and what moves
+  # under it is upstream — a new Deno 2.x (`deno-version: v2.x` below picks
+  # the newest), a registry package. A break shows up within a week, not on
+  # the day somebody next needs a fix.
+  schedule:
+    - cron: "17 4 * * 1"
 
 permissions:
   contents: read

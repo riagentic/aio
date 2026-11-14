@@ -9,7 +9,7 @@
     "jsr:@std/jsonc@1.0.2": "1.0.2",
     "jsr:@std/path@1.1.3": "1.1.3",
     "jsr:@std/path@^1.1.5": "1.1.6",
-    "npm:electron@44.9.3": "44.9.3",
+    "npm:electron@44.11.1": "44.11.1",
     "npm:esbuild@0.25.12": "0.25.12",
     "npm:immer@10.2.0": "10.2.0"
   },
@@ -212,8 +212,8 @@
         "ms"
       ]
     },
-    "electron@44.9.3": {
-      "integrity": "sha512-Cv9/yMnZxNWsMlIe8T4v//NKHdUvbeyoTJoXE3BIcRxus2meeFaO9h/P3zB5d4cBXum51IgAYrT2QjpIDWKpJA==",
+    "electron@44.11.1": {
+      "integrity": "sha512-pQdp3+NanyxVQxBxdHqnZ/Kj9gKBs8oeSGsmCb2R1yaFWuT91vbibR19o4pZdpkmBYDMl890+Ezt7qT/9zZjAA==",
       "dependencies": [
         "@electron-internal/extract-zip",
         "@electron/get",
@@ -291,7 +291,7 @@
       "jsr:@std/assert@1",
       "jsr:@std/jsonc@1",
       "jsr:@std/path@1.1.3",
-      "npm:electron@44.9.3",
+      "npm:electron@44.11.1",
       "npm:esbuild@0.25.12",
       "npm:immer@10.2.0"
     ],
