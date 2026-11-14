@@ -302,19 +302,44 @@ export interface FieldProps extends Common {
  *  Naming the control fixes both at once, and only when the caller hasn't
  *  already named it (an explicit `t`/`aria-label` always wins).
  *
- *  Returns the control it found (named or not), so a Field with several
- *  inputs labels the first — exactly what a wrapping `<label>` would do. */
-function nameControl(child: unknown, label: string | null): VNode | null {
-  if (!child || typeof child !== "object") return null;
+ *  Finds the control (named or not), so a Field with several inputs labels
+ *  the first — exactly what a wrapping `<label>` would do — and returns the
+ *  children with the path down to it REBUILT: a fresh vnode for the control
+ *  (its app props plus what `wire` derives from them) and for each ancestor,
+ *  every other node shared. Never a write into the caller's vnodes: they used
+ *  to be mutated, so a wrapper re-rendering on its own state handed Field the
+ *  same `{props.children}` object — already carrying last render's attributes,
+ *  which then looked app-set, and which the renderer skips as a reused vnode
+ *  anyway. The hint's id outlived the hint; an error never set
+ *  `aria-invalid`. Rebuilt per render, the attributes are recomputed per
+ *  render, and the caller's props are exactly what the APP wrote. */
+function wireChildren(
+  child: unknown,
+  label: string | null,
+  wire: (ctrl: VNode, p: Record<string, unknown>) => void,
+): { out: unknown; found: boolean } {
+  if (!child || typeof child !== "object") return { out: child, found: false };
   if (Array.isArray(child)) {
-    for (const c of child) {
-      const found = nameControl(c, label);
-      if (found) return found;
+    for (let i = 0; i < child.length; i++) {
+      const r = wireChildren(child[i], label, wire);
+      if (r.found) {
+        const out = child.slice();
+        out[i] = r.out;
+        return { out, found: true };
+      }
     }
-    return null;
+    return { out: child, found: false };
   }
   const v = child as VNode;
-  if (!("tag" in v) || !v.props) return null;
+  if (!("tag" in v) || !v.props) return { out: child, found: false };
+  // A rebuilt node, as `h()` would build it: never-mounted, the reused
+  // siblings kept by reference (h() marks them for the reconciler).
+  const rebuild = (props: Record<string, unknown>, kids: unknown[]) =>
+    h(
+      v.tag as never,
+      { ...props, ...(v.key !== undefined ? { key: v.key } : {}) },
+      ...(kids as VChild[]),
+    );
   const p = v.props as Record<string, unknown>;
   // Switch and RadioGroup are controls too. They were missing, so
   // `<Field label="Dark mode"><Switch/></Field>` rendered an unnamed switch
@@ -331,18 +356,19 @@ function nameControl(child: unknown, label: string | null): VNode | null {
     // `NotificationsCheckbox`, and that testUI/am name is frozen surface.
     const ownLabel = v.tag === Switch && typeof p.label === "string" &&
       p.label.trim() !== "";
+    const np: Record<string, unknown> = { ...p };
     if (
       label !== null && !ownLabel && p["aria-label"] === undefined &&
       p["aria-labelledby"] === undefined && p.t === undefined &&
       p["data-testid"] === undefined
-    ) p["aria-label"] = label;
-    return v;
+    ) np["aria-label"] = label;
+    wire(v, np);
+    return { out: rebuild(np, v.children ?? []), found: true };
   }
-  for (const c of v.children ?? []) {
-    const found = nameControl(c, label);
-    if (found) return found;
-  }
-  return null;
+  const r = wireChildren(v.children ?? [], label, wire);
+  return r.found
+    ? { out: rebuild(p, r.out as unknown[]), found: true }
+    : { out: child, found: false };
 }
 
 /** Wire the Field's label, hint and error to its control.
@@ -356,12 +382,14 @@ function nameControl(child: unknown, label: string | null): VNode | null {
  *  not toggle the box. A caller's own `id`/`aria-*` always wins. */
 function wireControl(
   ctrl: VNode,
+  p: Record<string, unknown>,
   base: string,
   hasLabel: boolean,
   said: "hint" | "error" | null,
   required?: boolean,
 ): string | undefined {
-  const p = ctrl.props as Record<string, unknown>;
+  // `p` is the control's FRESH props (a copy — see `wireChildren`), so every
+  // `=== undefined` below reads only what the app set.
   const group = ctrl.tag === RadioGroup;
   // `required` painted an asterisk and told assistive tech nothing: the
   // control's name is the bare label (set above, without the " *"), so a
@@ -392,14 +420,15 @@ function wireControl(
 export function Field(props: FieldProps): VNode {
   const { label, hint, error, required, children, class: cls } = props;
   const base = `aio-field-${_useWireId().replace(/[^0-9a-zA-Z]/g, "")}`;
-  const ctrl = nameControl(
+  const said = error ? "error" : hint != null ? "hint" : null;
+  let forId: string | undefined;
+  const wired = wireChildren(
     children,
     typeof label === "string" && label.trim() ? label.trim() : null,
-  );
-  const said = error ? "error" : hint != null ? "hint" : null;
-  const forId = ctrl
-    ? wireControl(ctrl, base, label != null, said, required)
-    : undefined;
+    (ctrl, p) => {
+      forId = wireControl(ctrl, p, base, label != null, said, required);
+    },
+  ).out as VChild;
   return h(
     "div",
     {
@@ -421,7 +450,7 @@ export function Field(props: FieldProps): VNode {
         required ? h("span", { class: "aio-field__req" }, " *") : null,
       )
       : null,
-    children,
+    wired,
     hint != null && !error
       ? h("div", { class: "aio-field__hint", id: `${base}-hint` }, hint)
       : null,
@@ -704,16 +733,53 @@ function onModalKey(e: KeyboardEvent): void {
     box.focus();
     return;
   }
-  const first = els[0]!;
-  const last = els[els.length - 1]!;
+  // The edges are TAB STOPS, not the ends of the query: a radio group is one
+  // stop (its checked radio), and focus can sit on something that is no stop
+  // at all (an open Menu's items are tabIndex=-1). Checking only
+  // `active === els.at(-1)` let Tab out of a dialog ending in a RadioGroup
+  // whose last radio was unchecked, or with a Menu open last — so the trap
+  // compares positions: anything at/after the last stop wraps forward,
+  // anything at/before the first wraps back. Same stops as the harness's
+  // `tabDefault` models.
+  const first = stopGroup(els, els[0]!);
+  const last = stopGroup(els, els[els.length - 1]!);
   const inside = active !== null && box.contains(active);
-  if (e.shiftKey && (!inside || active === first || active === box)) {
+  const atOrAfter = (n: Node) =>
+    active === n || (n.compareDocumentPosition(active!) & 4) !== 0;
+  const atOrBefore = (n: Node) =>
+    active === n || (n.compareDocumentPosition(active!) & 2) !== 0;
+  if (
+    e.shiftKey &&
+    (!inside || active === box || first.some((n) => atOrBefore(n)))
+  ) {
     e.preventDefault();
-    last.focus();
-  } else if (!e.shiftKey && (!inside || active === last)) {
+    stopOf(last, true).focus();
+  } else if (
+    !e.shiftKey && (!inside || last.some((n) => atOrAfter(n)))
+  ) {
     e.preventDefault();
-    first.focus();
+    stopOf(first, false).focus();
   }
+}
+
+/** The tab stop `el` belongs to: its whole radio group (same `name`, within
+ *  the dialog) for a named radio, else just `el`. In document order. */
+function stopGroup(els: HTMLElement[], el: HTMLElement): HTMLElement[] {
+  const name = el.getAttribute("name");
+  if (
+    el.tagName !== "INPUT" || el.getAttribute("type") !== "radio" || !name
+  ) return [el];
+  return els.filter((r) =>
+    r.tagName === "INPUT" && r.getAttribute("type") === "radio" &&
+    r.getAttribute("name") === name
+  );
+}
+
+/** Where Tab lands in a stop: the checked radio, else the group's edge in the
+ *  direction of travel — as a browser enters a radio group. */
+function stopOf(group: HTMLElement[], back: boolean): HTMLElement {
+  return group.find((r) => (r as HTMLInputElement).checked) ??
+    (back ? group[group.length - 1]! : group[0]!);
 }
 
 /** @internal test seam — drop any modal left registered by a previous case.
