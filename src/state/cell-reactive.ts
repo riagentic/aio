@@ -904,29 +904,34 @@ function _registerAndSend(
     deferTimer: true,
     methodKey: ackMethodKey(tagged),
   });
-  // Send in a microtask so a fast synchronous sendFn doesn't have its return
-  // value clobbered by the pending map. The ack can come back as soon as
-  // the dispatch completes server-side; the registration is in place.
-  queueMicrotask(() => {
-    try {
-      sendFn(tagged);
-    } catch (e) {
-      // The frame never left. Waiting out the 15s ack clock to discover that
-      // turns a send error into a near-silent hang, and the timeout then
-      // reports a generic "stopped waiting" instead of the actual failure.
-      // Reject NOW, with the real cause: a transport that throws
-      // synchronously has already told us everything the clock could.
-      ack.reject(
-        tagged.cid,
-        e instanceof Error ? e : new Error(`send failed: ${String(e)}`),
-      );
-      return;
-    }
-    // aio's own transports arm the clock when the frame goes out. Anything
-    // else — a custom or legacy `sendFn` — never would, and a deferred timer
-    // that is never armed is a call that can hang forever, so start it here.
-    if (!ack.armsAckTimer(sendFn)) ack.armTimer(tagged.cid);
-  });
+  // Send NOW, in the caller's turn. The ack is registered above, so a fast
+  // (even synchronous) settle finds its entry — which is all the old deferral
+  // ("send in a microtask so a sync sendFn isn't clobbered by the pending
+  // map") ever protected, and the register-first order already guarantees.
+  // What the microtask cost was ORDER: the transport stamps a frame's seq
+  // (online pacer and offline queue alike) when `sendFn` runs, while
+  // `serverFn(...)` and core `send` stamp synchronously — so
+  // `cell.inc(); coreSend(x)` went out x-then-inc, live and on offline replay,
+  // reordering what the user did. A call takes its place in line when it is
+  // made.
+  try {
+    sendFn(tagged);
+  } catch (e) {
+    // The frame never left. Waiting out the 15s ack clock to discover that
+    // turns a send error into a near-silent hang, and the timeout then
+    // reports a generic "stopped waiting" instead of the actual failure.
+    // Reject NOW, with the real cause: a transport that throws
+    // synchronously has already told us everything the clock could.
+    ack.reject(
+      tagged.cid,
+      e instanceof Error ? e : new Error(`send failed: ${String(e)}`),
+    );
+    return promise;
+  }
+  // aio's own transports arm the clock when the frame goes out. Anything
+  // else — a custom or legacy `sendFn` — never would, and a deferred timer
+  // that is never armed is a call that can hang forever, so start it here.
+  if (!ack.armsAckTimer(sendFn)) ack.armTimer(tagged.cid);
   return promise;
 }
 

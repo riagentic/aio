@@ -13,7 +13,10 @@
 // unanswered, the one outcome the queue contract exists to forbid.
 //
 // Driven through the live module with a fake WebSocket, not a source grep.
-import { _teardownNow } from "../src/browser/protocol-subscription.ts";
+import {
+  _callConnectFn,
+  _teardownNow,
+} from "../src/browser/protocol-subscription.ts";
 import { assert, assertEquals } from "@std/assert";
 
 const sent: string[] = [];
@@ -79,6 +82,20 @@ const { client, ensureConnected } = await import(
 const { send: coreSend, setTransport: coreSetTransport } = await import(
   "../src/state-core.ts"
 );
+const { cell } = await import("../src/browser/protocol-cell.ts");
+const { serverFn } = await import("../src/browser/server-fns-client.ts");
+const { _rejectAllPending } = await import("../src/browser/browser-ack.ts");
+
+// A bound cell method — the third path into the same line. Declared before
+// the first `ensureConnected()` so the binding pass wires it to the transport.
+// deno-lint-ignore no-explicit-any
+const ord = cell("ord", {
+  state: { n: 0 },
+  methods: {
+    inc: (s: { n: number }) => void s.n++,
+    second: (s: { n: number }) => void s.n++,
+  },
+}) as any;
 
 /** Open a socket, let everything already queued drain into the bin, and close
  *  again — so each case starts from an empty, offline transport regardless of
@@ -196,4 +213,60 @@ Deno.test("air offline queue: a replayed call is shaped by wire.omitTrailingUnde
     else cfg.__aioConfig = had;
     reset();
   }
+});
+
+// A bound cell method used to send one microtask late (`_registerAndSend`
+// deferred `sendFn` with queueMicrotask), so its seq — online pacer and offline
+// queue alike — was taken AFTER any `serverFn` call or core `send` made later
+// in the same turn. `ord.inc(); serverFn("api").list(); coreSend(x)` went out
+// sfn, x, inc; offline, `ord.inc(); coreSend(second)` replayed second, inc.
+// A call holds its place in line from the moment it is made.
+Deno.test("call order: a bound cell method keeps its place ahead of a later core send — offline replay", () => {
+  reset();
+  ord.inc();
+  coreSend({ type: "ord:second" });
+  ensureConnected();
+  FakeWS.last?.open();
+  assertEquals(
+    actionTypes().filter((t) => t.startsWith("ord:")),
+    ["ord:inc", "ord:second"],
+    "offline replay put the core send ahead of the earlier cell method call",
+  );
+  FakeWS.last?.onclose?.();
+  coreSetTransport(null);
+  _rejectAllPending(new Error("test teardown"));
+  _teardownNow();
+});
+
+Deno.test("call order: a bound cell method goes out before a later serverFn call and core send — online", () => {
+  reset();
+  // A genuinely live socket: tear the old client down and connect afresh, so
+  // `_ws` is the socket that opens (the pacer path), not a stale handle.
+  _teardownNow();
+  const before = FakeWS.last;
+  _callConnectFn();
+  assert(FakeWS.last && FakeWS.last !== before, "a fresh socket was opened");
+  FakeWS.last.open();
+  sent.length = 0;
+  ord.inc();
+  const sfn = serverFn<{ list: () => Promise<unknown> }>("api").list();
+  sfn.catch(() => {});
+  coreSend({ type: "ord:inc" });
+  const order = sent.flatMap((frame) => {
+    try {
+      const f = JSON.parse(frame) as { t?: string; d?: { type?: string } };
+      if (f.t === "sfn") return ["sfn"];
+      if (f.t === "action" && f.d?.type) return [`action:${f.d.type}`];
+    } catch { /* not JSON */ }
+    return [];
+  });
+  assertEquals(
+    order,
+    ["action:ord:inc", "sfn", "action:ord:inc"],
+    "a later serverFn / core send overtook the cell method call on the wire",
+  );
+  FakeWS.last?.onclose?.(); // settles the serverFn call (connection lost)
+  coreSetTransport(null);
+  _rejectAllPending(new Error("test teardown"));
+  _teardownNow();
 });
