@@ -25,26 +25,32 @@ export const useRef = rendererUseRef;
 export function useState<T>(
   initial: T | (() => T),
 ): [T, (next: T | ((prev: T) => T)) => void] {
-  const ref = rendererUseRef<Signal<T> | null>(null);
+  const ref = rendererUseRef<
+    { sig: Signal<T>; set: (next: T | ((prev: T) => T)) => void } | null
+  >(null);
   if (ref.current === null) {
     // Matches React behavior: functions are always treated as lazy initializers.
     // If T is itself a function type, wrap it: useState(() => myFn)
     const val = typeof initial === "function"
       ? (initial as () => T)()
       : initial;
-    ref.current = signal(val);
+    const sig = signal(val);
+    // Made ONCE, kept beside the signal: React's setter is stable, so React
+    // code lists it in deps arrays. A fresh arrow per render was a changed
+    // dep per render — `useEffect(() => { load().then(setRows) }, [setRows])`
+    // loaded again after every render it caused.
+    const set = (next: T | ((prev: T) => T)): void => {
+      if (typeof next === "function") {
+        sig.update(next as (prev: T) => T);
+      } else {
+        sig.set(next);
+      }
+    };
+    ref.current = { sig, set };
   }
-  const sig = ref.current;
+  const { sig, set } = ref.current;
 
-  const setter = (next: T | ((prev: T) => T)): void => {
-    if (typeof next === "function") {
-      sig.update(next as (prev: T) => T);
-    } else {
-      sig.set(next);
-    }
-  };
-
-  return [sig.value, setter];
+  return [sig.value, set];
 }
 
 // ── deps ───────────────────────────────────────────────────────────
@@ -157,10 +163,33 @@ export function useEffect(
     // preventing stale captures of non-signal values (props, locals).
     // AIO-182: Re-create effect every render — _effectDisposeAll kills
     // the previous one during re-render cleanup, so we must re-create it.
+    // Started AFTER the commit, as React's is (and as the deps form above
+    // is): created in the component body it ran during render, so its first
+    // run read `ref.current` as undefined and every later run saw the
+    // previous render's DOM.
     const fnRef = useRef(fn);
     fnRef.current = fn;
-    const dispose = effect(() => fnRef.current());
-    onCleanup(dispose);
+    const live = useRef<{ dispose: (() => void) | null; mounted: boolean }>({
+      dispose: null,
+      mounted: false,
+    });
+    const stop = () => {
+      live.current.dispose?.();
+      live.current.dispose = null;
+    };
+    const start = () => {
+      stop();
+      live.current.dispose = effect(() => fnRef.current());
+    };
+    if (!live.current.mounted) {
+      live.current.mounted = true;
+      onMount(() => {
+        onCleanup(stop); // inside onMount: unmount-only (see the deps form)
+        start();
+      });
+    } else {
+      afterRender(start);
+    }
   }
 }
 
