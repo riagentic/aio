@@ -986,7 +986,10 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // client (and `am discover`) can find them without knowing the IP/port.
   // UDP via node:dgram (stable — no flags); best-effort, degrades silently
   // if the port can't bind or the network blocks broadcast.
-  if (expose && !noPort) {
+  // Not when bound to loopback (`--expose --host=127.0.0.1`, behind a
+  // reverse proxy): the banner says other devices cannot connect, and an
+  // advertised `http://<lan-ip>:<port>` that refuses was listed anyway.
+  if (expose && !noPort && !loopbackBind) {
     // Stamp this app's discovery metadata into its lock file so ANY responder
     // on the host can report it (the multi-app-per-host solution).
     deps.appLock?.update?.({
