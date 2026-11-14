@@ -47,7 +47,15 @@ export function watch(
     queued = true;
     queueMicrotask(() => {
       queued = false;
-      draw();
+      try {
+        draw();
+      } catch (e) {
+        // A later frame that throws escapes this microtask as an uncaught
+        // error — the process dies. Leave the terminal as the first-frame
+        // throw does: nothing subscribed, no SIGINT listener, cursor shown.
+        cleanup();
+        throw e;
+      }
     });
   };
   if (io.tty) io.out("\x1b[?25l");
@@ -61,6 +69,13 @@ export function watch(
     if (_appSigint.size === 0) io.exit(130);
   };
   const listens = io.tty && addSigint(onInt);
+  // Deno.exit() (or the event loop draining) while the view is up skips
+  // stop() — the cursor stayed hidden in the user's shell. `unload` still
+  // fires on those paths; removed on stop().
+  const onUnload = () => {
+    if (!stopped) io.out("\x1b[?25h");
+  };
+  if (io.tty) globalThis.addEventListener("unload", onUnload);
   // A call made INSIDE `subscribe` is the source replaying what it already
   // has (`connectCli().subscribe` "fires immediately if state exists") — the
   // frame drawn below. Scheduled, it was a second identical frame: invisible
@@ -70,22 +85,25 @@ export function watch(
     if (!subscribing) schedule();
   });
   subscribing = false;
+  // Stop for good: unsubscribe, drop the listeners, show the cursor. Once.
+  const cleanup = () => {
+    if (stopped) return;
+    stopped = true;
+    unsub();
+    if (listens) _remove("SIGINT", onInt);
+    if (io.tty) {
+      globalThis.removeEventListener("unload", onUnload);
+      io.out("\x1b[?25h");
+    }
+  };
   try {
     draw();
   } catch (e) {
-    unsub(); // a first frame that throws leaves nothing subscribed
-    if (listens) _remove("SIGINT", onInt);
-    if (io.tty) io.out("\x1b[?25h");
+    cleanup(); // a first frame that throws leaves nothing subscribed
     throw e;
   }
   return {
-    stop() {
-      if (stopped) return;
-      stopped = true;
-      unsub();
-      if (listens) _remove("SIGINT", onInt);
-      if (io.tty) io.out("\x1b[?25h");
-    },
+    stop: cleanup,
     refresh: draw,
   };
 }

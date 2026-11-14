@@ -292,6 +292,11 @@ function buildFeedbackCell(slot: FeedbackSlot): FeedbackCell {
       dismiss(s) {
         s.last = null;
         s.status = "idle";
+        // The error goes with what it was about. Left set, nothing but the next
+        // SUCCESSFUL report cleared it (refresh() clears it only from status
+        // "error"), so a UI bound to `error` showed a stale failure beside
+        // "idle". `updates.dismiss()` clears its error for the same reason.
+        s.error = null;
       },
     },
   }) as unknown as FeedbackCell;

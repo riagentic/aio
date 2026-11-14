@@ -787,6 +787,22 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
        *  put it away — it sat there on every boot, forever, for a release that
        *  was never going to become installable. */
       dismiss(s) {
+        // Never mid-install. This is a sync method, so `serialize` does not hold
+        // it off an in-flight apply(): it set "idle" over a live download and
+        // persisted the version BEING INSTALLED as dismissed — a failed install
+        // then read as "up to date" on every later check. Refused by a throw
+        // (as setPhase() refuses), NOT by writing `error`: any write here lands
+        // under the in-flight apply(), whose transactional commit then fails on
+        // the conflict — the install itself would be reported as broken.
+        const phase = s.$live?.status ?? s.status;
+        if (
+          phase === "downloading" || phase === "applying" || phase === "staged"
+        ) {
+          throw new Error(
+            `[updates] dismiss(): an update is being installed (${phase}) — ` +
+              `it cannot be dismissed until the install finishes.`,
+          );
+        }
         const subject = s.available ?? s.blocked;
         if (!subject) return;
         s.dismissed = subject.version;

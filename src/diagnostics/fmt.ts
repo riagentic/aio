@@ -49,20 +49,77 @@ function isWide(cp: number): boolean {
     (cp >= 0xff00 && cp <= 0xff60) || // fullwidth forms
     (cp >= 0xffe0 && cp <= 0xffe6) ||
     (cp >= 0x1f300 && cp <= 0x1f64f) || // emoji
-    (cp >= 0x1f900 && cp <= 0x1f9ff);
+    (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+    // The rest of East-Asian-Width=W emoji. Knowing only the two blocks above,
+    // ✅ ❌ ⚡ ⭐ ⏳ 🚀 🟢 🫠 — the commonest CLI status glyphs — measured one
+    // cell, rendered two, and every column after them in a table() slid.
+    (cp >= 0x231a && WIDE_EMOJI.some(([a, b]) => cp >= a && cp <= b));
 }
+
+/** East-Asian-Width=W emoji outside the blocks tested inline, as [from, to]. */
+const WIDE_EMOJI: readonly (readonly [number, number])[] = [
+  [0x231a, 0x231b],
+  [0x23e9, 0x23ec],
+  [0x23f0, 0x23f0],
+  [0x23f3, 0x23f3],
+  [0x25fd, 0x25fe],
+  [0x2614, 0x2615],
+  [0x2648, 0x2653],
+  [0x267f, 0x267f],
+  [0x2693, 0x2693],
+  [0x26a1, 0x26a1],
+  [0x26aa, 0x26ab],
+  [0x26bd, 0x26be],
+  [0x26c4, 0x26c5],
+  [0x26ce, 0x26ce],
+  [0x26d4, 0x26d4],
+  [0x26ea, 0x26ea],
+  [0x26f2, 0x26f5],
+  [0x26fa, 0x26fa],
+  [0x26fd, 0x26fd],
+  [0x2705, 0x2705],
+  [0x270a, 0x270b],
+  [0x2728, 0x2728],
+  [0x274c, 0x274c],
+  [0x274e, 0x274e],
+  [0x2753, 0x2755],
+  [0x2757, 0x2757],
+  [0x2795, 0x2797],
+  [0x27b0, 0x27b0],
+  [0x27bf, 0x27bf],
+  [0x2b1b, 0x2b1c],
+  [0x2b50, 0x2b50],
+  [0x2b55, 0x2b55],
+  [0x1f004, 0x1f004],
+  [0x1f0cf, 0x1f0cf],
+  [0x1f18e, 0x1f18e],
+  [0x1f191, 0x1f19a],
+  [0x1f680, 0x1f6ff],
+  [0x1f7e0, 0x1f7eb],
+  [0x1fa70, 0x1faff],
+];
 
 /** The number of terminal cells `s` occupies: ANSI stripped, combining marks
  *  free, wide code points counted twice. */
 export function width(s: string): number {
-  let n = 0;
+  let n = 0, prev = 0; // what the previous glyph added
   for (const ch of stripAnsi(s)) {
     const cp = ch.codePointAt(0)!;
     if (cp < 0x20 || cp === 0x7f) continue; // C0 controls: \r, \b — zero cells
     if (cp === 0x200d) continue; // ZWJ — an emoji sequence is still one glyph
     if (cp >= 0x300 && cp <= 0x36f) continue; // combining marks
-    if (cp >= 0xfe00 && cp <= 0xfe0f) continue; // variation selectors
-    n += isWide(cp) ? 2 : 1;
+    if (cp === 0xfe0f) {
+      // VS16 asks for emoji presentation: ❤️ ✔️ ☀️ render two cells though
+      // their base is narrow. Widen the glyph it follows, once.
+      if (prev === 1) {
+        n++;
+        prev = 2;
+      }
+      continue;
+    }
+    if (cp >= 0xfe00 && cp <= 0xfe0e) continue; // other variation selectors
+    prev = isWide(cp) ? 2 : 1;
+    n += prev;
   }
   return n;
 }
@@ -507,8 +564,12 @@ export function table<R extends Record<string, unknown>>(
       align: c.align ?? "left",
     }
   );
+  // One row is one line: a "\n" in a cell printed raw split the row and
+  // shifted every column after it, and a "\t" measured 0 cells but rendered up
+  // to 8. Shown as "⏎" / a space, then measured.
   const cell = (v: unknown): string =>
-    v === null || v === undefined ? "" : typeof v === "string" ? v : String(v);
+    (v === null || v === undefined ? "" : typeof v === "string" ? v : String(v))
+      .replace(/\r?\n|\r/g, "⏎").replace(/\t/g, " ");
   const body = rows.map((r) => cols.map((c) => cell(r[c.key])));
   const widths = cols.map((c, i) =>
     Math.max(width(c.header), ...body.map((r) => width(r[i]!)))

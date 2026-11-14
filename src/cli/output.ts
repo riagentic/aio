@@ -101,7 +101,9 @@ export function progress(total: number, opts: ProgressOptions = {}): Progress {
   draw();
   return {
     tick(k = 1) {
-      n = Math.min(total, n + k);
+      // Clamped at 0 too, as set() is: a negative tick took n below zero and
+      // `"#".repeat(negative)` threw a RangeError out of the progress bar.
+      n = Math.max(0, Math.min(total, n + k));
       draw();
     },
     set(k) {
