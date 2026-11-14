@@ -16,6 +16,7 @@ import {
 } from "./checkpoint.ts";
 import { installCrashHandler } from "./crash-handler.ts";
 import { log } from "./logger-api.ts";
+import { flushAllAtExit } from "./logger-core.ts";
 import { diagSubscribe } from "./diagnostic-bus.ts";
 import { isRedactedAction, noRedaction, REDACTED } from "./redact.ts";
 import { actionOrigin } from "./action-kind.ts";
@@ -263,6 +264,9 @@ export function initDiagnostics(
       guardRejections: guardDispatches,
       isBootComplete: () => bootComplete,
       log: { error: (msg, data) => log.error("crash", msg, data) },
+      // Every logger in the process: the dying process is all of them, and the
+      // handler runs outside any app's scope, so "this app's" is not knowable.
+      flushSync: flushAllAtExit,
       getHealthData: () => ({ cells: getHealthSnapshot() }),
       writeEmergencyCheckpoint: () => {
         if (cpWriter) {

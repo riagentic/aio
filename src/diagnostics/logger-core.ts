@@ -89,9 +89,108 @@ const _closedLoggers = new WeakMap<AioLogger, { late: number }>();
 function armUnloadFlush(): void {
   if (_unloadArmed || typeof addEventListener !== "function") return;
   _unloadArmed = true;
-  addEventListener("unload", () => {
-    for (const l of [..._unflushed]) flushAtExit(l);
-  });
+  addEventListener("unload", flushAllAtExit);
+}
+
+/** Write every logger's held lines NOW, synchronously — what `unload` does,
+ *  for the deaths that never fire it. Deno 2.9 ends the process on an
+ *  uncaught error or a fatal unhandled rejection WITHOUT `unload` (measured;
+ *  see `electron-spawn.ts`'s `runInstaller`), so the crash handler's own
+ *  `[crash-handler]` line sat in the 250 ms buffer and died with the process:
+ *  a compiled or service app (console off) left no record of the crash, and
+ *  `am status` (`crashOfLog`) read it as a kill. The crash handler calls this
+ *  (injected — `crash-handler.ts` takes no logger) once a fault is fatal.
+ *  Safe on a process that lives on: it is an early flush, nothing more.
+ *  @internal */
+export function flushAllAtExit(): void {
+  for (const l of [..._unflushed]) flushAtExit(l);
+}
+
+/** One log sink's outage, as `noteWriteFailure`/`noteWriteSuccess` keep it:
+ *  consecutive failed writes, how many of their reports were held back, and
+ *  how many LINES went with them. @internal */
+export type WriteLossAccount = {
+  failures: number;
+  suppressed: number;
+  lost: number;
+};
+/** How a sink names itself in those reports. @internal */
+export type WriteLossSink = {
+  /** The bracketed prefix: `logger`, `client-log`. */
+  tag: string;
+  /** What recovered: "file logging", "client.log writing". */
+  what: string;
+  /** Where the reports go (default `console.error` — the one channel a broken
+   *  log sink cannot take down with it). */
+  say?: (msg: string) => void;
+};
+const LOGGER_SINK: WriteLossSink = { tag: "logger", what: "file logging" };
+/** Report the first few, then every Nth. Equal to `AioLogger`'s statics. */
+const WRITE_REPORT_FIRST = 3;
+const WRITE_REPORT_EVERY = 100;
+
+/** A write never reached disk. Reports the first few, then periodically —
+ *  never NOTHING. It used to stop after three console lines and stay silent
+ *  for the life of the process: a full disk or a revoked permission meant the
+ *  app's entire log went to nowhere, while the app looked perfectly healthy
+ *  and nothing anywhere said the record had stopped. Rate-limited (a broken
+ *  sink fails on every flush), never off. Shared by every file sink that
+ *  can lose lines (the logger, client.log) — one rule, not a copy each.
+ *  @internal */
+export function noteWriteFailure(
+  a: WriteLossAccount,
+  sink: WriteLossSink,
+  path: string,
+  lines: number,
+  e: unknown,
+): void {
+  a.failures++;
+  a.lost += lines;
+  const n = a.failures;
+  if (n <= WRITE_REPORT_FIRST || n % WRITE_REPORT_EVERY === 0) {
+    (sink.say ?? console.error)(
+      `[${sink.tag}] write failed for ${path}: ${e} — ${n} consecutive failure(s), ` +
+        `${a.lost} log line(s) lost (reported every ${WRITE_REPORT_EVERY} after the first ${WRITE_REPORT_FIRST})`,
+    );
+  } else {
+    a.suppressed++;
+  }
+}
+
+/** A write landed. If the sink had been failing, say that it recovered and
+ *  what the outage cost — otherwise the suppressed failures would be the last
+ *  word on a log nobody knew had holes in it. Resets the account. @internal */
+export function noteWriteSuccess(
+  a: WriteLossAccount,
+  sink: WriteLossSink,
+): void {
+  if (a.failures > 0) {
+    (sink.say ?? console.error)(
+      `[${sink.tag}] ${sink.what} recovered after ${a.failures} failed ` +
+        `write(s) (${count(a.suppressed, "report")} suppressed) — ` +
+        `${a.lost} log line(s) were lost and cannot be recovered`,
+    );
+  }
+  a.failures = 0;
+  a.suppressed = 0;
+  a.lost = 0;
+}
+
+/** A logger's outage as a `WriteLossAccount`, and back. The accounting is
+ *  `noteWriteFailure`/`noteWriteSuccess`, shared with client.log; the fields
+ *  stay on the class (frozen public surface), so these are module functions,
+ *  not members. */
+function lossAccountOf(l: AioLogger): WriteLossAccount {
+  return {
+    failures: l["_writeErrors"],
+    suppressed: l["_writeErrorsSuppressed"],
+    lost: l["_linesLost"],
+  };
+}
+function storeLossAccount(l: AioLogger, a: WriteLossAccount): void {
+  l["_writeErrors"] = a.failures;
+  l["_writeErrorsSuppressed"] = a.suppressed;
+  l["_linesLost"] = a.lost;
 }
 
 /** Structured file logger — routes entries to app.log, debug.log, error.log, warning.log, and perf.log. */
@@ -747,47 +846,24 @@ export class AioLogger {
   // so those lines are gone — the only honest thing left is to say so.
   private _writeErrorsSuppressed = 0;
   private _linesLost = 0;
+  // Kept for the frozen surface; the live values are WRITE_REPORT_FIRST/EVERY.
   private static readonly REPORT_FIRST = 3; // then every REPORT_EVERY
   private static readonly REPORT_EVERY = 100;
 
-  /** A batch never reached disk. Reports the first few, then periodically —
-   *  never NOTHING. It used to stop after three console lines and stay silent
-   *  for the life of the process: a full disk or a revoked permission meant the
-   *  app's entire log went to nowhere, while the app looked perfectly healthy
-   *  and nothing anywhere said the record had stopped. Rate-limited (a broken
-   *  sink fails on every flush), never off. */
+  /** A batch never reached disk — see `noteWriteFailure`. */
   private _noteWriteFailure(path: string, lines: number, e: unknown): void {
-    this._writeErrors++;
-    this._linesLost += lines;
-    const n = this._writeErrors;
-    if (
-      n <= AioLogger.REPORT_FIRST || n % AioLogger.REPORT_EVERY === 0
-    ) {
-      console.error(
-        `[logger] write failed for ${path}: ${e} — ${n} consecutive failure(s), ` +
-          `${this._linesLost} log line(s) lost (reported every ${AioLogger.REPORT_EVERY} after the first ${AioLogger.REPORT_FIRST})`,
-      );
-    } else {
-      this._writeErrorsSuppressed++;
-    }
+    const a = lossAccountOf(this);
+    noteWriteFailure(a, LOGGER_SINK, path, lines, e);
+    storeLossAccount(this, a);
   }
 
   /** A write landed. If the sink had been failing, say that it recovered and
    *  what the outage cost — otherwise the suppressed failures would be the
    *  last word on a log nobody knew had holes in it. */
   private _noteWriteSuccess(): void {
-    if (this._writeErrors > 0) {
-      console.error(
-        `[logger] file logging recovered after ${this._writeErrors} failed ` +
-          `write(s) (${
-            count(this._writeErrorsSuppressed, "report")
-          } suppressed) — ` +
-          `${this._linesLost} log line(s) were lost and cannot be recovered`,
-      );
-    }
-    this._writeErrors = 0;
-    this._writeErrorsSuppressed = 0;
-    this._linesLost = 0;
+    const a = lossAccountOf(this);
+    noteWriteSuccess(a, LOGGER_SINK);
+    storeLossAccount(this, a);
   }
 
   /** Flush buffered lines + drain in-flight writes. Safe to call repeatedly.

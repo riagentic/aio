@@ -25,6 +25,15 @@ export type CrashHandlerDeps = {
    *  framework's own boot-refusal test for over an hour. Defaults to
    *  "booted" so unit callers keep the plain behaviour. */
   isBootComplete?: () => boolean;
+  /** Write the logger's held lines to disk SYNCHRONOUSLY. Called after the
+   *  crash line is logged, whenever the fault is fatal (every uncaught error;
+   *  a rejection the guard will not prevent). The file logger buffers for
+   *  250 ms and flushes at exit only on `unload` — which Deno 2.9 does not
+   *  fire when an uncaught error or rejection ends the process. Without this
+   *  the last words died in the buffer: a compiled or service app (console
+   *  off) kept NO record of its crash, and `am status` read it as a kill.
+   *  Injected, not imported: this module takes no logger. */
+  flushSync?: () => void;
 };
 
 /** The one rejection the guard must NOT survive: the script's own top level.
@@ -78,11 +87,12 @@ export function installCrashHandler(deps: CrashHandlerDeps): () => void {
     writeEmergencyCheckpoint,
     guardRejections,
     isBootComplete,
+    flushSync,
   } = deps;
 
   let _handling = false;
 
-  function handle(label: string, error: unknown): void {
+  function handle(label: string, error: unknown, fatal: boolean): void {
     if (_handling) return;
     _handling = true;
     try {
@@ -115,6 +125,22 @@ export function installCrashHandler(deps: CrashHandlerDeps): () => void {
             `in the console only.`,
         );
       }
+      // The process is about to die without `unload` — put the line above on
+      // disk now, before the checkpoint (whose own failure is console-only).
+      if (fatal && flushSync) {
+        try {
+          flushSync();
+        } catch (flushErr) {
+          console.error(
+            `[crash-handler] ${label}: ${msg}\n${stack ?? "no stack"}`,
+          );
+          console.error(
+            `[crash-handler] flushing the log to disk FAILED after that ` +
+              `crash: ${describeThrown(flushErr)} — this crash may be in the ` +
+              `console only.`,
+          );
+        }
+      }
       if (typeof Deno !== "undefined" && "writeTextFileSync" in Deno) {
         try {
           writeEmergencyCheckpoint();
@@ -134,18 +160,22 @@ export function installCrashHandler(deps: CrashHandlerDeps): () => void {
   }
 
   const onRejection = (e: PromiseRejectionEvent) => {
-    handle("unhandledrejection", e.reason);
+    // Decided BEFORE handle() so it knows whether to flush — but applied
+    // after, so the failure is logged first either way. An event an earlier
+    // listener already prevented is not fatal either.
+    const guard = !!guardRejections && (isBootComplete?.() ?? true);
+    handle("unhandledrejection", e.reason, !guard && !e.defaultPrevented);
     // Supervised: log-then-survive. Always AFTER handle() logs, so the failure
     // is never hidden — the process just doesn't die from a stray rejection.
     // Boot rejections stay fatal (see isBootComplete): supervision is for
     // RUNTIME strays, never for "the app refused to start".
-    if (guardRejections && (isBootComplete?.() ?? true)) {
+    if (guard) {
       e.preventDefault();
       exitIfMainModuleFailed();
     }
   };
   const onError = (e: ErrorEvent) => {
-    handle("uncaughtException", e.error ?? e.message);
+    handle("uncaughtException", e.error ?? e.message, !e.defaultPrevented);
   };
 
   globalThis.addEventListener("unhandledrejection", onRejection);

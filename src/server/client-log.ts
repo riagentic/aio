@@ -7,6 +7,12 @@ import { getLogDir, log } from "../diagnostics/logger-api.ts";
 import { remapClientText } from "../diagnostics/stack-remap.ts";
 import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
 import { redactLogCredentials } from "../diagnostics/redact.ts";
+import {
+  noteWriteFailure,
+  noteWriteSuccess,
+  type WriteLossAccount,
+  type WriteLossSink,
+} from "../diagnostics/logger-core.ts";
 
 const MAX_RATE = 100; // messages per second per client
 const MAX_CLIENT_MSG = 8192; // max msg length from client
@@ -40,7 +46,19 @@ const _rate = new Map<
 let _logDir: string | null = null;
 let _logDirOf = new WeakMap<object, string>();
 let _resetTimer: ReturnType<typeof setTimeout> | null = null;
-let _writeErrors = 0;
+/** Failed client.log writes, PER FILE — the logger's own accounting
+ *  (`noteWriteFailure`): the first few reported, then every Nth with the
+ *  count of lines lost, and a recovery line with the total. It was one
+ *  module-global counter that stopped after three reports for the life of the
+ *  process: a full disk took every renderer line after the third with nothing
+ *  said, and one app's broken directory muted every other app's reports too.
+ *  Only failing files are held; a write that lands deletes its entry. */
+const _writeLoss = new Map<string, WriteLossAccount>();
+const CLIENT_LOG_SINK: WriteLossSink = {
+  tag: "client-log",
+  what: "client.log writing",
+  say: (m) => log.error(m),
+};
 /** The `client.log` files this process has already tightened. One chmod per
  *  file per boot, not one per append. */
 const _modeFixed = new Set<string>();
@@ -205,7 +223,11 @@ function _append(line: string): void {
     mode: 0o600,
   })
     .then(() => {
-      _writeErrors = 0; // reset on success
+      const loss = _writeLoss.get(path);
+      if (loss) {
+        _writeLoss.delete(path);
+        noteWriteSuccess(loss, CLIENT_LOG_SINK);
+      }
       if (!_modeFixed.has(path)) {
         _modeFixed.add(path);
         if (Deno.build.os !== "windows") {
@@ -213,10 +235,11 @@ function _append(line: string): void {
         }
       }
     }).catch((e) => {
-      if (_writeErrors < 3) {
-        _writeErrors++;
-        log.error(`[client-log] write failed for ${path}: ${e}`);
+      let loss = _writeLoss.get(path);
+      if (!loss) {
+        _writeLoss.set(path, loss = { failures: 0, suppressed: 0, lost: 0 });
       }
+      noteWriteFailure(loss, CLIENT_LOG_SINK, path, 1, e);
     });
   // Callers stay fire-and-forget (losing the renderer's voice to an await
   // would be the worse trade), but the work is now REACHABLE — see
