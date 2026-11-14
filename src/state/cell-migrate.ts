@@ -469,6 +469,33 @@ export function applyCellMigrations(
       continue;
     }
     if (persisted < info.version) {
+      // A store that holds NO slice for this cell has nothing older to
+      // convert — the cell is new to this install (an upgrade that ADDS it),
+      // or none of it was ever stored. `cellState` is still truthy here: it is
+      // the merged state, i.e. the declared defaults. Running the hook over
+      // those converted data that never existed — `limits` added at v2 with
+      // `from < 2 → capCents *= 100` booted and persisted 50000 for the
+      // declared 500, stamped v2, so no later build could ever undo it.
+      // Stamp it current and say so, exactly as a first `version:` with no
+      // hook is stamped; a fresh install (no store at all) never gets here.
+      // Without a snapshot (the pure unit tests) nothing can be told apart.
+      const stored = storedSnapshot?.[cellId];
+      if (cellState && storedSnapshot && stored === undefined) {
+        log.info(
+          `migrate: stamping ${cellId} at version ${info.version} — the ` +
+            `store holds no slice for it (new to this install), so there is ` +
+            `no older shape to convert${
+              info.onMigrate ? "; onMigrate not run" : ""
+            }`,
+        );
+        report.push({
+          cell: cellId,
+          from: persisted,
+          to: info.version,
+          outcome: "stamped",
+        });
+        continue;
+      }
       if (cellState && info.onMigrate) {
         try {
           // What the hook is HANDED matters: the restore ran `deepMerge`
@@ -479,7 +506,6 @@ export function applyCellMigrations(
           // over was lost every time). The hook sees the declared shape PLUS
           // whatever the store still holds; declared fields keep the merged
           // (typed) value.
-          const stored = storedSnapshot?.[cellId];
           // A shaped cell stores its SHAPE, whose field types may differ from
           // the declaration (a record stored as a list): the merge kept the
           // declared `{}` there, so hand the stored value back — the data the
