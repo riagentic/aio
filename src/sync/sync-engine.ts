@@ -861,6 +861,23 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
    *  answered yes for fields nobody had touched. Sync state is JSON-shaped by
    *  contract (it crosses the wire), so a structural compare is both possible
    *  and cheap — and short-circuits on identity for the common case. */
+  /** Do two arrays hold the same members, in any order? Members compare
+   *  whole (two with one identity but other fields still differ). */
+  function _sameMembers(a: unknown, b: unknown): boolean {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+      return false;
+    }
+    const keyOf = (v: unknown): string => JSON.stringify(v) ?? String(v);
+    const count = new Map<string, number>();
+    for (const v of a) count.set(keyOf(v), (count.get(keyOf(v)) ?? 0) + 1);
+    for (const v of b) {
+      const k = keyOf(v), n = count.get(k) ?? 0;
+      if (n === 0) return false;
+      count.set(k, n - 1);
+    }
+    return true;
+  }
+
   function _sameValue(a: unknown, b: unknown): boolean {
     if (a === b) return true;
     // NaN is the one value unequal to itself; without this a NaN field read
@@ -1665,7 +1682,14 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
             // one. Say so, once, with what to change.
             viewOfServer ??= optimistic ??
               rebase(after, unconfirmed, deps.reducer).optimistic;
-            if (!_sameValue(m.value, viewOfServer[field])) {
+            // A set merge's order is its own (older side first), the
+            // rebase's is the server's: the same members in another order
+            // are not a loss — a correct `push` warned "this method replaces
+            // the whole value".
+            const sameMembers = (strategy === "set-add" ||
+              strategy === "set-remove") &&
+              _sameMembers(m.value, viewOfServer[field]);
+            if (!sameMembers && !_sameValue(m.value, viewOfServer[field])) {
               warnViewOnlyMerge(cell, field, strategy);
             }
             if (optimistic !== undefined) {
