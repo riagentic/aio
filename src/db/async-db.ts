@@ -15,6 +15,7 @@ import { capDelay } from "../state/timer-ceiling.ts";
 import {
   controlsTransaction,
   looksLikeWrite,
+  mask,
   statementVerb,
 } from "./sql-shape.ts";
 import { syncDir, syncFile } from "./durable.ts";
@@ -298,6 +299,26 @@ export function paramsRefusal(params: unknown, sql: string): string | null {
           ? "new Uint8Array(buffer)"
           : "JSON.stringify(value)"
       }).`;
+  }
+  // A PLAIN object is the named-parameter bag — but node:sqlite then binds
+  // the REST of the array positionally after it, so `[{}, 5]` for `(?, ?)`
+  // stored 5 in the first column and NULL in the second, `changes: 1`, no
+  // word. A real bag stands alone and has keys; anything else is a value
+  // that was meant for a `?`. (An empty bag on a statement with no
+  // parameter at all binds nothing and loses nothing — still allowed.)
+  if (
+    typeof first === "object" && first !== null && !ArrayBuffer.isView(first) &&
+    (params.length > 1 ||
+      (Object.keys(first).length === 0 && /[?:@$]/.test(mask(sql, true))))
+  ) {
+    return `db: parameter 1 is a plain object — in the first position it is ` +
+      `read as a bag of NAMED parameters (${
+        params.length > 1
+          ? `and the ${params.length - 1} value(s) after it shift into the ` +
+            `wrong \`?\``
+          : `with no keys, so every \`?\` would silently bind NULL`
+      })${at}. Store it as JSON.stringify(value), or pass named parameters ` +
+      `as the ONLY element: [{ name: value }].`;
   }
   return null;
 }
