@@ -1023,8 +1023,10 @@ the checkout's own am once — `cd <checkout> && deno task am upgrade .`
 spelling, still accepted; the two disagreeing is refused).
 
 `am create` pins the **newest release** by default;
-`am create app --aio-version=main` opts into the tip. The clone → build path is
-then:
+`am create app --aio-version=main` opts into the tip. Pinned to an OLDER
+release, the scaffold leaves out any `build.*` key that release does not know
+(it would fail the new app's `deno task lint`) and says which. The clone → build
+path is then:
 
 ```sh
 git clone <your-app> && cd <your-app>
@@ -1090,7 +1092,12 @@ cell state and which a state snapshot therefore doesn't contain.
 (`$AIO_APPS_DIR/<appId>`, else `~/.<appId>`) already exists — an earlier app
 with the same id — it says so, with that data's aio version and date from
 `meta.json`, because the first `deno task dev` boots on it. `--json` carries it
-as `existingData` (null when the home is fresh).
+as `existingData` (null when the home is fresh). A name whose appId is a
+reserved home (`kube_` → `~/.kube`, `ssh-`, `aio_`) is refused up front, as the
+bare name is. If git refuses the scaffold's first commit (`commit.gpgsign` with
+no signer, a rejecting `core.hooksPath` hook), create says so and names the
+`git commit` to run (`--json`: `git` is `commit failed: <git's words>`, plus a
+`gitWarning`); the files are staged, and every build is `-dirty` until then.
 
 ```sh
 am data                      # every path this app uses + sizes, by tier

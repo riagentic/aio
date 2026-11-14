@@ -41,6 +41,9 @@ import { type Template, TEMPLATES } from "./am-help-text.ts";
 import { agentsMdScaffold, CLAUDE_MD_SCAFFOLD } from "./am-agent-text.ts";
 import { DEFAULT_ELECTRON_VERSION } from "../build/electron-runtime.ts";
 import { PLATFORMS } from "../build/platforms.ts";
+import { androidApplicationId } from "../build/build-android.ts";
+import { slugify as buildSlug } from "../build/build-helpers.ts";
+import { buildKeysOf } from "./am-cmd-pin.ts";
 
 /** The scaffold's `electron` import spec — the framework's ONE Electron
  *  version, pinned EXACTLY.
@@ -1451,6 +1454,19 @@ export async function cmdCreate(
   {
     const reserved = reservedAppNameError(opts.name, "am create");
     if (reserved) fail(reserved, mode);
+    // …and the appId the name SLUGS to, which is what names `~/.<appId>`:
+    // `kube_`, `ssh-`, `config.` passed the raw check and slug to a reserved
+    // home that the scaffold's first boot (reservedAppHomeError) refused.
+    const appId = resolveAppId(opts.name);
+    const slugReserved = appId !== opts.name.toLowerCase()
+      ? reservedAppNameError(appId, "am create")
+      : null;
+    if (slugReserved) {
+      fail(
+        `'${opts.name}' becomes the appId "${appId}" — ${slugReserved}`,
+        mode,
+      );
+    }
   }
   if (!TEMPLATES.includes(opts.template)) {
     fail(
@@ -1601,6 +1617,14 @@ export async function cmdCreate(
     opts.target,
     opts.css,
   );
+  const adjusted = await adjustScaffoldConfig(
+    files,
+    opts.name,
+    opts.target,
+    aioPath,
+    pinnedVersion,
+  );
+  for (const note of adjusted) if (mode !== "json") sayErr(`⚠ ${note}`);
   await writeScaffold(dir, files, { aioPath, pinnedVersion });
 
   // Format what was just written, BEFORE the first commit.
@@ -1662,7 +1686,16 @@ export async function cmdCreate(
       /** Where `dep/aio` points (source mode), or null for JSR pins. */
       framework: aioPath ?? null,
       files: Object.keys(files),
+      /** What create changed in the template's deno.json to fit the pin and
+       *  the target (adjustScaffoldConfig) — one sentence each. */
+      adjusted,
       git,
+      /** Present only when the first commit failed: that it was not made,
+       *  why, and the command that makes it (`git` alone said "commit
+       *  failed: …" without the way out). */
+      ...(git.startsWith("commit failed: ")
+        ? { gitWarning: gitSentence(git) }
+        : {}),
       /** The home an earlier app with this appId left, or null. */
       existingData,
       /** What to run next, in order — the first run is the step an agent
@@ -1688,7 +1721,10 @@ export async function cmdCreate(
         dim(`— aio ${opts.template} app · target=${opts.target}`)
       }`,
       `    ${dim(dir)}`,
-      `    ${dim(gitSentence(git))}`,
+      // A commit that did not happen is a warning, not a dim aside.
+      git.startsWith("commit failed: ")
+        ? `  ${st.yellow("⚠")} ${gitSentence(git)}`
+        : `    ${dim(gitSentence(git))}`,
       `    ${
         dim(frameworkSentence(
           pinnedVersion,
@@ -1795,12 +1831,98 @@ export function priorAppDataLine(appId: string, prior: PriorAppData): string {
     `directory); start fresh with \`am backup\`, then remove that directory.`;
 }
 
+/** Fit the scaffold's `deno.json` to what will actually read it — in place,
+ *  returning one sentence per change (create prints each; never silent).
+ *
+ *  - `build.*` keys the PINNED framework does not know are dropped. The
+ *    templates are THIS am's, the framework is the pin's: `--aio-version=`
+ *    an older tag wrote `build.electronRuntime`, which that aiol rejects, so
+ *    the brand-new app's `deno task lint` was born red. Same key list `am
+ *    pin <older>` reads (buildKeysOf, from the pin's own config.ts); `am pin`
+ *    only warns because there the keys are the user's — here they are ours.
+ *  - An android app whose name starts with a digit gets an explicit
+ *    `android.applicationId`: the derived `app.aio.3dviewer` is not a valid
+ *    package name (a segment must start with a letter), so the scaffold's own
+ *    build and `dev:android` refused, after the long server build, for an
+ *    app nobody had edited. `a` + the same sanitized label is what
+ *    {@linkcode androidApplicationId} accepts. */
+export async function adjustScaffoldConfig(
+  files: Record<string, string>,
+  name: string,
+  target: Target,
+  aioPath: string | undefined,
+  pinnedVersion: string | undefined,
+): Promise<string[]> {
+  const raw = files["deno.json"];
+  if (raw === undefined) return [];
+  const cfg = JSON.parse(raw) as {
+    build?: Record<string, unknown>;
+    android?: Record<string, unknown>;
+  };
+  const notes: string[] = [];
+
+  if (aioPath !== undefined && cfg.build) {
+    let known: Set<string> | null = null;
+    try {
+      known = buildKeysOf(
+        await Deno.readTextFile(join(aioPath, "src", "server", "config.ts")),
+      );
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
+    const stray = known
+      ? Object.keys(cfg.build).filter((k) => !known.has(k))
+      : [];
+    for (const k of stray) delete cfg.build[k];
+    if (stray.length) {
+      notes.push(
+        `left out ${stray.map((k) => `build.${k}`).join(", ")} — ${
+          pinnedVersion ?? aioPath
+        } does not know ${
+          stray.length === 1 ? "it" : "them"
+        } (its \`deno task lint\` would fail on the new app). Add ${
+          stray.length === 1 ? "it" : "them"
+        } back after \`am pin\` to a version that has ${
+          stray.length === 1 ? "it" : "them"
+        }.`,
+      );
+    }
+  }
+
+  if (target === "android") {
+    const label = buildSlug(name);
+    if (
+      androidApplicationId(
+        label,
+        cfg.android?.applicationId as string | undefined,
+      ) === null
+    ) {
+      const id = `app.aio.a${label.replace(/[^a-z0-9]/g, "")}`;
+      if (androidApplicationId(label, id) !== null) {
+        cfg.android = { ...cfg.android, applicationId: id };
+        notes.push(
+          `"${name}" starts with a digit, which an Android package name ` +
+            `segment may not — wrote android.applicationId "${id}" to ` +
+            `deno.json. It is the app's permanent identity on Android ` +
+            `(the Play Store key): change it now if you want another.`,
+        );
+      }
+    }
+  }
+
+  if (notes.length) files["deno.json"] = JSON.stringify(cfg, null, 2) + "\n";
+  return notes;
+}
+
 /** What `am create` did about git — never a bare `false` with no reason. */
 export type GitInit =
   | "initialized"
   | `skipped: inside ${string}`
   | "skipped: git not found"
-  | "skipped: git init failed";
+  | "skipped: git init failed"
+  /** `git init` ran, the files are staged, but the first commit did NOT
+   *  happen — git's own stderr follows the colon. */
+  | `commit failed: ${string}`;
 
 /** The sentence the human report prints for each {@linkcode GitInit}. */
 export function gitSentence(git: GitInit): string {
@@ -1812,6 +1934,13 @@ export function gitSentence(git: GitInit): string {
   }
   if (git === "skipped: git not found") {
     return "no git init — git is not installed";
+  }
+  if (git.startsWith("commit failed: ")) {
+    const why = git.slice("commit failed: ".length).split("\n")
+      .map((l) => l.trim()).filter(Boolean).join("; ");
+    return `git initialized, but the first commit FAILED (git: ${why}) — ` +
+      `files are staged, not committed, so every build is "-dirty" until ` +
+      `you fix that and run: git commit -m "initial commit"`;
   }
   return "no git init — git init failed";
 }
@@ -1845,8 +1974,9 @@ async function tryGitInit(
       new Deno.Command("git", {
         args,
         cwd: dir,
-        stdout: "null",
-        stderr: "null",
+        // Piped, not null: a failed commit's stderr is the report's "why".
+        stdout: "piped",
+        stderr: "piped",
         stdin: "null",
         ...gitEnvFor(null),
       })
@@ -1867,7 +1997,12 @@ async function tryGitInit(
     // fresh laptop) used to fail this commit silently, leaving every file
     // untracked — and every build of the scaffold "-dirty". The app's first
     // commit is aio's; the developer's own identity takes over from there.
-    await run([
+    //
+    // Its STATUS is read: `commit.gpgsign` with no working signer, or a global
+    // `core.hooksPath` hook that rejects, left a repo with no commit (every
+    // build "-dirty") under a report that said "first commit made". git's own
+    // words are carried, so the report can say why and what to run.
+    const commit = await run([
       "-c",
       "user.name=aio",
       "-c",
@@ -1876,6 +2011,12 @@ async function tryGitInit(
       "-m",
       "initial commit — scaffolded with am",
     ]);
+    if (!commit.success) {
+      const why = new TextDecoder().decode(commit.stderr).trim() ||
+        new TextDecoder().decode(commit.stdout).trim() ||
+        `git commit exited ${commit.code}`;
+      return `commit failed: ${why}`;
+    }
     return "initialized";
   } catch {
     return "skipped: git not found";

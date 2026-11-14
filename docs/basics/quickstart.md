@@ -15,6 +15,11 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/riagentic/aio/main/install.ps1 | iex
 ```
 
+The installer writes the directory `am` landed in (`$DENO_INSTALL_ROOT/bin`,
+default `~/.deno/bin`) into your shell profile, then checks `am` from a clean
+login shell. If that check fails it says so and prints the exact `export PATH=…`
+line to add.
+
 Windows needs Git first (`winget install Git.Git`); stock PowerShell 5.1 is
 enough. These docs show POSIX shell lines —
 [aio on Windows and macOS](windows-macos.md) has their PowerShell spellings and

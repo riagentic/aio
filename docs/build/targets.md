@@ -192,7 +192,10 @@ dist/
   shipped APK; the build warns when the derived id differs from the last build's
   (`dist/manifest.json` records it as `applicationId`; a dev APK,
   `--android-dev-url`, is recorded as `dev: true` and never compared with a
-  release one).
+  release one). An id segment must start with a letter, so a name that starts
+  with a digit cannot derive one (`3d-viewer` → `app.aio.3dviewer` is refused):
+  `am create 3d-viewer --client=android` writes
+  `"android": { "applicationId": "app.aio.a3dviewer" }` and says so.
 - **`title`** — this target's display name: what a person sees — the macOS
   `.app` and DMG volume, the Linux `.desktop` `Name=`, the Windows README, the
   generated icon monogram, the Android label — overriding deno.json `title`.

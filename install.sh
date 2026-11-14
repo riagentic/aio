@@ -420,7 +420,40 @@ fi
 # next terminal has to work, so this writes the line itself — idempotently,
 # in a marked block, in every profile the shell might read.
 persist_path() {
-  _line='export PATH="$HOME/.deno/bin:$PATH"  # aio'
+  # The bin dirs a new shell needs: where `deno install -g` put `am` (AM_ROOT,
+  # i.e. DENO_INSTALL_ROOT) and, when it is elsewhere, the deno this installer
+  # used (DENO_INSTALL). The line was a constant `$HOME/.deno/bin`, so with
+  # DENO_INSTALL_ROOT set `am` landed in a dir no profile ever named — and the
+  # check below (then run with THIS process's PATH) still said it worked.
+  # Spelled `$HOME/…` when under HOME (the line every earlier install wrote),
+  # else the absolute path, escaped for the double quotes it sits in.
+  _home_bin="$HOME/.deno/bin"
+  _dirs="${AM_ROOT:-$HOME/.deno}/bin"
+  if [ "${DENO_INSTALL:-$HOME/.deno}/bin" != "$_dirs" ]; then
+    _dirs="$_dirs
+${DENO_INSTALL:-$HOME/.deno}/bin"
+  fi
+  _spell() { # _spell <dir> — the dir as a profile line writes it
+    case "$1" in
+      "$HOME"/*) printf '$HOME/%s' "$(printf '%s' "${1#"$HOME"/}" | sed 's/[\\"$`]/\\&/g')" ;;
+      *) printf '%s' "$1" | sed 's/[\\"$`]/\\&/g' ;;
+    esac
+  }
+  _mentions() { # _mentions <rc> <dir> — the rc already puts <dir> on PATH
+    [ -f "$1" ] || return 1
+    # `.deno/bin` anywhere, as before, for the default dir (a hand-written
+    # `~/.deno/bin` line counts); the exact spelling or path for any other.
+    if [ "$2" = "$_home_bin" ]; then grep -qF '.deno/bin' "$1" 2>/dev/null; return; fi
+    grep -qF "$(_spell "$2")" "$1" 2>/dev/null || grep -qF "$2" "$1" 2>/dev/null
+  }
+  _lineof() { # _lineof <dirs…newline-separated> — the PATH line for them
+    _l=""
+    _ifs=$IFS; IFS='
+'
+    for _d in $1; do _l="$_l$(_spell "$_d"):"; done
+    IFS=$_ifs
+    printf 'export PATH="%s$PATH"  # aio' "$_l"
+  }
 
   # Which files get CREATED depends on the shell that will actually be opened
   # next, not on what happens to exist. This is where macOS was broken:
@@ -462,11 +495,23 @@ persist_path() {
   IFS=$_nl
   # noglob, so a `$HOME` containing `*`/`?`/`[` stays one literal path.
   case $- in *f*) _noglob=0 ;; *) _noglob=1; set -f ;; esac
+  # The WHOLE line, for the message a failed check prints.
+  PERSIST_LINE=$(_lineof "$_dirs")
   for rc in $_targets; do
+    _missing=""
+    for _d in $_dirs; do
+      if ! _mentions "$rc" "$_d"; then _missing="$_missing$_d$_nl"; fi
+    done
+    [ -n "$_missing" ] || continue
     IFS=$_oldifs
-    if [ -f "$rc" ] && grep -qF '.deno/bin' "$rc" 2>/dev/null; then continue; fi
-    printf '\n%s\n' "$_line" >> "$rc" 2>/dev/null || :
-    _persisted="${_persisted:-}$rc "
+    # Recorded as persisted only when the append WORKED: a read-only or
+    # root-owned profile used to be listed as "added PATH to" all the same.
+    if printf '\n%s\n' "$(_lineof "$_missing")" >> "$rc" 2>/dev/null; then
+      _persisted="${_persisted:-}$rc "
+    else
+      _persist_failed="${_persist_failed:-}$rc "
+    fi
+    IFS=$_nl
   done
   IFS=$_oldifs
   if [ "$_noglob" = 1 ]; then set +f; fi
@@ -505,22 +550,40 @@ fi
 # caught "works in the installer, missing in the terminal".
 # …and in the user's OWN login shell, which on macOS is zsh and does not read
 # the file `sh -lc` just proved. Both are checked when both exist.
+# A CLEAN environment, as a new terminal starts: `env -i` with HOME and the
+# system PATH only. The login shell used to inherit THIS process's PATH — which
+# this script had just extended with $AM_ROOT/bin — so on any system whose
+# /etc/profile does not reset PATH the check passed whatever the profiles said
+# (measured: DENO_INSTALL_ROOT set, ~/.profile naming only ~/.deno/bin, "am
+# works in a new shell too", and no am in the next terminal). DENO_DIR is the
+# one variable carried: it is where am's modules are cached, not how it is found.
+# The shell by absolute path: zsh may live outside /usr/bin:/bin (Homebrew).
+in_new_shell() { # in_new_shell <path-to-sh|zsh> — the am check, as a new login shell
+  if [ -n "${DENO_DIR:-}" ]; then
+    env -i HOME="$HOME" PATH=/usr/bin:/bin DENO_DIR="$DENO_DIR" "$1" -lc \
+      'command -v am >/dev/null 2>&1 && am version >/dev/null 2>&1' 2>/dev/null
+  else
+    env -i HOME="$HOME" PATH=/usr/bin:/bin "$1" -lc \
+      'command -v am >/dev/null 2>&1 && am version >/dev/null 2>&1' 2>/dev/null
+  fi
+}
 _newshell_ok=1
-sh -lc 'command -v am >/dev/null 2>&1 && am version >/dev/null 2>&1' 2>/dev/null \
-  || _newshell_ok=0
+in_new_shell "$(command -v sh)" || _newshell_ok=0
 case "${SHELL:-}" in
   *zsh)
     if command -v zsh >/dev/null 2>&1; then
-      zsh -lc 'command -v am >/dev/null 2>&1 && am version >/dev/null 2>&1' \
-        2>/dev/null || _newshell_ok=0
+      in_new_shell "$(command -v zsh)" || _newshell_ok=0
     fi
     ;;
 esac
 if [ "$_newshell_ok" = 1 ]; then
   ok "am works in a new shell too"
 else
-  warn "am works now, but a NEW terminal may not find it${_persisted:+ (added PATH to: ${_persisted})}"
-  printf "${bold}  This shell:${reset} export PATH=\"\$HOME/.deno/bin:\$PATH\"\n"
+  # Said, with the exact line: the next terminal is where this would surface,
+  # as "am: command not found", far from the install that caused it.
+  warn "am works in THIS shell, but a NEW terminal does not find it${_persisted:+ (PATH line added to: ${_persisted})}${_persist_failed:+ (could NOT write: ${_persist_failed})}"
+  printf "${bold}  Add this line to your shell profile${reset} (~/.profile, ~/.zprofile or ~/.bashrc — whichever your terminal reads):\n"
+  printf "    %s\n" "$PERSIST_LINE"
 fi
 
 printf "\n${bold}Next:${reset}\n"
