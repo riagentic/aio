@@ -693,7 +693,7 @@ let _modalKeyHandler: ((e: KeyboardEvent) => void) | null = null;
 const FOCUSABLE = "a[href],area[href],button:not([disabled])," +
   'input:not([disabled]):not([type="hidden"]),select:not([disabled]),' +
   'textarea:not([disabled]),iframe,[contenteditable=""],' +
-  '[contenteditable="true"],[tabindex]';
+  '[contenteditable="true"],[tabindex]:not([disabled])';
 
 function focusablesIn(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
@@ -960,7 +960,12 @@ export function Modal(props: ModalProps): VNode | null {
             ) {
               return;
             }
-            (focusablesIn(el)[0] ?? el).focus();
+            // The FIRST tab stop, as Tab would enter it: a radio group's
+            // checked radio, not its first one (which Space would then
+            // silently select).
+            const els = focusablesIn(el);
+            (els.length ? stopOf(stopGroup(els, els[0]!), false) : el)
+              .focus();
           });
         },
       },
@@ -1116,8 +1121,10 @@ export function Pagination(props: PaginationProps): VNode {
   const near = Number.isFinite(page) ? Math.round(page) : 1;
   const prev = clamp(near - 1);
   const next = clamp(near + 1);
+  // No pages (an empty result): there is nowhere to go — page 1 does not
+  // exist, and both arrows fired onPage(1).
   const go = (p: number) => {
-    if (p !== page) onPage(p);
+    if (last > 0 && p !== page) onPage(p);
   };
   // Every pager button carries an accessible name. "‹" and "›" are pure
   // punctuation: a screen reader announces nothing, and the semantic surface
@@ -1150,11 +1157,17 @@ export function Pagination(props: PaginationProps): VNode {
       // passed was silently replaced by "Pagination". (`??` — see Spinner.)
       "aria-label": props["aria-label"] ?? "Pagination",
     },
-    btn("‹", prev, { disabled: prev === page, aria: "Previous page" }),
+    btn("‹", prev, {
+      disabled: last === 0 || prev === page,
+      aria: "Previous page",
+    }),
     ...pageWindow(clamp(near), last, win).map((p) =>
       btn(String(p), p, { current: p === page, aria: `Page ${p}` })
     ),
-    btn("›", next, { disabled: next === page, aria: "Next page" }),
+    btn("›", next, {
+      disabled: last === 0 || next === page,
+      aria: "Next page",
+    }),
   );
 }
 

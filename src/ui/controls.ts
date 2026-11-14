@@ -341,7 +341,9 @@ export function Tabs(props: TabsProps): VNode {
   // The tab in the page's tab order. A CONTROLLED `value` naming no tab (its
   // tab was removed, or the app's state is stale) left every tab at -1, so Tab
   // skipped the whole list — the trap the uncontrolled branch above closes.
-  const tabStop = activeTab ? active : firstEnabled;
+  // A DISABLED active tab cannot take focus (HTML), so it cannot be the
+  // list's one tab stop: every other tab was -1 and Tab skipped the list.
+  const tabStop = activeTab && !activeTab.disabled ? active : firstEnabled;
   return h(
     "div",
     {
