@@ -238,8 +238,10 @@ function precheckTestRoot(full: boolean): void {
     `of them fail there on a correct tree. Point the suite at a folder on ` +
     `ext4, btrfs, xfs or tmpfs that only you can write, with a SHORT path ` +
     `(the tests bind Unix sockets inside it, ~108 bytes at most) and not ` +
-    `under /tmp (the build tests refuse a shared /tmp) — e.g. ` +
-    `mkdir -m 700 /dev/shm/aiot && AIO_TEST_ROOT=/dev/shm/aiot deno task test`;
+    `under /tmp (the build tests refuse a shared /tmp) or /dev (deno asks ` +
+    `--allow-all for any path there) — e.g. on Linux ` +
+    `mkdir -m 700 /run/user/$(id -u)/aiot && ` +
+    `AIO_TEST_ROOT=/run/user/$(id -u)/aiot deno task test`;
   if (!full) {
     console.warn(`${text}\n  (a named run goes ahead)`);
     return;
