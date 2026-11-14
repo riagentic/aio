@@ -180,6 +180,20 @@ or is small and known.
       hardware)`. Record them, or leave them named as
       unproven in docs/basics/support.md — the stable does not claim them.
 
+- [x] Bug-hunt rounds 1–6 (2026-11-13/14, branch `final-prep`): 54 real bugs
+      across state, sync, db, SSR/hydration, kit, harness, build cache, updater,
+      PWA/service worker, desktop, discovery, auth, diagnostics, config, am/aiol
+      and onboarding — each fixed with a test that failed before (CHANGELOG
+      "Unreleased"). Areas that came back clean: the 1.0.27 boot split,
+      HTTP/WS/auth transport, visible/access/forUser filtering. Left as decided
+      (low value, behaviour change): compat `useEffect` update ORDER
+      (parent-first, React runs child cleanups first).
+- [ ] The mutation-ledger entry "testPageFetch drops the cookie the server
+      sets…" (scripts/mutations/ledger-1.ts ~7442) still names the jar line the
+      cookie-jar rewrite replaced; its new form is
+      `} else jar.set(key, { name, value, path, expires });` (owner's OK pending
+      — see the 2026-11-14 session).
+
 ### Owner decides (each has a recommendation)
 
 - [x] A refused kit Checkbox/Switch/Input keeps the user's pick (memo-skipped;

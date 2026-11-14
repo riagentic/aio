@@ -1,5 +1,81 @@
 # Changelog
 
+## Unreleased — toward 1.0.28, the stable that closes the beta line
+
+> Fixes and platform upkeep only; the public surface is unchanged (`check:api`).
+> aio moves to maintenance after this release — see
+> [support & maintenance](docs/basics/support.md). A few fixes make a silent
+> wrong answer loud (a warning or a refusal); each is named below.
+
+### Platform
+
+- **Android targets API 36** (Google Play's floor for updates since 2026-08-31)
+  on AGP 8.13.2; Back goes through an `OnBackPressedCallback`. An app's own
+  `MainActivity.kt` that still overrides `onBackPressed` is opted out of
+  predictive back and warned.
+- Electron 44.9.3 → 44.11.1. CI also runs weekly.
+
+### Data and state
+
+- Standalone (APK, PWA, harnesses): a peer cell's getter or selector read in the
+  same dispatch drain answers the store, as on the server.
+- Tabs of a standalone web app adopt each other's saves; an overwrite is never
+  silent, and an older build will not write over a newer one.
+- `onMigrate` no longer runs over the defaults of a cell new to an existing
+  install; a non-integer cell `version` is warned.
+- The text merge no longer splices two sides' edits when one added a line break.
+  Client sync: no false `onConflict` for the user's own queued edits, no false
+  rejection for an op another tab handled.
+- `aio/db`: live queries refresh at an app-opened `COMMIT`/`ROLLBACK`; a plain
+  object first among positional params is refused instead of shifting columns.
+- A cell method call keeps its place in line ahead of a later `serverFn` call or
+  core `send`, live and on offline replay.
+- Static `<cell>:x` schedules survive a disable + enable; `app.close()` waits
+  for async `own` disposers (server, standalone and worker cells).
+
+### UI and SSR
+
+- SSR escapes `<`/`>` in attribute values (XSS inside `<noscript>`); hydration
+  keeps the server page around a `<noscript>`; an SSR page's `useHead` title is
+  released on navigation.
+- React-compat: a no-deps `useEffect` runs after the commit; the `useState`
+  setter is stable. `TransitionGroup` FLIP survives two reorders in a frame.
+- Kit: Modal traps Tab by tab stop; Field rewires a passed-through control.
+
+### Build, updates, desktop, web
+
+- A cached bundle re-applies the server-only gate and names the framework that
+  built it.
+- Updates: no re-offer loop for a binary reporting another version (the applier
+  and `ship` refuse the mismatch); a schema bump takes a backup.
+- PWA: offline navigation never gets a redirected response; an open tab keeps
+  its own build's files across a deploy (worker bundles named by content).
+- The Electron profile move takes only an aio window's profile (an app titled
+  "Git" no longer moves `~/.config/git`).
+- Discovery: a loopback-bound exposed app is not advertised; the Electron client
+  ignores a malformed LAN reply; the CLI client masks the share-link token in
+  its refusals.
+
+### Tools and diagnostics
+
+- The crash handler's line reaches `app.log` before the process dies;
+  `client.log` write loss is counted and its recovery said.
+- Typo'd keys and bad numbers in `circuitBreaker`, `dispatchStorm`, `budgets`,
+  `perfBudget`, `renderBudget` are warned at boot.
+- `am create`: a failed first commit is reported, a reserved slug refused, an
+  older pin and a digit-leading Android name fitted. `install.sh` verifies a new
+  shell honestly. `am pin` replaces the pin wherever it stands.
+  `aiol
+  --safe-fix` rewrites only the app's own argv and only property keys.
+- An auth reset refused for its password keeps the reset token.
+- `aio/cli`: wide emoji measure 2 cells, a table row stays one line, a throwing
+  `watch()` frame restores the terminal; `updates.dismiss()` is refused
+  mid-install; `feedback.dismiss()` clears the error.
+- Test harness, stricter: `testCell` restores the methods it rebinds; a click
+  through `pointer-events: none` is refused; `testPageFetch` keeps cookies like
+  a browser; `present()`/`absent()` honour CSS-hidden components. The suite
+  runner installs `node_modules` and names a test root it cannot measure.
+
 ## v1.0.27-beta — the boot split into one module per phase, and a CI workflow that runs the suite (2026-10-30)
 
 > **Nothing is removed, renamed or changed in behaviour.** No app needs an edit;
