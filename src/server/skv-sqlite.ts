@@ -99,6 +99,13 @@ export function sqliteKv(db: DB): SkvInstance {
   };
 }
 
+/** The aio_kv row a FAILED legacy migration leaves: "restart to retry" has
+ *  to mean it — the same boot then writes aio_kv rows of its own (the
+ *  store-generation record, the first snapshot), and "any row means
+ *  migrated" skipped every retry in silence. Removed by the migration that
+ *  succeeds. @internal */
+export const LEGACY_KV_OWED = "aio:__legacy-kv-migration-owed"; // ":__": framework-parked, never read as a state document (stored-state.ts)
+
 /** One-time migration: copy a legacy Deno.Kv store into aio_kv. Best-effort,
  *  loud on success; the old file is left in place (never delete user data). */
 export async function migrateLegacyKv(
@@ -106,11 +113,17 @@ export async function migrateLegacyKv(
   kvPath: string | undefined,
   log: { info: (m: string) => void; warn: (m: string) => void },
 ): Promise<void> {
-  // Only migrate once — if aio_kv has rows, migration already happened.
+  // Only migrate once — if aio_kv has rows, migration already happened…
+  // unless a failed one is still owed (LEGACY_KV_OWED).
   const { rows } = await db.query<{ n: number }>(
     `SELECT COUNT(*) AS n FROM aio_kv`,
   );
-  if ((rows[0]?.n ?? 0) > 0) return;
+  const { rows: owed } = await db.query<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM aio_kv WHERE k = ?`,
+    [LEGACY_KV_OWED],
+  );
+  const retry = (owed[0]?.n ?? 0) > 0;
+  if ((rows[0]?.n ?? 0) > 0 && !retry) return;
   // Feature-detect: new apps don't carry the unstable-kv flag, so openKv may
   // not exist — then there's nothing legacy to migrate.
   // deno-lint-ignore no-explicit-any
@@ -147,8 +160,18 @@ export async function migrateLegacyKv(
       });
       copied++;
     }
-    if (copied > 0) {
+    // A retry: the rows the app wrote since keep their newer values (INSERT
+    // OR IGNORE), and the owed record goes in the same transaction.
+    if (retry) {
+      stmts.push({
+        sql: `DELETE FROM aio_kv WHERE k = ?`,
+        params: [LEGACY_KV_OWED],
+      });
+    }
+    if (copied > 0 || retry) {
       await db.transaction(stmts);
+    }
+    if (copied > 0) {
       log.info(
         `persist: migrated ${copied} entr${
           copied === 1 ? "y" : "ies"
@@ -168,6 +191,16 @@ export async function migrateLegacyKv(
           }. The old store was left untouched; the app starts from the ` +
           `SQLite snapshot only. Fix the file's permissions and restart to ` +
           `retry the migration.`,
+      );
+      // …and make that restart retry it (see LEGACY_KV_OWED).
+      await db.execute(
+        `INSERT OR IGNORE INTO aio_kv (k, v) VALUES (?, ?)`,
+        [LEGACY_KV_OWED, "true"],
+      ).catch((w) =>
+        log.warn(
+          `persist: could not record that the legacy migration is owed — ` +
+            `a restart will not retry it (${w})`,
+        )
       );
     }
   } finally {

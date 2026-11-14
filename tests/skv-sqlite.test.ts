@@ -174,3 +174,48 @@ Deno.test("migrateLegacyKv: idempotent + silent when no legacy store", async () 
     "no false migration claims",
   );
 });
+
+// "Fix the file's permissions and restart to retry the migration" has to
+// mean it: the boot that warned went on to write aio_kv rows of its own (the
+// store-generation record, the first snapshot), and "any row means
+// migrated" skipped every retry in silence — the legacy data never arrived.
+Deno.test("migrateLegacyKv: a migration that failed is retried by the next boot, even after other rows were written", async () => {
+  const d = Deno as unknown as { openKv?: unknown };
+  const real = d.openKv;
+  const dir = await tempDir("skv-retry-");
+  const path = `${dir}/data.kv`;
+  await Deno.writeTextFile(path, "");
+  const db = testDb();
+  try {
+    const warns: string[] = [];
+    const log = { info: () => {}, warn: (m: string) => void warns.push(m) };
+    // Boot 1: the legacy store exists but cannot be opened.
+    d.openKv = () => Promise.reject(new Deno.errors.PermissionDenied("denied"));
+    await migrateLegacyKv(db, path, log);
+    assertEquals(warns.length, 1, JSON.stringify(warns));
+    // …and that boot writes a row of its own.
+    await db.execute(`INSERT INTO aio_kv (k, v) VALUES (?, ?)`, [
+      "app:gen",
+      "1",
+    ]);
+    // Boot 2: the store opens now.
+    d.openKv = () =>
+      Promise.resolve({
+        async *list() {
+          yield { key: ["app:notes"], value: { n: 7 } };
+        },
+        close() {},
+      });
+    await migrateLegacyKv(db, path, log);
+    const { rows } = await db.query<{ k: string; v: string }>(
+      `SELECT k, v FROM aio_kv ORDER BY k`,
+    );
+    assertEquals(rows.map((r) => [r.k, r.v]), [
+      ["app:gen", "1"],
+      ["app:notes", '{"n":7}'],
+    ]);
+  } finally {
+    d.openKv = real;
+    await dropTempDir(dir);
+  }
+});
