@@ -911,12 +911,14 @@ export function _connectCli<S>(
     inClose = false,
   ): void {
     const cid = (action as { cid?: string }).cid;
-    if (cid) return void _pending.reject(cid, offlineRefusal(url));
-    if (!inClose) throw offlineRefusal(url);
+    if (cid) {
+      return void _pending.reject(cid, offlineRefusal(redactUrlToken(url)));
+    }
+    if (!inClose) throw offlineRefusal(redactUrlToken(url));
     log.warn(
       "cli",
       `"${action.type}" (sent without awaiting) dropped — ${
-        offlineRefusal(url).message
+        offlineRefusal(redactUrlToken(url)).message
       }`,
     );
   }
@@ -999,7 +1001,12 @@ export function _connectCli<S>(
   let _readyAbandon: (() => void) | null = null;
   let _readyRefuse: ((e: Error) => void) | null = null;
   const ready = new Promise<S>((r, j) => {
-    const d = _readyDeadline<S>(url, opts?.readyTimeoutMs, r, j);
+    const d = _readyDeadline<S>(
+      redactUrlToken(url), // a share link carries its key
+      opts?.readyTimeoutMs,
+      r,
+      j,
+    );
     _readyResolve = d.settle;
     _readyAbandon = d.abandon;
     _readyRefuse = d.refuse;
@@ -1677,7 +1684,9 @@ export function _connectCli<S>(
     onChunk?: (value: unknown) => void,
   ): Promise<unknown> => {
     if (closed) return Promise.reject(closedRefusal(action.type));
-    if (_failOffline && !_isUp()) return Promise.reject(offlineRefusal(url));
+    if (_failOffline && !_isUp()) {
+      return Promise.reject(offlineRefusal(redactUrlToken(url)));
+    }
     const cid = crypto.randomUUID();
     // deferTimer: the clock belongs to the FRAME, not to the call. The
     // pacer arms it when the frame actually leaves (now, a moment later
