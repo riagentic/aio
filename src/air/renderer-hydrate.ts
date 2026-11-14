@@ -633,7 +633,24 @@ function _hydrateNodeInner(
   const nowSvg = childSvgMode(tagName, isSvg || SVG_TAGS.has(tagName));
   // Raw html owns the content (see _hasRawHtml): the server emitted the html
   // and no children, so there are no children to claim inside it.
-  if (!_hasRawHtml(vnode.props)) {
+  if (tagName === "noscript" && !_hasRawHtml(vnode.props)) {
+    // A browser running this code parses `<noscript>` content as RAW TEXT:
+    // the server's `<p>…</p>` is one text node there, never the elements the
+    // vnodes describe. Claiming children met that text, reported a mismatch
+    // and threw the WHOLE server page away (input typed before the bundle
+    // loaded with it). The content is inert while scripting runs, so there is
+    // nothing to keep: the noscript itself is claimed (its later siblings stay
+    // in step) and its children are built as mount builds them, so every
+    // child vnode owns a node for the next diff. Structural, so undoable.
+    const old = Array.from(el.childNodes);
+    const built: Node[] = [];
+    for (const child of vnode.children) {
+      const d = createDom(child, ctx, nowSvg, el);
+      if (d) built.push(d);
+    }
+    el.replaceChildren(...built);
+    _undoable(() => el.replaceChildren(...old));
+  } else if (!_hasRawHtml(vnode.props)) {
     let childIdx = 0;
     for (let i = 0; i < vnode.children.length; i++) {
       const consumed = _hydrateNode(
