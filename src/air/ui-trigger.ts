@@ -162,6 +162,49 @@ export function hiddenReason(el: AnyEl): string | null {
   return null;
 }
 
+/** Why the MOUSE cannot reach `el` — it is `pointer-events: none` — or null.
+ *
+ *  A browser's click on such an element lands on whatever is beneath it and
+ *  the element's own handlers never run (a common "disabled look" for a
+ *  div-button). The property INHERITS and a descendant may set it back
+ *  (`auto`, `visiblePainted`, …), so — like `visibility` — the nearest value
+ *  decides. A real engine's computed value already carries the inherited one;
+ *  happy-dom computes only what was specified on the node itself, so the walk
+ *  takes the first node that has a value. Climbing on through a run of `none`
+ *  names the ancestor that most plausibly set it. The keyboard is unaffected:
+ *  Tab + Enter still activate the element, so only pointer gestures check. */
+export function pointerEventsNoneReason(el: AnyEl): string | null {
+  if (el?.nodeType !== 1) return null;
+  const w = view(el);
+  const read = (n: AnyEl): string => {
+    let v = "";
+    try {
+      if (typeof w.getComputedStyle === "function") {
+        v = String(w.getComputedStyle(n)?.pointerEvents ?? "");
+      }
+    } catch { /* aio-ok: no computed style — the inline value below decides */ }
+    return v || String(n.style?.pointerEvents ?? "");
+  };
+  let node: AnyEl = el;
+  let setter: AnyEl = null;
+  for (let depth = 0; node && node.nodeType === 1 && depth < 200; depth++) {
+    const v = read(node);
+    if (v === "none") setter = node;
+    else if (v !== "" || setter) break;
+    node = node.parentElement;
+  }
+  if (!setter) return null;
+  return setter === el
+    ? "it has `pointer-events: none`"
+    : `\`pointer-events: none\` on the enclosing ` +
+      `<${String(setter.tagName).toLowerCase()}>, which it inherits`;
+}
+
+/** The gestures made with the mouse — refused on a `pointer-events: none`
+ *  element. Keyboard verbs (press, type, focus, …) are not: the keyboard
+ *  reaches it. */
+const POINTER_VERBS = new Set(["click", "dblclick", "drag", "drop onto"]);
+
 /** Does author CSS give a `[hidden]` element a `display` (which beats the UA
  *  `[hidden] { display: none }`)? A real engine already applied that rule, so a
  *  computed value other than `none` IS the author's. happy-dom never applies
@@ -216,6 +259,8 @@ export function assertOperable(
     text?: boolean;
     name?: string;
     prefix?: string;
+    /** A mouse gesture — defaults from `verb` (see `POINTER_VERBS`). */
+    pointer?: boolean;
   } = {},
 ): void {
   const tag = String(el?.tagName ?? "element").toLowerCase();
@@ -262,6 +307,20 @@ export function assertOperable(
         `  a browser delivers no event to it; show it first, or assert on the ` +
         `state that hides it`,
     );
+  }
+  // The mouse cannot reach a `pointer-events: none` element: a browser sends
+  // the click to whatever is beneath, and the harness used to run the
+  // element's own onClick — a dead button passed its test.
+  if (opts.pointer ?? POINTER_VERBS.has(verb)) {
+    const untargetable = pointerEventsNoneReason(el);
+    if (untargetable) {
+      throw new Error(
+        `${p}cannot ${verb} ${who} — the mouse cannot reach the ${tag}: ` +
+          `${untargetable}\n  a browser sends the event to whatever is ` +
+          `beneath it; remove \`pointer-events: none\` first, or assert on ` +
+          `the state that sets it (the keyboard still reaches it: ${how}press)`,
+      );
+    }
   }
   // Keystrokes need something that HOLDS them. Typing into a <div> used to
   // write a `value` expando onto the node — a property no browser has, that
@@ -1617,6 +1676,17 @@ export function triggerAction(
           `cannot hover <${tag}> — it is not visible: ${invisible}\n` +
             `  a browser delivers no event to it; show it first, or assert ` +
             `on the state that hides it`,
+        );
+      }
+      // …nor on one the mouse passes through (`pointer-events: none`).
+      const untargetable = pointerEventsNoneReason(el);
+      if (untargetable) {
+        const tag = String(el?.tagName ?? "element").toLowerCase();
+        throw new Error(
+          `cannot hover <${tag}> — the mouse cannot reach it: ` +
+            `${untargetable}\n  a browser sends the event to whatever is ` +
+            `beneath it; remove \`pointer-events: none\` first, or assert on ` +
+            `the state that sets it`,
         );
       }
       // Chromium's order: pointerover, pointerenter, mouseover, mouseenter,

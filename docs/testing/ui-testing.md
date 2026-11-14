@@ -109,6 +109,11 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   - clicking, typing or dragging something the user cannot see —
     `display: none`, `visibility: hidden`, the `hidden` attribute, on the
     element or on any ancestor, and `<input type="hidden">`;
+  - clicking, double-clicking, hovering or dragging (from or onto) something the
+    mouse passes through — `pointer-events: none` on it or inherited from an
+    ancestor (a descendant that sets `pointer-events: auto` is reachable). A
+    browser sends that click to whatever is beneath; the keyboard still reaches
+    the element, so `press()`/`focus()` work;
   - typing into anything that is not an `<input>`/`<textarea>` (a `<div>` has no
     value; `contenteditable` is not driven), or past its `maxLength`;
   - pressing a key no keyboard sends — `press("hyper+k")`, `press("")`,
@@ -441,7 +446,10 @@ is logged naming it.
 or a form of your own on `authClient` — the form needs a server to sign in to.
 `testPageFetch(srv)` makes this process's `fetch` one browser page's on a
 `testServer`: a relative URL reaches that server, and the cookies it sets are
-kept and sent back to it (to no other origin).
+kept and sent back to it (to no other origin) as a browser's jar does —
+redirects are followed hop by hop with each hop's `Set-Cookie` kept, a cookie
+goes only where its `Path` matches, and `Max-Age<=0` or a past `Expires` deletes
+it.
 
 ```tsx
 import { testPageFetch, testServer, testUI } from "aio/testing";

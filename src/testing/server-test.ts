@@ -76,36 +76,174 @@ export interface TestPageFetch extends Disposable {
  *  {@linkcode TestPageFetch}. */
 export function testPageFetch(server: { url: string }): TestPageFetch {
   const origin = new URL(server.url).origin;
+  // The jar a browser keeps for this origin: keyed by name AND path (two
+  // cookies of one name on different paths are two cookies), each sent only
+  // where its path matches. `cookies` is the by-name view the API promised.
+  type Jar = { name: string; value: string; path: string; expires?: number };
+  const jar = new Map<string, Jar>();
   const cookies = new Map<string, string>();
+  const live = () => {
+    const now = Date.now();
+    for (const [k, c] of jar) {
+      if (c.expires !== undefined && c.expires <= now) jar.delete(k);
+    }
+    return [...jar.values()];
+  };
+  const syncView = () => {
+    cookies.clear();
+    for (const c of live()) cookies.set(c.name, c.value);
+  };
+  const store = (line: string, reqPath: string) => {
+    const [pair, ...attrs] = line.split(";");
+    const eq = pair!.indexOf("=");
+    if (eq < 0) return;
+    const name = pair!.slice(0, eq).trim(), value = pair!.slice(eq + 1).trim();
+    let path: string | undefined, maxAge: number | undefined;
+    let expires: number | undefined;
+    for (const a of attrs) {
+      const i = a.indexOf("=");
+      const k = (i < 0 ? a : a.slice(0, i)).trim().toLowerCase();
+      const v = i < 0 ? "" : a.slice(i + 1).trim();
+      if (k === "path") path = v.startsWith("/") ? v : undefined;
+      else if (k === "max-age" && /^-?\d+$/.test(v)) maxAge = Number(v);
+      else if (k === "expires" && !Number.isNaN(Date.parse(v))) {
+        expires = Date.parse(v);
+      }
+    }
+    // RFC 6265 §5.1.4 default-path: the request path up to its last "/".
+    path ??= reqPath.lastIndexOf("/") > 0
+      ? reqPath.slice(0, reqPath.lastIndexOf("/"))
+      : "/";
+    // Max-Age wins over Expires (§5.3 step 3); <= 0 or a past date deletes.
+    if (maxAge !== undefined) expires = Date.now() + maxAge * 1000;
+    const key = `${name}\0${path}`;
+    // Cleared as a browser clears it: no time left to live. (An empty value
+    // with no expiry is kept by a browser; here it clears, as it always has.)
+    if (value === "" || (expires !== undefined && expires <= Date.now())) {
+      jar.delete(key);
+    } else jar.set(key, { name, value, path, expires });
+  };
+  // §5.1.4 path-match: equal, or a prefix ending at a "/" boundary.
+  const pathMatch = (req: string, cookie: string) =>
+    req === cookie ||
+    (req.startsWith(cookie) &&
+      (cookie.endsWith("/") || req[cookie.length] === "/"));
+  const cookieFor = (reqPath: string) =>
+    live()
+      .filter((c) => pathMatch(reqPath, c.path))
+      // §5.4: longer paths first.
+      .sort((a, b) => b.path.length - a.path.length)
+      .map((c) => `${c.name}=${c.value}`)
+      .join("; ");
   const real = globalThis.fetch;
+  const MAX_HOPS = 20;
   const page = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" && !URL.canParse(input)
       ? new URL(input, origin)
       : input;
-    const target = new URL(url instanceof Request ? url.url : url);
+    let target = new URL(url instanceof Request ? url.url : url);
     // A cookie is this origin's: a request anywhere else carries none, and
     // an answer from anywhere else sets none.
     if (target.origin !== origin) return await real(url, init);
     const headers = new Headers(
       init?.headers ?? (url instanceof Request ? url.headers : undefined),
     );
-    if (cookies.size > 0 && !headers.has("cookie")) {
-      headers.set(
-        "cookie",
-        [...cookies].map(([k, v]) => `${k}=${v}`).join("; "),
-      );
+    const ownCookie = headers.get("cookie");
+    const mode = init?.redirect ??
+      (url instanceof Request ? url.redirect : "follow");
+    // Redirects are followed HERE, hop by hop, as a browser does: each hop's
+    // Set-Cookie is stored before the next hop is sent, and each hop carries
+    // the cookies ITS path matches. `real` following them internally lost a
+    // `303 + Set-Cookie: session=…` login and sent the stale jar onward.
+    let method = (init?.method ??
+      (url instanceof Request ? url.method : "GET")).toUpperCase();
+    let body: BodyInit | null | undefined = init?.body;
+    // A Request's own body is read by the first hop; a 307/308 resends a copy.
+    const replay = url instanceof Request && url.body !== null &&
+        init?.body === undefined
+      ? url.clone()
+      : null;
+    const signal = init?.signal ??
+      (url instanceof Request ? url.signal : undefined);
+    for (let hop = 0;; hop++) {
+      const jarCookie = cookieFor(target.pathname);
+      if (ownCookie === null) {
+        if (jarCookie) headers.set("cookie", jarCookie);
+        else headers.delete("cookie");
+      }
+      const res = hop === 0
+        ? await real(url, { ...init, headers, redirect: "manual" })
+        : await real(target, {
+          method,
+          body,
+          headers,
+          signal,
+          redirect: "manual",
+        });
+      for (const line of res.headers.getSetCookie()) {
+        store(line, target.pathname);
+      }
+      syncView();
+      const location = res.headers.get("location");
+      if (![301, 302, 303, 307, 308].includes(res.status) || !location) {
+        if (hop > 0) {
+          Object.defineProperty(res, "redirected", { value: true });
+        }
+        return res;
+      }
+      if (mode === "manual") return res;
+      await res.body?.cancel();
+      if (mode === "error") {
+        throw new TypeError(
+          `testPageFetch: ${target.pathname} redirected (${res.status}) and ` +
+            `the request said redirect: "error"`,
+        );
+      }
+      if (hop + 1 > MAX_HOPS) {
+        throw new TypeError(
+          `testPageFetch: more than ${MAX_HOPS} redirects from ` +
+            `${new URL(url instanceof Request ? url.url : url).pathname} ` +
+            `(last: ${target.pathname} → ${location}) — a redirect loop?`,
+        );
+      }
+      // Fetch spec, HTTP-redirect fetch: 303 (not HEAD), and 301/302 on a
+      // POST, become a body-less GET; 307/308 resend method and body.
+      if (
+        (res.status === 303 && method !== "HEAD") ||
+        ((res.status === 301 || res.status === 302) && method === "POST")
+      ) {
+        method = "GET";
+        body = null;
+        for (
+          const h of [
+            "content-type",
+            "content-length",
+            "content-encoding",
+            "content-language",
+            "content-location",
+          ]
+        ) headers.delete(h);
+      } else if (hop === 0 && replay) {
+        body = await replay.arrayBuffer();
+      } else if (body instanceof ReadableStream) {
+        throw new TypeError(
+          `testPageFetch: a ${res.status} asks to resend a streamed body, ` +
+            `which a browser refuses too`,
+        );
+      }
+      target = new URL(location, target);
+      if (target.origin !== origin) {
+        // Off this origin: the jar neither goes nor learns — hand off.
+        if (ownCookie === null) headers.delete("cookie");
+        return await real(target, {
+          method,
+          body,
+          headers,
+          signal,
+          redirect: mode,
+        });
+      }
     }
-    const res = await real(url, { ...init, headers });
-    for (const line of res.headers.getSetCookie()) {
-      const [pair, ...attrs] = line.split(";");
-      const eq = pair!.indexOf("=");
-      const name = pair!.slice(0, eq).trim(), value = pair!.slice(eq + 1);
-      // Cleared as a browser clears it: no value, or no time left to live.
-      if (value === "" || attrs.some((a) => /^\s*max-age=0\s*$/i.test(a))) {
-        cookies.delete(name);
-      } else cookies.set(name, value);
-    }
-    return res;
   }) as typeof fetch;
   globalThis.fetch = page;
   _resetAuthUi();

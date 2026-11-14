@@ -935,6 +935,14 @@ export function testCell(
       // surface so self-dispatch and `cell.method.action()` work in tests too.
       const creator = (f.__aio.actions as Record<string, unknown>)[key];
       if (creator) attachMeta(dispatcher, creator);
+      // Restored with the selectors: left bound, `counter.inc()` in a LATER
+      // plain test (nothing booted) went into this dead harness and resolved,
+      // where production — and the same test run alone — refuses "not booted".
+      const had = Object.getOwnPropertyDescriptor(f, key);
+      restoreSelectors.push(() => {
+        if (had) Object.defineProperty(f, key, had);
+        else delete (f as Record<string, unknown>)[key];
+      });
       (f as Record<string, unknown>)[key] = dispatcher;
     }
     // A worker cell refuses a peer read and a method call, as its real thread
