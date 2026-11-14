@@ -6,14 +6,14 @@ what is OPEN, what is DECIDED (so it is not argued again), and measured facts.
 
 ## 1. State
 
-- Current release: 1.0.27-beta (2026-11-11, tagged and pushed together with
-  1.0.26-beta). 1.0.26-beta (2026-10-27): the bughunter round, the aipro §6–§12
-  and aio-launcher field reports, happy-dom 21, the launchd stop race.
-  1.0.27-beta (2026-10-30): `_runPhases` split into `boot-*.ts`, origin's CI
-  workflow merged. Its off-box proof rows stay at the 1.0.26 commits: five full
-  Windows runs each hit a different load-only red (each passes alone; all but
-  one fixed). Open: `local-peer-lockdown-e2e` on a loaded Windows VM — the pipe
-  client's 2 s busy bound (`PIPE_BUSY_WAIT_MS`) ran out during the test's
+- Current release: 1.0.27-beta (cut 2026-10-30; tagged and pushed together with
+  1.0.26-beta on 2026-11-11). 1.0.26-beta (2026-10-27): the bughunter round, the
+  aipro §6–§12 and aio-launcher field reports, happy-dom 21, the launchd stop
+  race. 1.0.27-beta (2026-10-30): `_runPhases` split into `boot-*.ts`, origin's
+  CI workflow merged. Its off-box proof rows stay at the 1.0.26 commits: five
+  full Windows runs each hit a different load-only red (each passes alone; all
+  but one fixed). Open: `local-peer-lockdown-e2e` on a loaded Windows VM — the
+  pipe client's 2 s busy bound (`PIPE_BUSY_WAIT_MS`) ran out during the test's
   connection burst; and Defender's ML flags the suite's fake-program stub
   (`tests/fake-program-helper.ts`) now and then — the lab VM needs an exclusion
   for its lab folder.
@@ -25,6 +25,11 @@ what is OPEN, what is DECIDED (so it is not argued again), and measured facts.
   better-but-breaking behaviour ships as an opt-in; its default flip goes to
   `untracked/v2.md`.
 - Say "closed as far as v1 allows", never "all fixed" or "bug-free".
+
+- Going final (owner, 2026-11-13): the next stable closes the beta line and aio
+  moves to maintenance — fixes and platform upkeep only, new work goes to
+  aio-rs. Policy: docs/basics/support.md. Before the stable (`1.0.28-rc`, then
+  `1.0.28` after quiet weeks): the boxes under "Going final" in §4.
 
 ## 2. Standing policy
 
@@ -149,6 +154,32 @@ and needed no owner is built and in `CHANGELOG.md`; what would break an app is
 in `untracked/v2.md` §65–§73. What is left needs a decision, a person, hardware,
 or is small and known.
 
+### Going final (2026-11-13)
+
+- [ ] Android API 36 (Google Play's floor for updates since 2026-08-31; 35 could
+      no longer publish an update): template moved to `compileSdk`/`targetSdk`
+      36 on AGP 8.13.2, Back through an `OnBackPressedCallback` (36 never calls
+      `onBackPressed`), an own activity that still overrides it is opted out of
+      predictive back and warned. Unit-tested only — this machine has no Android
+      SDK. Before the rc: `deno task test:android` on the API 35 and 36
+      emulators and the phone (Back with and without an `onBackButton` handler,
+      Back out of the app, the client APK's Back to the connect page), and
+      record both rows.
+- [ ] Electron 44.9.3 → 44.11.1 (patch, same major): `test:electron` and
+      `test:build` on the release commit.
+- [ ] `untracked/v2.md` and `feedback/` are not on the workstation of 2026-11-13
+      (both gitignored): copy them back from the machine that has them — v2.md
+      is design input for aio-rs now, and the goal "the latest two field reports
+      carry no P1/P2" cannot be checked without feedback/.
+- [ ] The release gates on the rc commit: `check:release --require-proof`,
+      `soak:72h` (the recorded one is at a commit in no tagged history), `lab`
+      (needs docker/podman).
+- [ ] Proof rows still never recorded: `ios route` (needs
+      `sudo npx playwright install-deps webkit` here),
+      `windows (real
+      hardware)`. Record them, or leave them named as
+      unproven in docs/basics/support.md — the stable does not claim them.
+
 ### Owner decides (each has a recommendation)
 
 - [x] A refused kit Checkbox/Switch/Input keeps the user's pick (memo-skipped;
@@ -207,7 +238,9 @@ or is small and known.
 - [x] `scripts/proof.ts --require-current` as a release gate (report-only
       today). A Windows CI job (YAML in the audit worker's notes; cannot be
       proven without a push; `continue-on-error`). Done 2026-10-24 (R9):
-      `check:release --require-proof`; ci.yml `test-windows`.
+      `check:release --require-proof`; ci.yml `test-windows` — REMOVED again by
+      the tests-only workflow (`ba85c57d`, 1.0.27): CI is Linux only; the
+      Windows suite runs by hand on the VM (proof row `windows (native suite)`).
 - [x] Windows: taskbar pins after the AppUserModelID change (pin a 1.0.19
       window, upgrade, start: does the window join the pin?). `am kill --json`
       there: 1.0.20 adds `"how"`, asks first (app exit 0, was 1), and can say

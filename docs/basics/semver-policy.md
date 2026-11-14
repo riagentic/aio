@@ -128,7 +128,7 @@ quality demands it" — none.
 | alpha ≥ 77 | —                                                                | `check:api`: additive only, no approval path   |
 | beta line  | —                                                                | same                                           |
 | stable     | —                                                                | exit criteria in todo.md (field reports, soak) |
-| 1.x        | additive only (1.1.0) / fixes only (1.0.1)                       | api:check + this policy                        |
+| 1.x        | fixes only (1.0.N) — maintenance, see [support](support.md)      | api:check + this policy                        |
 | 2.0.0+     | breaking allowed, with upgrade guide + deprecation cycle honored | docs/upgrade/ guide mandatory                  |
 
 ### Version names

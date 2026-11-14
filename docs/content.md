@@ -41,6 +41,7 @@
 - [AIO -- Project Structure](basics/project-structure.md) — …and tests/ beside src/, mirroring that structure:
 - [AIO Quickstart](basics/quickstart.md) — Start a new aio app from scratch.
 - [Versioning & Deprecation Policy](basics/semver-policy.md) — aio follows semver from 1.0.0 on.
+- [Support & maintenance](basics/support.md) — aio 1.0 is the last line of the TypeScript/Deno framework.
 - [Tutorial -- Building with AIO Step by Step](basics/tutorial.md) — Each section builds on the previous, but you can stop at any point.
 - [Where does this code run?](basics/where-code-runs.md) — aio has one syntax and six places it executes.
 - [aio on Windows and macOS](basics/windows-macos.md) — Most snippets in these docs are written for a POSIX shell on Linux.

@@ -192,8 +192,10 @@ ones include [Claude Control](https://github.com/riagentic/cc),
 16 of them from one window; each app is cloned from git and built on your
 machine. Their bug reports shaped much of the framework.
 
-**Next:** aio v2, a full rewrite in Rust, is in development and will come as a
-separate repo. This repo is the TypeScript/Deno v1 line.
+**Next:** aio-rs, a full rewrite in Rust, is in development and will come as a
+separate repo. This repo is the TypeScript/Deno v1 line, now in maintenance:
+fixes and platform upkeep, no new features
+([what that covers](docs/basics/support.md)).
 
 ## 🎯 Honestly
 
