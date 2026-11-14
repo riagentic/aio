@@ -39,7 +39,7 @@ import {
   resolve,
   SEPARATOR,
 } from "@std/path";
-import { homeStoreEnv } from "../src/testing/test-strict.ts";
+import { aioTestRoot, homeStoreEnv } from "../src/testing/test-strict.ts";
 import { testDisplay } from "../src/testing/test-display.ts";
 import { HEAP_FLOOR_MB } from "../src/server/heap-policy.ts";
 import {
@@ -154,6 +154,98 @@ async function precheckFixtures(paths: string[], width: number): Promise<void> {
         `tests will say why): ${failed.join(", ")}`,
     );
   }
+}
+
+/** The repository's own `node_modules`, set up ONCE before any shard when it
+ *  is missing — as CI does (`deno install --node-modules-dir=auto`).
+ *
+ *  Tests that bundle with esbuild or build a probe app resolve npm packages
+ *  (immer) through that folder. A checkout without it failed eight build
+ *  tests with esbuild's "Could not find a matching package for
+ *  'npm:immer@…'" and nothing naming the missing install (2026-11-13). One
+ *  that will not install stops the run here, with the command. */
+async function primeRootModules(): Promise<void> {
+  try {
+    Deno.statSync(join(ROOT, "node_modules"));
+    return;
+  } catch { /* aio-ok: missing — installed below */ }
+  console.log(
+    "test-shards: no node_modules in the repository — running " +
+      "`deno install --node-modules-dir=auto` once (the build tests resolve " +
+      "npm packages through it)",
+  );
+  const { success, stderr } = await new Deno.Command(Deno.execPath(), {
+    args: ["install", "--node-modules-dir=auto"],
+    cwd: ROOT,
+    stdout: "null",
+    stderr: "piped",
+  }).output();
+  if (!success) {
+    console.error(
+      `test-shards: \`deno install --node-modules-dir=auto\` failed in ` +
+        `${ROOT}, so every build test would fail on a missing npm package. ` +
+        `Run it there and fix what it says:\n` +
+        new TextDecoder().decode(stderr).trim(),
+    );
+    Deno.exit(1);
+  }
+}
+
+/** What the test root's filesystem cannot do that the suite relies on: a
+ *  creation time (the updater proves what it made by it), a millisecond
+ *  `utime` (lock heartbeats and bundle caches are pinned to the stamp they
+ *  set). Empty on ext4, btrfs, xfs, tmpfs, APFS, NTFS.
+ *
+ *  An ecryptfs home (Ubuntu's encrypted home) has neither: 36 tests failed
+ *  there on a tree that is green everywhere else (2026-11-13), each with an
+ *  assertion that named the symptom, never the filesystem. The framework
+ *  itself says so at run time (the updater leaves what it cannot prove and
+ *  warns); this says it to the person running the suite. Pure enough to
+ *  test: `dir` is any writable folder, `lstat` the look. */
+export function testRootLacks(
+  dir: string,
+  lstat: (path: string) => Deno.FileInfo = Deno.lstatSync,
+): string[] {
+  const probe = join(dir, `.fs-probe-${Deno.pid}-${Date.now()}`);
+  const lacks: string[] = [];
+  try {
+    Deno.writeTextFileSync(probe, "x");
+    if (!lstat(probe).birthtime) lacks.push("file creation times");
+    const at = new Date(Math.floor(Date.now() / 1000) * 1000 - 60_000 + 437);
+    Deno.utimeSync(probe, at, at);
+    if (lstat(probe).mtime?.getTime() !== at.getTime()) {
+      lacks.push("millisecond modification times set by utime");
+    }
+  } catch (e) {
+    lacks.push(`a writable folder (${e})`);
+  } finally {
+    try {
+      Deno.removeSync(probe);
+    } catch { /* aio-ok: never made */ }
+  }
+  return lacks;
+}
+
+/** Stop a full run (warn on a named one) whose test root cannot hold what
+ *  the suite measures — with the folder to use instead. */
+function precheckTestRoot(full: boolean): void {
+  const root = aioTestRoot();
+  const lacks = testRootLacks(root);
+  if (lacks.length === 0) return;
+  const text = `test-shards: the test root ${root} is on a filesystem with ` +
+    `no ${lacks.join(" and no ")} (ecryptfs, an encrypted home, does this), ` +
+    `and the updater, lock and cache tests measure exactly those — about 36 ` +
+    `of them fail there on a correct tree. Point the suite at a folder on ` +
+    `ext4, btrfs, xfs or tmpfs that only you can write, with a SHORT path ` +
+    `(the tests bind Unix sockets inside it, ~108 bytes at most) and not ` +
+    `under /tmp (the build tests refuse a shared /tmp) — e.g. ` +
+    `mkdir -m 700 /dev/shm/aiot && AIO_TEST_ROOT=/dev/shm/aiot deno task test`;
+  if (!full) {
+    console.warn(`${text}\n  (a named run goes ahead)`);
+    return;
+  }
+  console.error(text);
+  Deno.exit(1);
 }
 
 /** Set up each example's own `node_modules` ONCE, before any shard.
@@ -1336,6 +1428,8 @@ if (import.meta.main) {
       fixtures.add(join("tests", "fixtures", m[1]!));
     }
   }));
+  precheckTestRoot(named.length === 0);
+  await primeRootModules();
   await Promise.all([precheckFixtures([...fixtures], n), primeExamples()]);
   const shards = planWithin(
     files,
