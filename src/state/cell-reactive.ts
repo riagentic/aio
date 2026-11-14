@@ -517,6 +517,32 @@ function trackCell(def: CellDef): void {
 /** Install signal-backed getters on a cell for each state key, and wrap
  *  action creators with dispatch so `counter.increment()` sends to server.
  *  After this, `counter.count` reads from the cell signal (auto-tracked). */
+/** The store's slice of a cell while a dispatch drain is under way, or
+ *  `undefined` outside one. Installed by the standalone runtime only
+ *  (`standalone-air.ts`), where the per-cell signals are refreshed when the
+ *  drain ENDS: a reducer of cell B that read `a.n` after A's reducer wrote it
+ *  in the same drain got the value from before the drain — `[0, 0]` where the
+ *  server (whose getters read the store) gives `[5, 7]`. The signal is still
+ *  read for tracking; the value comes from here while a drain is open.
+ *  @internal */
+let _liveSlice: ((cell: string) => unknown) | null = null;
+
+/** @internal Engine wiring — see {@linkcode _liveSlice}. */
+export function _setLiveSliceReader(
+  fn: ((cell: string) => unknown) | null,
+): void {
+  _liveSlice = fn;
+}
+
+/** The raw slice a client read sees: the signal's (tracked), or — inside an
+ *  open standalone drain — the store's own. A client-scoped cell owns its
+ *  signal, so it is never read from the store. */
+function liveRaw(def: CellDef, tracked: unknown): unknown {
+  if (_liveSlice === null || def.__aio.scope === "client") return tracked;
+  const live = _liveSlice(def.__aio.id);
+  return live === undefined ? tracked : live;
+}
+
 export function bindCellReactive(
   def: CellDef,
   sendFn?: (
@@ -568,7 +594,7 @@ export function bindCellReactive(
         // standalone/test (no transport → no __subs sent).
         trackCell(def);
         // tracked read — auto-tracked by AIR renderer
-        const s = clientSlice(def, sig.value);
+        const s = clientSlice(def, liveRaw(def, sig.value));
         const v = s == null
           ? initialState[key]
           : (s as Record<string, unknown>)[key];
@@ -632,10 +658,11 @@ export function bindCellReactive(
             def,
             filterSlice(
               uiFilter,
-              (clientSlice(def, sig.value) ?? initialState) as Record<
-                string,
-                unknown
-              >,
+              (clientSlice(def, liveRaw(def, sig.value)) ??
+                initialState) as Record<
+                  string,
+                  unknown
+                >,
             ),
           );
           // Called WITH args on a PLAIN selector → parameterized
@@ -658,7 +685,7 @@ export function bindCellReactive(
               if (otherDef) trackCell(otherDef);
               else trackPath(prop);
               const otherSlice = ((otherDef
-                ? clientSlice(otherDef, other.value)
+                ? clientSlice(otherDef, liveRaw(otherDef, other.value))
                 : other.value) ??
                 otherDef?.__aio.state ??
                 {}) as Record<string, unknown>;

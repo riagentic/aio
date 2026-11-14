@@ -53,6 +53,7 @@ import {
 import {
   _resetCellBindings,
   _resetCellRegistry,
+  _setLiveSliceReader,
   clientHookState,
   getRegisteredCells,
 } from "./state/cell-reactive.ts";
@@ -1926,8 +1927,16 @@ export function initStandalone<S, A, E>(
     getState: () => state,
     setState: (s) => {
       state = s;
+      // The signals catch up in `onDone`; until then a peer cell's reducer
+      // reads the store (see `_setLiveSliceReader`).
+      if (!fence.dead) {
+        _setLiveSliceReader((id) =>
+          (state as Record<string, unknown> | null | undefined)?.[id]
+        );
+      }
     },
     onDone: () => {
+      _setLiveSliceReader(null);
       // A retired boot publishes NOTHING. Its drain still ends here after the
       // fence refused a late action, and the UI state, the per-cell signals
       // (`onCommit` → `_applyFullState`) and the persist are module-wide: its
