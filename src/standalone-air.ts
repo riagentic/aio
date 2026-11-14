@@ -1442,7 +1442,7 @@ export function initStandalone<S, A, E>(
   // A composed app starts from a fresh COPY of its declared state, as the
   // server's boot does (`cloneState`): the restore hooks below write into it,
   // and the declared state is frozen.
-  let state = config.cells ? cloneState(initialState) : initialState;
+  let state: S = initialState;
   /** Why this run must NEVER write to `persistKey` — set when the restore
    *  FAILED on a value that is there and could not be set aside first. */
   let writesRefused: string | null = null;
@@ -1451,15 +1451,48 @@ export function initStandalone<S, A, E>(
   let setAside = false;
   /** Stored `persist: "none"` slices the restore dropped — see below. */
   let unkept: string[] = [];
-  /** The stored document as read (cells only) — set when a restore
-   *  happened, which is the only time the boot hooks below run. */
-  let stored: Record<string, unknown> | null = null;
   const cellsCfg = config.cells;
   const declared = initialState as Record<string, unknown>;
   /** Stored slices under a `scope: "client"` cell's name — see below. */
   const clientStored: Record<string, unknown> = {};
-  if (shouldPersist) {
-    const r = _restoreOrQuarantine(store, persistKey, (raw) => {
+  /** The `__versions` stamp every write carries — monotonic per cell. */
+  const stamp: Record<string, number> = {};
+  /** Stored slices no declared cell owns — carried into every write, verbatim. */
+  const carried: Record<string, unknown> = {};
+  const hookLog = {
+    trace: () => {},
+    debug: () => {},
+    info: (m: string) => console.info(`[aio] ${m}`),
+    warn: (m: string) => console.warn(`[aio] \u26a0 ${m}`),
+    error: (m: string) => console.error(`[aio] \u2717 ${m}`),
+  } as unknown as Log;
+  const _reportOpts: ReportErrorOpts = {
+    onError: undefined,
+    prod: true,
+  };
+  /** The exact bytes this tab last read from or wrote to `persistKey` (null =
+   *  nothing stored). On localStorage every OTHER tab of the app writes the
+   *  same key: a store that no longer holds these bytes was written by
+   *  someone else since — see `crossTab` below. */
+  let lastSeen: string | null = null;
+
+  /** THE restore — run once at boot, and again (with `adopt`) whenever this
+   *  tab takes over a document another tab of the app saved: the same
+   *  merge, migrations, version stamp, carried slices and `onRestore` hooks
+   *  either way, so an adopted document is read exactly as a reload would
+   *  read it. `adopt` skips the quarantine (the caller decides what a
+   *  document it cannot read means) and the boot-only notices. */
+  function restoreState(adopt?: { raw: string | null }): void {
+    state = config.cells ? cloneState(initialState) : initialState;
+    unkept = [];
+    for (const o of [clientStored, stamp, carried]) {
+      for (const k of Object.keys(o)) delete (o as Record<string, unknown>)[k];
+    }
+    /** The stored document as read (cells only) — set when a restore
+     *  happened, which is the only time the boot hooks below run. */
+    let stored: Record<string, unknown> | null = null;
+    const apply = (raw: string) => {
+      lastSeen = raw;
       const doc = JSON.parse(raw);
       // A client cell is declared but never restorable, so `restorableOnly`
       // drops its slice — and the first write then deleted it from the store.
@@ -1489,221 +1522,216 @@ export function initStandalone<S, A, E>(
       if (cellsCfg && persisted && typeof persisted === "object") {
         stored = persisted as Record<string, unknown>;
       }
-    });
-    writesRefused = r.writesRefused;
-    setAside = r.setAside === true;
-  }
+    };
+    if (adopt) {
+      lastSeen = adopt.raw;
+      if (adopt.raw !== null) apply(adopt.raw);
+    } else if (shouldPersist) {
+      const r = _restoreOrQuarantine(store, persistKey, apply);
+      writesRefused = r.writesRefused;
+      setAside = r.setAside === true;
+    }
 
-  // ── The server's restore passes, on this runtime (aio-boot 4b / 5 / 5b) ──
-  // Without them the SAME app.ts lost data only once packaged: an APK update
-  // whose cell renamed a field (`version` + `onMigrate`) dropped the old
-  // value in the merge above and never ran the hook; a cell's `onRestore`
-  // never ran; and a stored cell this build no longer declares was deleted
-  // by the first write. tests/standalone-migrate-restore.test.ts.
-  /** The `__versions` stamp every write carries — monotonic per cell. */
-  const stamp: Record<string, number> = {};
-  /** Stored slices no declared cell owns — carried into every write, verbatim. */
-  const carried: Record<string, unknown> = {};
-  for (const [id, slice] of Object.entries(clientStored)) {
-    carried[id] = slice;
-    console.info(
-      `[aio] persist: stored slice "${id}" belongs to a scope: "client" ` +
-        `cell, which is never persisted — kept in the store untouched, not ` +
-        `restored (the cell starts from its declared state).`,
-    );
-  }
-  const hookLog = {
-    trace: () => {},
-    debug: () => {},
-    info: (m: string) => console.info(`[aio] ${m}`),
-    warn: (m: string) => console.warn(`[aio] \u26a0 ${m}`),
-    error: (m: string) => console.error(`[aio] \u2717 ${m}`),
-  } as unknown as Log;
-  if (cellsCfg) {
-    const raw = stored as Record<string, unknown> | null;
-    const v = raw?.__versions;
-    if (v && typeof v === "object" && !Array.isArray(v)) {
-      for (const [c, n] of Object.entries(v as Record<string, unknown>)) {
-        if (typeof n === "number" && Number.isFinite(n)) stamp[c] = n;
+    // ── The server's restore passes, on this runtime (aio-boot 4b / 5 / 5b) ──
+    // Without them the SAME app.ts lost data only once packaged: an APK update
+    // whose cell renamed a field (`version` + `onMigrate`) dropped the old
+    // value in the merge above and never ran the hook; a cell's `onRestore`
+    // never ran; and a stored cell this build no longer declares was deleted
+    // by the first write. tests/standalone-migrate-restore.test.ts.
+    for (const [id, slice] of Object.entries(clientStored)) {
+      carried[id] = slice;
+      if (!adopt) {
+        console.info(
+          `[aio] persist: stored slice "${id}" belongs to a scope: "client" ` +
+            `cell, which is never persisted — kept in the store untouched, not ` +
+            `restored (the cell starts from its declared state).`,
+        );
       }
     }
-    const storedVersions = { ...stamp };
-    for (const [c, info] of cellsCfg.migrations) {
-      if (info.version > 0) {
-        stamp[c] = Math.max(info.version, stamp[c] ?? 0);
-      }
-    }
-    if (raw) {
-      const s = state as Record<string, unknown>;
-      // Undeclared slices ride into state so the app's `onRestore` can
-      // migrate them (a rename is one hook), exactly as on the server.
-      for (const k of Object.keys(raw)) {
-        if (!Object.hasOwn(declared, k) && !k.startsWith("__")) s[k] = raw[k];
-      }
-      // A shaped cell's stored slice is read against what this build's
-      // `onPersist` writes for its declared state (the server's
-      // `shapeSchema`): the declared defaults first, the restored slice when
-      // the hook cannot take the defaults.
-      const schema: Record<string, unknown> = {};
-      for (const c of cellsCfg.shaped) {
-        for (const src of [declared[c], s[c]]) {
-          try {
-            const out = (cellDBState({ [c]: src } as S) as
-              | Record<string, unknown>
-              | undefined)?.[c];
-            if (out && typeof out === "object" && !Array.isArray(out)) {
-              schema[c] = JSON.parse(JSON.stringify(out));
-            }
-            break;
-          } catch {
-            // aio-ok: the persist path reports this same throw on its first
-            // write; here it only means the slice is read against the
-            // declared state instead.
-          }
+    if (cellsCfg) {
+      const raw = stored as Record<string, unknown> | null;
+      const v = raw?.__versions;
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        for (const [c, n] of Object.entries(v as Record<string, unknown>)) {
+          if (typeof n === "number" && Number.isFinite(n)) stamp[c] = n;
         }
       }
-      // A store with NO `__versions` at all predates the stamp (every write
-      // since carries one, `{}` included), so its cells' versions are
-      // UNKNOWN — not 0. The build that wrote it may have declared `version:
-      // 2` already, and `onMigrate(s, 0)` over a slice that is in the current
-      // shape is the cookbook's `migratePrefs` reading a field that is gone:
-      // the user's value reset by an aio update that touched no app code. A
-      // slice that fits the declared shape is taken as current (stamped, no
-      // hook); one that does not is older, and migrates from 0 — the only
-      // way its renamed fields survive the merge.
-      if (!("__versions" in raw)) {
-        for (const [c, info] of cellsCfg.migrations) {
-          if (
-            info.version <= 0 ||
-            !Object.hasOwn(raw, c) ||
-            Object.hasOwn(storedVersions, c)
-          ) {
-            continue;
+      const storedVersions = { ...stamp };
+      for (const [c, info] of cellsCfg.migrations) {
+        if (info.version > 0) {
+          stamp[c] = Math.max(info.version, stamp[c] ?? 0);
+        }
+      }
+      if (raw) {
+        const s = state as Record<string, unknown>;
+        // Undeclared slices ride into state so the app's `onRestore` can
+        // migrate them (a rename is one hook), exactly as on the server.
+        for (const k of Object.keys(raw)) {
+          if (!Object.hasOwn(declared, k) && !k.startsWith("__")) s[k] = raw[k];
+        }
+        // A shaped cell's stored slice is read against what this build's
+        // `onPersist` writes for its declared state (the server's
+        // `shapeSchema`): the declared defaults first, the restored slice when
+        // the hook cannot take the defaults.
+        const schema: Record<string, unknown> = {};
+        for (const c of cellsCfg.shaped) {
+          for (const src of [declared[c], s[c]]) {
+            try {
+              const out = (cellDBState({ [c]: src } as S) as
+                | Record<string, unknown>
+                | undefined)?.[c];
+              if (out && typeof out === "object" && !Array.isArray(out)) {
+                schema[c] = JSON.parse(JSON.stringify(out));
+              }
+              break;
+            } catch {
+              // aio-ok: the persist path reports this same throw on its first
+              // write; here it only means the slice is read against the
+              // declared state instead.
+            }
           }
-          const drift = detectShapeDrift(
-            { [c]: Object.hasOwn(schema, c) ? schema[c] : declared[c] },
-            { [c]: raw[c] },
-          ).filter((d) =>
-            d.issue === "unknown-field" || d.issue === "type-changed"
+        }
+        // A store with NO `__versions` at all predates the stamp (every write
+        // since carries one, `{}` included), so its cells' versions are
+        // UNKNOWN — not 0. The build that wrote it may have declared `version:
+        // 2` already, and `onMigrate(s, 0)` over a slice that is in the current
+        // shape is the cookbook's `migratePrefs` reading a field that is gone:
+        // the user's value reset by an aio update that touched no app code. A
+        // slice that fits the declared shape is taken as current (stamped, no
+        // hook); one that does not is older, and migrates from 0 — the only
+        // way its renamed fields survive the merge.
+        if (!("__versions" in raw)) {
+          for (const [c, info] of cellsCfg.migrations) {
+            if (
+              info.version <= 0 ||
+              !Object.hasOwn(raw, c) ||
+              Object.hasOwn(storedVersions, c)
+            ) {
+              continue;
+            }
+            const drift = detectShapeDrift(
+              { [c]: Object.hasOwn(schema, c) ? schema[c] : declared[c] },
+              { [c]: raw[c] },
+            ).filter((d) =>
+              d.issue === "unknown-field" || d.issue === "type-changed"
+            );
+            if (drift.length === 0) {
+              storedVersions[c] = info.version;
+              hookLog.info(
+                `migrate: ${c}'s store predates version stamps and its slice ` +
+                  `matches the declared shape — stamped at v${info.version}, ` +
+                  `onMigrate not run`,
+              );
+            }
+          }
+        }
+        const migratedRaw = new Map<string, Record<string, unknown>>();
+        // A throw is the server's refusal to boot (PERSIST_SCHEMA): nothing has
+        // been written, so the stored data is intact for a fixed build.
+        const report = applyCellMigrations(
+          s,
+          cellsCfg.migrations,
+          storedVersions,
+          hookLog,
+          raw,
+          declared,
+          cellsCfg.shaped.size ? { schema, migratedRaw } : undefined,
+        );
+        const migrated = new Set(
+          report.filter((r) =>
+            r.outcome === "migrated" || r.outcome === "downgrade"
+          ).map((r) => r.cell),
+        );
+        // Shape drift the migration did not account for — a field renamed or
+        // retyped with no `version` bump. The merge above already dropped it,
+        // and this run's first write deletes it from the store: said, as the
+        // server's boot says it (aio-boot 4b), never lost in silence.
+        const drift = detectShapeDrift({ ...declared, ...schema }, raw, {
+          skip: new Set(report.map((r) => r.cell)),
+        });
+        if (drift.length > 0) {
+          console.warn(`[aio] \u26a0 persist: ${shapeDriftSummary(drift)}`);
+        }
+        for (const r of report) {
+          if (r.outcome !== "downgrade") continue;
+          const key = downgradeParkKey(r.cell);
+          if (Object.hasOwn(raw, key) || raw[r.cell] === undefined) continue;
+          carried[key] = raw[r.cell];
+        }
+        for (const [id, hook] of cellsCfg.restores) {
+          const slice = s[id];
+          if (slice === undefined) continue;
+          s[id] = runCellRestore(
+            id,
+            hook,
+            slice as Record<string, unknown>,
+            // As the server's boot hands it (aio-boot step 5): the stored shape
+            // — or the migration's output, which IS this boot's stored slice.
+            cellsCfg.shaped.has(id)
+              ? {
+                stored: migratedRaw.get(id) ?? raw[id],
+                declared: declared[id],
+                retyped: migratedRaw.has(id) || !migrated.has(id),
+              }
+              : undefined,
+            hookLog,
           );
-          if (drift.length === 0) {
-            storedVersions[c] = info.version;
-            hookLog.info(
-              `migrate: ${c}'s store predates version stamps and its slice ` +
-                `matches the declared shape — stamped at v${info.version}, ` +
-                `onMigrate not run`,
+        }
+      }
+    }
+
+    // onRestore — let user transform/validate restored state before UI renders
+    if (config.onRestore) {
+      try {
+        // MUTATE OR REPLACE — the server's rule (aio-boot step 5): a hook
+        // written `(s) => { s.net.online = false }` returns nothing, and
+        // `state = onRestore(state)` made the whole state `undefined` — the
+        // app died at boot, only once packaged.
+        const next = config.onRestore(state) as unknown;
+        refuseThenable(next);
+        if (next !== undefined && next !== state) {
+          if (next === null || typeof next !== "object") {
+            throw new Error(
+              `returned ${
+                next === null ? "null" : typeof next
+              } — return the state, or mutate it and return nothing`,
+            );
+          }
+          state = next as S;
+        }
+      } catch (e) {
+        const err = createAioError("HOOK_ERROR", e, { hookName: "onRestore" });
+        reportAioError(err, _reportOpts);
+      }
+    }
+    if (cellsCfg) {
+      const raw = stored as Record<string, unknown> | null;
+      const s = state as Record<string, unknown>;
+      for (const k of Object.keys(raw ?? {})) {
+        // `__…` keys are framework-parked data (a pre-downgrade slice): never
+        // in state, carried by every write. The stamp is rebuilt, not carried.
+        if (k === "__versions") continue;
+        if (k.startsWith("__")) {
+          carried[k] = raw![k];
+          continue;
+        }
+        if (Object.hasOwn(declared, k)) continue;
+        if (Object.hasOwn(s, k)) {
+          carried[k] = s[k];
+          delete s[k];
+          if (!adopt) {
+            console.warn(
+              `[aio] \u26a0 persist: stored cell "${k}" is not declared by this ` +
+                `build — its data is PRESERVED in the store, untouched. Migrate ` +
+                `it in onRestore (read state.${k}, move what you need, delete the ` +
+                `key to consume it), or re-declare the cell to get it back as-is.`,
             );
           }
         }
       }
-      const migratedRaw = new Map<string, Record<string, unknown>>();
-      // A throw is the server's refusal to boot (PERSIST_SCHEMA): nothing has
-      // been written, so the stored data is intact for a fixed build.
-      const report = applyCellMigrations(
-        s,
-        cellsCfg.migrations,
-        storedVersions,
-        hookLog,
-        raw,
-        declared,
-        cellsCfg.shaped.size ? { schema, migratedRaw } : undefined,
-      );
-      const migrated = new Set(
-        report.filter((r) =>
-          r.outcome === "migrated" || r.outcome === "downgrade"
-        ).map((r) => r.cell),
-      );
-      // Shape drift the migration did not account for — a field renamed or
-      // retyped with no `version` bump. The merge above already dropped it,
-      // and this run's first write deletes it from the store: said, as the
-      // server's boot says it (aio-boot 4b), never lost in silence.
-      const drift = detectShapeDrift({ ...declared, ...schema }, raw, {
-        skip: new Set(report.map((r) => r.cell)),
-      });
-      if (drift.length > 0) {
-        console.warn(`[aio] \u26a0 persist: ${shapeDriftSummary(drift)}`);
-      }
-      for (const r of report) {
-        if (r.outcome !== "downgrade") continue;
-        const key = downgradeParkKey(r.cell);
-        if (Object.hasOwn(raw, key) || raw[r.cell] === undefined) continue;
-        carried[key] = raw[r.cell];
-      }
-      for (const [id, hook] of cellsCfg.restores) {
-        const slice = s[id];
-        if (slice === undefined) continue;
-        s[id] = runCellRestore(
-          id,
-          hook,
-          slice as Record<string, unknown>,
-          // As the server's boot hands it (aio-boot step 5): the stored shape
-          // — or the migration's output, which IS this boot's stored slice.
-          cellsCfg.shaped.has(id)
-            ? {
-              stored: migratedRaw.get(id) ?? raw[id],
-              declared: declared[id],
-              retyped: migratedRaw.has(id) || !migrated.has(id),
-            }
-            : undefined,
-          hookLog,
-        );
-      }
     }
   }
-
-  const _reportOpts: ReportErrorOpts = {
-    onError: undefined,
-    prod: true,
-  };
-
-  // onRestore — let user transform/validate restored state before UI renders
-  if (config.onRestore) {
-    try {
-      // MUTATE OR REPLACE — the server's rule (aio-boot step 5): a hook
-      // written `(s) => { s.net.online = false }` returns nothing, and
-      // `state = onRestore(state)` made the whole state `undefined` — the
-      // app died at boot, only once packaged.
-      const next = config.onRestore(state) as unknown;
-      refuseThenable(next);
-      if (next !== undefined && next !== state) {
-        if (next === null || typeof next !== "object") {
-          throw new Error(
-            `returned ${
-              next === null ? "null" : typeof next
-            } — return the state, or mutate it and return nothing`,
-          );
-        }
-        state = next as S;
-      }
-    } catch (e) {
-      const err = createAioError("HOOK_ERROR", e, { hookName: "onRestore" });
-      reportAioError(err, _reportOpts);
-    }
-  }
-  if (cellsCfg) {
-    const raw = stored as Record<string, unknown> | null;
-    const s = state as Record<string, unknown>;
-    for (const k of Object.keys(raw ?? {})) {
-      // `__…` keys are framework-parked data (a pre-downgrade slice): never
-      // in state, carried by every write. The stamp is rebuilt, not carried.
-      if (k === "__versions") continue;
-      if (k.startsWith("__")) {
-        carried[k] = raw![k];
-        continue;
-      }
-      if (Object.hasOwn(declared, k)) continue;
-      if (Object.hasOwn(s, k)) {
-        carried[k] = s[k];
-        delete s[k];
-        console.warn(
-          `[aio] \u26a0 persist: stored cell "${k}" is not declared by this ` +
-            `build — its data is PRESERVED in the store, untouched. Migrate ` +
-            `it in onRestore (read state.${k}, move what you need, delete the ` +
-            `key to consume it), or re-declare the cell to get it back as-is.`,
-        );
-      }
-    }
-  }
+  restoreState();
 
   _state = getUIState(state);
   _stateSignal.set(_state);
@@ -1732,6 +1760,158 @@ export function initStandalone<S, A, E>(
   let finalWritten = false;
   let refusalSaid = false;
 
+  // ── Other tabs (localStorage only) ──
+  // Every tab of a web/PWA build holds its own copy of the state and writes
+  // the WHOLE document to the ONE shared key. Unchecked, the later writer
+  // silently erased what an earlier tab saved — and a tab still on an older
+  // build wrote its old shape over what a newer tab had migrated.
+  // tests/standalone-cross-tab.test.ts. The rules:
+  //  - another tab's save (a `storage` event — the browser fires it in every
+  //    OTHER tab) is ADOPTED through the boot's own restore (`restoreState`:
+  //    migrations, stamp, `onRestore`), and the page re-renders;
+  //  - before every write the store is compared with the bytes this tab last
+  //    read or wrote; if another tab saved since (its event not delivered
+  //    yet), THE STORE WINS: this tab adopts it and does not write. Either way
+  //    a change of this tab's that was not saved yet is DROPPED — said as an
+  //    error, naming it, never silently;
+  //  - a document stamped by a NEWER build (a cell version above this tab's)
+  //    is neither adopted nor written over: writes are refused for the rest of
+  //    this run, with "reload this tab".
+  // The Android store is one WebView's own file: no other tab exists there.
+  const crossTab = shouldPersist && store.kind === "localStorage";
+  /** The state as of the last write or adoption — anything else is unsaved. */
+  let synced: S = state;
+  /** The action types since then (a few, for the drop message). */
+  const unsaved: string[] = [];
+  let unsavedCount = 0;
+  let adoptSaid = false;
+  /** This boot's fence, once it exists — a retired boot publishes nothing. */
+  let liveFence: BootFence | null = null;
+
+  /** Cells the stored document stamps ABOVE this tab's own stamp — the
+   *  document came from a newer build of the app. */
+  function newerCells(raw: string | null): string[] {
+    if (!cellsCfg || raw === null) return [];
+    const v = (JSON.parse(raw) as { __versions?: unknown } | null)
+      ?.__versions;
+    if (!v || typeof v !== "object" || Array.isArray(v)) return [];
+    return Object.entries(v as Record<string, unknown>)
+      .filter(([c, n]) =>
+        Object.hasOwn(declared, c) && typeof n === "number" &&
+        n > (stamp[c] ?? 0)
+      )
+      .map(([c, n]) => `${c} v${n} > v${stamp[c] ?? 0}`);
+  }
+
+  /** Take over `raw` — what another tab saved under `persistKey`. */
+  function adoptFromStore(raw: string | null, trigger: string): void {
+    const where = `"${persistKey}" in localStorage`;
+    const dirty = state !== synced;
+    const dropped = dirty
+      ? `${unsaved.join(", ")}${
+        unsavedCount > unsaved.length
+          ? ` and ${unsavedCount - unsaved.length} more`
+          : ""
+      }`
+      : "";
+    const prev = {
+      state,
+      stamp: { ...stamp },
+      carried: { ...carried },
+      clientStored: { ...clientStored },
+      unkept,
+      lastSeen,
+    };
+    let newer: string[] = [];
+    try {
+      newer = newerCells(raw);
+      if (newer.length === 0) restoreState({ raw });
+    } catch (e) {
+      // Put back exactly what this tab had: its state is still good, it is
+      // only the store this tab can no longer safely write to.
+      state = prev.state;
+      unkept = prev.unkept;
+      lastSeen = prev.lastSeen;
+      for (
+        const [o, from] of [
+          [stamp, prev.stamp],
+          [carried, prev.carried],
+          [clientStored, prev.clientStored],
+        ] as const
+      ) {
+        for (const k of Object.keys(o)) {
+          delete (o as Record<string, unknown>)[k];
+        }
+        Object.assign(o, from);
+      }
+      writesRefused = `another tab saved ${where} and this tab could not ` +
+        `read it (${e}) — nothing this tab changes will be saved over it. ` +
+        `Reload this tab.`;
+      cancelTimer();
+      console.error(`[aio] \u2717 persistence: ${writesRefused}`);
+      return;
+    }
+    if (newer.length > 0) {
+      writesRefused = `another tab running a NEWER version of this app ` +
+        `saved ${where} (${newer.join(", ")}). This tab runs an older build ` +
+        `and will not write over it${
+          dirty ? ` — its unsaved change(s) ${dropped} are NOT saved` : ""
+        }. Reload this tab to get the new version.`;
+      cancelTimer();
+      console.error(`[aio] \u2717 persistence: ${writesRefused}`);
+      return;
+    }
+    synced = state;
+    unsaved.length = 0;
+    unsavedCount = 0;
+    cancelTimer();
+    if (liveFence && !liveFence.dead) {
+      _state = getUIState(state);
+      _notify();
+      config.onCommit?.(state);
+    }
+    if (dirty) {
+      console.error(
+        `[aio] \u2717 persistence: another tab of this app saved ${where} ` +
+          `while this tab had unsaved changes made on the older state ` +
+          `(${dropped}; noticed ${trigger}). The other tab's save wins — this ` +
+          `tab now shows the stored state and THOSE CHANGES ARE DROPPED. Two ` +
+          `tabs editing at once: the first save to reach the store wins.`,
+      );
+    } else if (!adoptSaid && isDevMode()) {
+      adoptSaid = true;
+      console.info(
+        `[aio] persistence: another tab of this app saved ${where} — this ` +
+          `tab adopted it (said once).`,
+      );
+    }
+  }
+
+  /** Before a write: may this tab write, or did another tab save since? */
+  function storeIsOurs(what: string): boolean {
+    let current: string | null;
+    try {
+      current = store.read(persistKey);
+    } catch (e) {
+      // The write that follows will most likely fail the same way, and say so.
+      console.error(
+        `[aio] \u2717 persistence: could not read "${persistKey}" before ` +
+          `the ${what} to check for another tab's save (${e})`,
+      );
+      return true;
+    }
+    if (current === lastSeen) return true;
+    adoptFromStore(current, `at this tab's ${what}`);
+    return false;
+  }
+
+  function cancelTimer(): void {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+  }
+
   function writeNow(what: string): void {
     // The final snapshot is the LAST write — the server's order too. The
     // cells' `:__destroy` teardown dispatches after close() still commit, and
@@ -1751,11 +1931,17 @@ export function initStandalone<S, A, E>(
       }
       return;
     }
+    if (crossTab && !storeIsOurs(what)) return;
     let json: string | undefined;
     try {
       const t0 = Date.now();
-      json = JSON.stringify(getDBState(state));
+      const saving = state;
+      json = JSON.stringify(getDBState(saving));
       store.write(persistKey, json);
+      lastSeen = json;
+      synced = saving;
+      unsaved.length = 0;
+      unsavedCount = 0;
       // An fsync per change is the price of "a kill cannot lose it". If it
       // ever costs more than two frames, say so ONCE rather than let the app
       // feel mysteriously heavy: that is a state big enough to want
@@ -1875,6 +2061,27 @@ export function initStandalone<S, A, E>(
   // initStandalone once, but a test file runs it dozens of times, and a
   // listener added per call would pile up stale closures writing stale state.
   _flushPersist = shouldPersist && !store.durable ? flushPersist : null;
+  // Another tab's save, as the browser announces it. `key` null = the whole
+  // storage was cleared; a test's bare Event has none — both may be ours.
+  _onStorage = crossTab
+    ? (key) => {
+      if (typeof key === "string" && key !== persistKey) return;
+      if (writesRefused !== null || finalWritten) return;
+      let raw: string | null;
+      try {
+        raw = store.read(persistKey);
+      } catch (e) {
+        console.error(
+          `[aio] \u2717 persistence: another tab changed "${persistKey}" ` +
+            `and this tab could not read it (${e}) — still showing its own ` +
+            `state; its next save checks again.`,
+        );
+        return;
+      }
+      if (raw !== lastSeen) adoptFromStore(raw, "from a storage event");
+    }
+    : null;
+  if (crossTab) _installStorageListener();
   _installBackgroundFlush();
 
   const standaloneLog = {
@@ -1889,6 +2096,7 @@ export function initStandalone<S, A, E>(
   const boot = ++_bootCount;
   const bootSite = _bootSite();
   const fence: BootFence = { dead: false, boot, site: bootSite };
+  liveFence = fence;
   const dispatch = createDispatch<S, A, E>({
     reduce: (s, a) => {
       if (fence.dead) {
@@ -1897,6 +2105,12 @@ export function initStandalone<S, A, E>(
           bootSite,
           boot,
         );
+      }
+      if (crossTab) {
+        unsavedCount++;
+        if (unsaved.length < 5) {
+          unsaved.push(String((a as { type?: unknown }).type));
+        }
       }
       return _inBoot(
         fence,
@@ -2120,6 +2334,7 @@ export function _resetState(): void {
   // …and the background-flush hook, for the same reason: the process-wide
   // listeners stay, but they must not reach a torn-down app's writer.
   _flushPersist = null;
+  _onStorage = null;
   _stopIframeWatch?.();
   _stopIframeWatch = null;
   _state = null;
@@ -2188,6 +2403,26 @@ let _cancelPersist: (() => void) | null = null;
  *  durable (nothing can be pending) or persistence is off. */
 let _flushPersist: (() => void) | null = null;
 let _backgroundFlushInstalled = false;
+/** The running localStorage runtime's handler for another tab's save — see
+ *  `crossTab` in initStandalone. Null when no such runtime is up. */
+let _onStorage: ((key: string | null | undefined) => void) | null = null;
+let _storageListenerInstalled = false;
+/** ONE `storage` listener per process (per module instance), dispatching
+ *  through `_onStorage` — a test boots dozens of runtimes, and a listener per
+ *  boot would pile up stale writers. On the global itself: in a browser that
+ *  is the window that emits `storage`. */
+function _installStorageListener(): void {
+  if (_storageListenerInstalled) return;
+  const g = globalThis as unknown as {
+    addEventListener?: (t: string, f: (e: Event) => void) => void;
+  };
+  if (typeof g.addEventListener !== "function") return;
+  _storageListenerInstalled = true;
+  g.addEventListener(
+    "storage",
+    (e) => _onStorage?.((e as Event & { key?: string | null }).key),
+  );
+}
 /** One pair of listeners for the whole process — see the call site.
  *
  *  Registered on the objects that actually EMIT these events: a document for
