@@ -2101,14 +2101,21 @@ export function createScheduleManager(
     const match = prefix + ":";
     // Epoch keys as well as timer keys: an in-flight one-shot is only in the
     // former, and a disabled cell must not have a retry come back to life.
+    //
+    // NOT the app's static `schedules:` entries: the cell did not issue them,
+    // and nothing re-arms a static on `enable` — so `{ id: "<cell>:tick" }`
+    // was gone for good after one disable/enable while the same entry under
+    // a bare id survived. A tick into a disabled cell is refused anyway, and
+    // the schedule outlives that refusal. (A static id a cell RE-ISSUED is
+    // owned by it now, and went with the owner loop above.)
     for (
       const id of new Set([
         ...timers.keys(),
         ...epochs.keys(),
-        ...staticIds,
         ...warnedCollisions,
       ])
     ) {
+      if (staticIds.has(id)) continue;
       if (id === prefix || id.startsWith(match)) forgetId(id);
     }
   }
