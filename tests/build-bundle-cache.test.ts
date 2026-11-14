@@ -14,6 +14,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
 import {
   embedVerdict,
+  frameworkIdentity,
   isBundleFresh,
   versionStamp,
 } from "../src/build/build-bundle.ts";
@@ -77,7 +78,9 @@ async function scenario(): Promise<
       v: 2,
       out: join(root, "dist", "app.js"),
       app: root, // the app this bundle was built FROM (flat layout: appDir = root)
+      framework: frameworkIdentity(cfgFor(root)), // …by THIS framework
       inputs: Object.values(inputs),
+      serverOnly: {}, // no dynamic server-only imports found
     }),
   );
   return { root, workspace, inputs };

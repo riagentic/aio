@@ -80,7 +80,25 @@ interface BundleInputs {
    *  headless path is worse still — it never rebuilds, so `embedVerdict` saw
    *  `fresh: true` and embedded the wrong app's bundle verbatim. */
   app: string;
+  /** WHICH framework built it ({@linkcode frameworkIdentity}) — the third
+   *  half of the key. The version stamp names a release, not a checkout: an
+   *  `am pin` to a local checkout carrying a client fix, a repointed
+   *  `aio` symlink, or a remote (JSR) framework whose files never enter
+   *  `inputs` all share a VERSION with the framework they replace, and every
+   *  one of them reused the OTHER framework's client code as "cached".
+   *  Absent in an older record: not fresh, never "same framework". */
+  framework: string;
   inputs: string[];
+  /** The dynamic server-only imports the bundle reaches (`serverOnlyDynamic`,
+   *  spec → importers) — the facts the standalone refusal
+   *  ({@linkcode serverOnlyRefusal}) judges. Only esbuild finds them, and a
+   *  bundle cached by a build EXEMPT from that refusal (`--android --remote`,
+   *  `--allow-server-only`) used to be reused unjudged by a `--web` build
+   *  that is not: "cached", exit 0, the buttons-do-nothing app the refusal
+   *  exists to stop. Recorded always (empty = none found), so the cached path
+   *  judges the same facts; absent in an older record: not fresh, never
+   *  "no findings". */
+  serverOnly: Record<string, string[]>;
   /** The browser workers' bundles written beside `out`, by file name. Absent
    *  in a record written before workers were bundled: none. */
   workers?: string[];
@@ -115,6 +133,8 @@ async function writeBundleInputs(
   root: string,
   out: string,
   app: string,
+  framework: string,
+  serverOnly: Record<string, string[]>,
   metafileInputs: Record<string, unknown> | undefined,
   workers: readonly string[] = [],
   watch: readonly string[] = [],
@@ -140,7 +160,9 @@ async function writeBundleInputs(
     v: BUNDLE_INPUTS_V,
     out,
     app,
+    framework,
     inputs: [...new Set(inputs)].sort(),
+    serverOnly,
     ...(workers.length ? { workers: [...workers].sort() } : {}),
     ...(absent.length ? { absent: absent.sort() } : {}),
     ...(skipped.length ? { skipped: [...skipped] } : {}),
@@ -296,15 +318,96 @@ export async function _discardBundle(root: string, out: string): Promise<void> {
   }
 }
 
-/** The recorded input set for `out` AS BUILT FROM `app`, or null when there is
- *  no usable record. Both halves of the key must match: the record describes
- *  one artifact built from one app, and anything else is a rebuild. */
+/** The framework that builds this bundle, as the input record names it: the
+ *  REAL path of its `src/` (a symlink repointed at another checkout is
+ *  another framework), or its URL when it is remote (JSR) — its files are
+ *  never local inputs, so the URL, which carries the version, is all there
+ *  is to compare. */
+export function frameworkIdentity(
+  cfg: Pick<BuildConfig, "isRemote" | "frameworkSrcDir" | "frameworkBase">,
+): string {
+  if (cfg.isRemote) return cfg.frameworkBase?.href ?? "";
+  const dir = resolve(cfg.frameworkSrcDir ?? "");
+  try {
+    return Deno.realPathSync(dir);
+  } catch {
+    return dir; // aio-ok: not there to resolve — the path is the identity
+  }
+}
+
+/** THE standalone server-only decider — the rebuild path judges what esbuild
+ *  just found, the cached path what the record says esbuild found, so the
+ *  same sources refuse the same way whichever path a build takes. Null =
+ *  ship; otherwise the lines to refuse with.
+ *
+ *  A STANDALONE Android build has no Deno runtime — the APK is a Kotlin
+ *  WebView plus this bundle, and nothing else. So the dynamic
+ *  `await import("./x.server.ts")` that is CORRECT on every other target
+ *  (a cell method runs server-side; the import stays out of the browser
+ *  graph on purpose) is, here, the half of the app that does the work
+ *  silently not shipping. the remote-desktop agent — screenrecord, `wm size`, FFI —
+ *  built to 3.2 MB, printed BUILD SUCCESSFUL, installed, launched, rendered
+ *  its control panel, and every switch on it did nothing; the Windows build
+ *  of the same entry is 180 MB because it carries a runtime. Discovering
+ *  that after installing on a phone is the expensive kind of failure, so it
+ *  is refused with the modules named — the same treatment
+ *  `crossCompileBlocker` gives combinations that cannot work.
+ *
+ *  `--remote` is exempt: that APK is a CLIENT of a server running
+ *  elsewhere, which is where its server code lives and runs. */
+export function serverOnlyRefusal(
+  cfg: Pick<BuildConfig, "doRemote" | "allowServerOnly" | "doWeb">,
+  standalone: boolean,
+  root: string,
+  serverOnly: Record<string, readonly string[]>,
+): string[] | null {
+  if (!standalone || cfg.doRemote || cfg.allowServerOnly) return null;
+  const reach = Object.entries(serverOnly);
+  if (reach.length === 0) return null;
+  const shell = cfg.doWeb ? "web app" : "APK";
+  const lines = [
+    "\u2717 this app reaches server-only code, and a standalone " +
+    `${shell} has no Deno runtime to run it:`,
+  ];
+  for (const [spec, importers] of reach) {
+    for (const imp of importers) {
+      lines.push(`         ${relative(root, imp) || imp} → ${spec}`);
+    }
+  }
+  lines.push(
+    cfg.doWeb
+      ? "       A standalone web app is a page and this bundle: no " +
+        "subprocesses, no FFI, no node:/@std. The build would SUCCEED " +
+        "and ship an app whose UI renders and whose buttons do nothing.\n" +
+        "       fix: build the `browser` target (a binary that serves " +
+        "the page and runs its server code), split the client half " +
+        "into its own UI (build.targets.web.ui), or pass " +
+        "--allow-server-only if those paths are guarded and never taken."
+      : "       An APK is a WebView and this bundle: no subprocesses, no " +
+        "FFI, no node:/@std. The build would SUCCEED and ship an app " +
+        "whose UI renders and whose buttons do nothing.\n" +
+        "       fix: build `--android --remote` (a client of a server " +
+        "that runs elsewhere), split the client half into its own entry " +
+        "(--entry=), or pass --allow-server-only if those paths are " +
+        "guarded and never taken on Android.",
+  );
+  return lines;
+}
+
+/** The recorded input set for `out` AS BUILT FROM `app` BY `framework`, or
+ *  null when there is no usable record. Every part of the key must match: the
+ *  record describes one artifact built from one app by one framework, and
+ *  anything else is a rebuild. */
 async function readBundleInputs(
   root: string,
   out: string,
   app: string,
+  framework: string,
 ): Promise<
-  Pick<BundleInputs, "inputs" | "workers" | "absent" | "skipped"> | null
+  Pick<
+    BundleInputs,
+    "inputs" | "workers" | "absent" | "skipped" | "serverOnly"
+  > | null
 > {
   try {
     const rec = JSON.parse(
@@ -312,7 +415,9 @@ async function readBundleInputs(
     ) as BundleInputs;
     if (
       rec?.v !== BUNDLE_INPUTS_V || rec.out !== out || rec.app !== app ||
-      !Array.isArray(rec.inputs)
+      rec.framework !== framework || !Array.isArray(rec.inputs) ||
+      typeof rec.serverOnly !== "object" || rec.serverOnly === null ||
+      Object.values(rec.serverOnly).some((v) => !Array.isArray(v))
     ) {
       return null;
     }
@@ -362,7 +467,12 @@ export async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
       break; // deno reads the FIRST match — so do we
     }
 
-    const rec = await readBundleInputs(root, out, appDir);
+    const rec = await readBundleInputs(
+      root,
+      out,
+      appDir,
+      frameworkIdentity(cfg),
+    );
     if (!rec || rec.inputs.length === 0) return false;
     // A worker's bundle is half of the artifact: gone from dist/, the page
     // that starts it would be embedded without it (stat throws → not fresh).
@@ -744,7 +854,22 @@ export async function runBundle(
       `cached, ${bytes(s.size)} — --force rebuilds it`,
       into,
     );
-    const rec = await readBundleInputs(root, out, appDir);
+    const rec = await readBundleInputs(
+      root,
+      out,
+      appDir,
+      frameworkIdentity(cfg),
+    );
+    // The SAME refusal the rebuild path applies, on the findings the build
+    // that produced this bundle recorded — that build may have been exempt
+    // (`--remote`, `--allow-server-only`) and this one is not.
+    const refusal = serverOnlyRefusal(
+      cfg,
+      standalone,
+      root,
+      rec?.serverOnly ?? {},
+    );
+    if (refusal) await refuseBundle(root, out, ...refusal);
     await workerWarnings(
       (rec?.inputs ?? []).map((p) => relative(root, p).replaceAll("\\", "/")),
     );
@@ -920,58 +1045,13 @@ export async function runBundle(
       }ms eval`,
     );
 
-    // A STANDALONE Android build has no Deno runtime — the APK is a Kotlin
-    // WebView plus this bundle, and nothing else. So the dynamic
-    // `await import("./x.server.ts")` that is CORRECT on every other target
-    // (a cell method runs server-side; the import stays out of the browser
-    // graph on purpose) is, here, the half of the app that does the work
-    // silently not shipping. the remote-desktop agent — screenrecord, `wm size`, FFI —
-    // built to 3.2 MB, printed BUILD SUCCESSFUL, installed, launched, rendered
-    // its control panel, and every switch on it did nothing; the Windows build
-    // of the same entry is 180 MB because it carries a runtime. Discovering
-    // that after installing on a phone is the expensive kind of failure, so it
-    // is refused here with the modules named — the same treatment
-    // `crossCompileBlocker` gives combinations that cannot work.
-    //
-    // `--remote` is exempt: that APK is a CLIENT of a server running
-    // elsewhere, which is where its server code lives and runs.
-    if (standalone && !cfg.doRemote && !cfg.allowServerOnly) {
-      const reach = Object.entries(serverOnlyDynamic);
-      if (reach.length > 0) {
-        const shell = cfg.doWeb ? "web app" : "APK";
-        console.error(
-          "\u2717 this app reaches server-only code, and a standalone " +
-            `${shell} has no Deno runtime to run it:`,
-        );
-        for (const [spec, importers] of reach) {
-          for (const imp of importers) {
-            console.error(`         ${relative(root, imp) || imp} → ${spec}`);
-          }
-        }
-        if (cfg.doWeb) {
-          console.error(
-            "       A standalone web app is a page and this bundle: no " +
-              "subprocesses, no FFI, no node:/@std. The build would SUCCEED " +
-              "and ship an app whose UI renders and whose buttons do nothing.\n" +
-              "       fix: build the `browser` target (a binary that serves " +
-              "the page and runs its server code), split the client half " +
-              "into its own UI (build.targets.web.ui), or pass " +
-              "--allow-server-only if those paths are guarded and never taken.",
-          );
-          await refuseBundle(root, out);
-        }
-        console.error(
-          "       An APK is a WebView and this bundle: no subprocesses, no " +
-            "FFI, no node:/@std. The build would SUCCEED and ship an app " +
-            "whose UI renders and whose buttons do nothing.\n" +
-            "       fix: build `--android --remote` (a client of a server " +
-            "that runs elsewhere), split the client half into its own entry " +
-            "(--entry=), or pass --allow-server-only if those paths are " +
-            "guarded and never taken on Android.",
-        );
-        await refuseBundle(root, out);
-      }
-    }
+    // The standalone server-only refusal — one decider, shared with the
+    // cached path above, and the findings recorded for it below.
+    const serverOnly = Object.fromEntries(
+      Object.entries(serverOnlyDynamic).map(([k, v]) => [k, [...v].sort()]),
+    );
+    const unrunnable = serverOnlyRefusal(cfg, standalone, root, serverOnly);
+    if (unrunnable) await refuseBundle(root, out, ...unrunnable);
 
     // The browser workers the graph starts, beside the bundle that names
     // them — every target stages `isWorkerBundle` files from here.
@@ -990,6 +1070,8 @@ export async function runBundle(
       root,
       out,
       appDir,
+      frameworkIdentity(cfg),
+      serverOnly,
       metaInputs,
       bundle.workers.map((w) => w.name),
       bundle.workersSkipped.flatMap((w) => w.watch),

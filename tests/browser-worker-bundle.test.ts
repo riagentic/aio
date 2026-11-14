@@ -30,7 +30,11 @@ import {
 } from "../src/build/dist-staging.ts";
 import { _writeLocalAssets } from "../src/build/build-android.ts";
 import { buildWeb, webArtifactName } from "../src/build/build-web.ts";
-import { isBundleFresh, versionStamp } from "../src/build/build-bundle.ts";
+import {
+  frameworkIdentity,
+  isBundleFresh,
+  versionStamp,
+} from "../src/build/build-bundle.ts";
 import type { BuildConfig } from "../src/build/build-config.ts";
 import {
   isWorkerBundle,
@@ -536,7 +540,9 @@ Deno.test("staleness: a worker's bundle missing from dist/ makes the bundle not 
         v: 2,
         out,
         app: root,
+        framework: frameworkIdentity({} as BuildConfig),
         inputs: [input],
+        serverOnly: {},
         workers: [worker],
       }),
     );
@@ -553,7 +559,9 @@ Deno.test("staleness: a worker's bundle missing from dist/ makes the bundle not 
         v: 2,
         out,
         app: root,
+        framework: frameworkIdentity({} as BuildConfig),
         inputs: [input],
+        serverOnly: {},
         workers: [worker],
         absent: [lacked],
       }),

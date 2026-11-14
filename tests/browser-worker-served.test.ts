@@ -21,6 +21,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join, resolve } from "@std/path";
 import * as esbuild from "esbuild";
 import {
+  frameworkIdentity,
   isBundleFresh,
   servedWorkerNotes,
   versionStamp,
@@ -476,10 +477,18 @@ Deno.test("staleness: a bundle another aio version built is not fresh, whatever 
     const input = join(root, "App.tsx");
     await Deno.writeTextFile(input, "");
     await Deno.utime(input, 1, 1); // older than the bundle
-    // The record 1.0.19 wrote: the same `v`, no `workers`, no `absent`.
+    // The record 1.0.19 wrote: the same `v`, no `workers`, no `absent` —
+    // with the key fields this version requires, so only the stamp differs.
     await Deno.writeTextFile(
       join(root, ".aio/bundle-inputs.json"),
-      JSON.stringify({ v: 2, out, app: root, inputs: [input] }),
+      JSON.stringify({
+        v: 2,
+        out,
+        app: root,
+        framework: frameworkIdentity({} as BuildConfig),
+        inputs: [input],
+        serverOnly: {},
+      }),
     );
     const cfg = { out, root, appDir: root, doForce: false } as BuildConfig;
     const stamp = (version: string) =>
