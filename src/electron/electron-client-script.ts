@@ -541,7 +541,9 @@ function discoverApps(timeoutMs, cb) {
     const text = msg.toString('utf8');
     if (!text.startsWith('AIO1 ')) return;
     let ad; try { ad = JSON.parse(text.slice(5)); } catch { return; }
-    if (typeof ad.name !== 'string' || typeof ad.port !== 'number') return;
+    // 'AIO1 null' (or any non-object) from any host on the segment threw in
+    // this listener — an uncaught exception in the Electron main process.
+    if (!ad || typeof ad !== 'object' || typeof ad.name !== 'string' || typeof ad.port !== 'number') return;
     const host = rinfo.address;
     // This machine answers each target from the address of the interface the
     // probe left by: one app, several hosts. They are one host.
