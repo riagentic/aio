@@ -74,8 +74,8 @@ export const MAX_LCS_CELLS = 4_000_000;
  *  Characters when there are none: a one-line field (a title, a name) has no
  *  line structure to exploit, and character granularity is what makes
  *  "Frist Post" → "First Post" merge with someone else's appended "!". */
-export function tokenize(s: string): string[] {
-  if (s.includes("\n")) {
+export function tokenize(s: string, lines = s.includes("\n")): string[] {
+  if (lines) {
     // Keep the newline ON its line, so joining is exact and a trailing newline
     // is preserved rather than invented.
     const out = s.split("\n");
@@ -213,9 +213,17 @@ export function mergeText3(
   if (base === local) return { value: remote, conflict: false };
   if (base === remote) return { value: local, conflict: false };
 
-  const bT = tokenize(base);
-  const lT = tokenize(local);
-  const rT = tokenize(remote);
+  // ONE granularity for all three: lines when any of them has a line break.
+  // Chosen per string, a one-line base and remote went by characters while a
+  // local that pressed Enter went by lines — no token matched, the local side
+  // became one hunk over the whole base, and the remote's character inserted
+  // at its end sat on that hunk's boundary, so both applied and spliced
+  // ("Buy milk" + "\nand eggs" | "!" → "Buy milk\nand eggs!", no conflict).
+  const lines = base.includes("\n") || local.includes("\n") ||
+    remote.includes("\n");
+  const bT = tokenize(base, lines);
+  const lT = tokenize(local, lines);
+  const rT = tokenize(remote, lines);
   const localWins = compareHLC(localHlc, remoteHlc) >= 0;
   // Two ceilings, because they measure different things. `MAX_TOKENS` bounds
   // each SIDE; the work is the PRODUCT, and a 4000-character single-line field

@@ -267,3 +267,26 @@ Deno.test("text: PROPERTY — a merge with an unchanged side is that side, exact
     assertEquals(mergeText3(base, other, A, base, B).value, other);
   }
 });
+
+// A one-line base where one side pressed Enter and the other edited the line:
+// tokenized per string (lines for one side, characters for the others) the
+// two edits met on a hunk boundary and were spliced — "Buy milk\nand eggs!",
+// reported as no conflict. One granularity for all three makes them overlap.
+Deno.test("text: one side adds a line break, the other edits the same line — never spliced", () => {
+  for (
+    const [base, l, r] of [
+      ["Buy milk", "Buy milk\nand eggs", "Buy milk!"],
+      ["Title", "Title\n", "Title v2"],
+    ] as const
+  ) {
+    for (const [x, hx, y, hy] of [[l, A, r, B], [r, B, l, A]] as const) {
+      const m = mergeText3(base, x, hx, y, hy);
+      assert(
+        m.conflict || m.value === "Buy milk!\nand eggs" ||
+          m.value === "Title v2\n",
+        `${JSON.stringify(m.value)} with conflict=${m.conflict}`,
+      );
+      assert(m.value === l || m.value === r || !m.conflict, m.value);
+    }
+  }
+});
